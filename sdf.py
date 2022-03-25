@@ -6,7 +6,10 @@ from cliff.app import App
 from cliff import help, complete
 from cliff.commandmanager import CommandManager
 from cliff.command import Command
+
 from commands.menu import Menu
+from commands.repo import Repo
+
 
 import logging
 # logging.basicConfig( level=logging.WARNING, format='%(name)s:%(module)s (%(lineno)d): %(levelname)-5s: %(message)s' )
@@ -66,7 +69,8 @@ class MultiApp(App):
     
 
 def main(argv=sys.argv[1:]):
-    app = MultiApp( description="S3DF Command Line Tools", version=1.0, command_managers=[ Menu, ])
+    app = MultiApp( description="S3DF Command Line Tools", version=1.0,
+            command_managers=[ Repo, Menu, ])
     return app.run(argv)
 
 
