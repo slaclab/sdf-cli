@@ -2,3 +2,12 @@ __pycache__
 bin/
 lib/
 pyvenv.cfg
+compiler_compat/
+conda-meta/
+condabin/
+etc/
+include/
+pkgs/
+share/
+shell/
+ssl/
