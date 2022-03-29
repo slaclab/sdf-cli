@@ -231,6 +231,7 @@ class PushUsers(Command,GraphQlClient):
         stats = {
             'added': 0,
             'modified': 0,
+            'nochange': 0,
         }
             
         client.set_credentials( 'SIMPLE', parsed_args.binddn, get_password(parsed_args.bindpw_file) )
@@ -248,8 +249,30 @@ class PushUsers(Command,GraphQlClient):
                 e = dict2LdapEntry( db_user )
                 uid = db_user['uid']
                 if uid in ldap_users:
-                    self.LOG.info(f"Modify ldap? {uid} -> {e}") 
-                    stats['modified'] += 1
+                    same = []
+                    for k,v in e.items():
+                        # can't match on object class, so skip it
+                        if k in ('objectClass',):
+                            continue
+                        if not k in ldap_users[uid]:
+                            same.append(False)
+                            self.LOG.warning(f"field {k} is missing from ldap {ldap_users[uid]}")
+                        elif ldap_users[uid][k] == v:
+                            same.append(True)
+                        else:
+                            same.append(False)
+                            self.LOG.warning(f"not same {k} {v}:\n iris {e}\n ldap {ldap_users[uid]}")
+                    #self.LOG.info(f"same? {same}")
+                    if not False in same:
+                        self.LOG.debug(f"entries identical {uid} -> iris {e} / ldap {ldap_users[uid]}") 
+                        stats['nochange'] += 1
+                    else:
+                        self.LOG.info(f"entries need updating {uid} -> \n iris {e}\n ldap {ldap_users[uid]}") 
+                        # just push the iris entry to ldap
+                        for k,v in e.items():
+                            ldap_users[uid][k] = v
+                        ldap_users[uid].modify()
+                        stats['modified'] += 1
                 else:
                     self.LOG.info(f"Add new {e}")
                     conn.add(e)
