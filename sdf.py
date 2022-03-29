@@ -10,6 +10,7 @@ from cliff.help import HelpAction, HelpCommand
 from commands.menu import Menu
 from commands.repo import Repo
 from commands.user import User
+from commands.ldap import Ldap
 
 import inspect
 
@@ -169,14 +170,15 @@ class MultiApp(App):
         action(self.parser, self.options, None, None)
 
     def run(self, argv):
-        cm = argv.pop(0)
-        self.command_manager = self.command_managers[cm]
+        if not 'help' in argv: # or not '-h' in argv:
+          cm = argv.pop(0)
+          self.command_manager = self.command_managers[cm]
         #self.LOG.warning(f"RUN command_manager {cm} {type(self.command_manager).__name__} -> {argv}")
         return super( MultiApp, self ).run( argv )
 
 def main(argv=sys.argv[1:]):
     app = MultiApp( description="S3DF Command Line Tools", version=1.0,
-         command_managers=[ User, Repo, Menu, ])
+         command_managers=[ User, Repo, Ldap, Menu, ])
     return app.run(argv)
 
 
