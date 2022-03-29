@@ -9,6 +9,7 @@ from cliff.help import HelpAction, HelpCommand
 
 from commands.menu import Menu
 from commands.repo import Repo
+from commands.user import User
 
 import inspect
 
@@ -17,6 +18,7 @@ import autopage.argparse
 
 LOG = logging.getLogger()
 
+LOG.setLevel(logging.DEBUG)
 
 class ManagerCommand(Command):
 
@@ -72,9 +74,9 @@ class ManagerCommand(Command):
     def take_action(self, parsed_args):
         # note that the first verb help in parsed_args has already been taken out
 
-        # self.LOG.error(f"IN HERE {parsed_args}")
         # if we have 'help manager command', then we just need to use the correct manager
         if parsed_args.cmd and len(parsed_args.cmd) == 2:
+
             # strip the ManagerCommand
             try:
                 n = parsed_args.cmd.pop(0)
@@ -114,8 +116,6 @@ class ManagerCommand(Command):
         return 0
 
 
-
-from commands.repo import SyncToLDAP
 
 class MultiApp(App):
 
@@ -168,12 +168,15 @@ class MultiApp(App):
         action = HelpAction(None, None, default=self)
         action(self.parser, self.options, None, None)
 
-
-
+    def run(self, argv):
+        cm = argv.pop(0)
+        self.command_manager = self.command_managers[cm]
+        #self.LOG.warning(f"RUN command_manager {cm} {type(self.command_manager).__name__} -> {argv}")
+        return super( MultiApp, self ).run( argv )
 
 def main(argv=sys.argv[1:]):
     app = MultiApp( description="S3DF Command Line Tools", version=1.0,
-         command_managers=[ Repo, Menu, ])
+         command_managers=[ User, Repo, Menu, ])
     return app.run(argv)
 
 
