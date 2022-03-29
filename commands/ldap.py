@@ -36,7 +36,7 @@ def get( conn, dn="ou=Group,dc=reg,o=slac", filter="(objectclass=*)", map={'fiel
             for k,v in found.items():
                 if v == False:
                     this[k] = False
-            logging.warning(f"W: uid {d['uid']} missing {this.keys()}")
+            logging.warning(f"W: {d} missing {this.keys()}")
         yield d, r
       except Exception as e:
         logging.warn(f"E: {e} for {r}")
@@ -96,6 +96,23 @@ def get_unix_users( server, basedn ):
                             del ldif[k]
                     logging.warning(f"parsing {ldif}")
     
+
+
+def get_unix_groups( server, basedn ):
+    client = bonsai.LDAPClient( server )
+    logging.error(f"connecting to {client}")
+    client.set_cert_policy('never')
+    with client.connect() as conn:
+        for d,ldif in get( conn, filter="(objectclass=posixGroup)", dn=basedn, fail_okay=[ 'users', ], map={
+          'name': { 'attr': 'cn' },
+          'gidNumber': { 'attr': 'gidNumber' },
+          'users': { 'attr': 'memberUid', 'array': True },
+
+        }):
+            if 'name' in d:
+                yield d
+            else:
+                logging.warning(f"parsing {ldif}")
 
 
 
@@ -281,6 +298,66 @@ class PushUsers(Command,GraphQlClient):
         self.LOG.info(f"STATS {stats}")
     
 
+
+class PullGroups(Command,GraphQlClient):
+    "get list of groups from ldap into iris"
+    LOG = logging.getLogger(__name__)
+
+    def get_parser(self, prog_name):
+        parser = super(PullGroups, self).get_parser(prog_name)
+        parser.add_argument('--bindpw_file',)
+        return parser
+
+    def take_action(self, parsed_args):
+
+
+#        for user in get_ad_users( 'ldaps://dc01.win.slac.stanford.edu:636', 'OU=Users,OU=SCS,DC=win,DC=slac,DC=stanford,DC=edu', 'CN=osmaint,OU=Service-Accounts,OU=SCS,DC=win,DC=slac,DC=stanford,DC=edu', password=get_password(parsed_args.bindpw_file) ):
+#             print( f"{user}" )
+
+        self.connectGraphQl() 
+        stats = {
+            'db_entries': 0,
+            'ldap_entries': 0,
+            'added': 0,
+            'changed': 0,
+        }
+
+        # prefetch all users in db, recast as dict for lookup purposes
+        q = """query { repos { id name state gidNumber users principal leaders } }"""
+        res = self.query(q)
+        db_repos = {}
+        for i in res['repos']:
+            u = i['name'] # key by uid or uidNumber?
+            db_repos[u] = i
+        stats['db_entries'] = len(db_repos.keys())
+
+        for ldap_group in get_unix_groups( 'ldaps://ldap601.slac.stanford.edu:636', 'dc=slac,dc=stanford,dc=edu' ):
+            stats['ldap_entries'] += 1
+            #self.LOG.info(f"{ldap_group}")
+            name = ldap_group['name']
+            if not name in db_repos:
+                #self.LOG.info( f"Add repo {name}: {ldap_group}" )
+                create = """
+                  mutation {
+                    createRepo( data: {
+                      state: "Active",
+                      name: "%s",
+                      gidNumber: %s,
+                      users: %s    
+                    }){
+                      repo {
+                   	   id description name principal leaders users
+                      }
+                    }
+                  }
+                """ % ( name, ldap_group['gidNumber'], str(ldap_group['users']).replace( "'", '"') ) 
+                #self.LOG.info(f" storing {create}")   
+                self.query( create )
+                stats['added'] += 1
+            else:
+                self.LOG.warning( f"modify repo {name}: {ldap_group} -> {db_repos[name]}" )
+
+
 class Ldap(CommandManager):
     "Manage LDAP information"
 
@@ -288,7 +365,7 @@ class Ldap(CommandManager):
 
     def __init__(self, namespace, convert_underscores=True):
         super(Ldap,self).__init__(namespace, convert_underscores=convert_underscores)
-        for cmd in [ PullUsers, PushUsers ]:
+        for cmd in [ PullUsers, PushUsers, PullGroups ]:
             self.add_command( cmd.__name__.lower(), cmd )
 
 

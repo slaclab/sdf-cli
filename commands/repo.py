@@ -11,20 +11,19 @@ class List(GraphQlLister):
 
     def take_action(self, parsed_args):
 
-
         # TODO: add filtering
 
         res = self.query("""
-        { repos { name gid users } }
+        { repos { name state gidNumber users principal leaders users} }
         """)
 
         # filter example
         # { repos(filters:{ name: "bd" } ) { name gid users }}
         
         return (
-            ('Name', 'GID', 'Users'),
+            ('Name', 'State', 'GIDNumber', 'Principal', 'Leaders', 'Users'),
             # ((r['name'], r['gid'], ','.join(r['users'])) for r in res['repos'])
-            ((r['name'], r['gid'], ','.join(r['users'][0:10])) for r in res['repos'])
+            ((r['name'], r['state'], r['gidNumber'], r['principal'], ','.join(r['leaders']), ','.join(r['users'][:10]) ) for r in res['repos'] )
         )
 
 
@@ -39,21 +38,6 @@ class AddUser(GraphQlLister):
     "add a User to a Repo (you must have Principal or Leader role on the Repo)"
 
 
-class SyncToLDAP(GraphQlLister):
-    "produce LDIFs of Repo information suitable for LDAP groups"
-    def get_parser(self, prog_name):
-        parser = super(SyncToLDAP, self).get_parser(prog_name)
-        parser.add_argument('dn', default='ou=Group,dc=reg,o=slac')
-        return parser
-
-    def take_action(self, parsed_args):
-        self.LOG.warn(f"{parsed_args}")
-        res = self.query("""
-        { repos { name gid users } }
-        """)
-
-
-
 
 class Repo(CommandManager):
     "Manage Repo's"
@@ -62,7 +46,7 @@ class Repo(CommandManager):
 
     def __init__(self, namespace, convert_underscores=True):
         super(Repo,self).__init__(namespace, convert_underscores=convert_underscores)
-        for cmd in [ List, SyncToLDAP ]:
+        for cmd in [ List, ]:
             self.add_command( cmd.__name__.lower(), cmd )
 
 
