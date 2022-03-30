@@ -34,9 +34,10 @@ def get( conn, dn="ou=Group,dc=reg,o=slac", filter="(objectclass=*)", map={'fiel
         if False in [ v for k,v in found.items() ]:
             this = {}
             for k,v in found.items():
-                if v == False:
+                if v == False and not k in fail_okay:
                     this[k] = False
-            logging.warning(f"W: {d} missing {this.keys()}")
+            if False in this.keys():
+                logging.warning(f"W: {d} missing {this.keys()}")
         yield d, r
       except Exception as e:
         logging.warn(f"E: {e} for {r}")
@@ -109,7 +110,7 @@ def get_unix_groups( server, basedn ):
           'users': { 'attr': 'memberUid', 'array': True },
 
         }):
-            if 'name' in d:
+            if 'name' in d and not ' ' in str(d['name']):
                 yield d
             else:
                 logging.warning(f"parsing {ldif}")
@@ -305,14 +306,10 @@ class PullGroups(Command,GraphQlClient):
 
     def get_parser(self, prog_name):
         parser = super(PullGroups, self).get_parser(prog_name)
-        parser.add_argument('--bindpw_file',)
+        parser.add_argument('--source', choices=['unix-admin','pcds'])
         return parser
 
     def take_action(self, parsed_args):
-
-
-#        for user in get_ad_users( 'ldaps://dc01.win.slac.stanford.edu:636', 'OU=Users,OU=SCS,DC=win,DC=slac,DC=stanford,DC=edu', 'CN=osmaint,OU=Service-Accounts,OU=SCS,DC=win,DC=slac,DC=stanford,DC=edu', password=get_password(parsed_args.bindpw_file) ):
-#             print( f"{user}" )
 
         self.connectGraphQl() 
         stats = {
@@ -320,6 +317,7 @@ class PullGroups(Command,GraphQlClient):
             'ldap_entries': 0,
             'added': 0,
             'changed': 0,
+            'nochange': 0,
         }
 
         # prefetch all users in db, recast as dict for lookup purposes
@@ -331,7 +329,10 @@ class PullGroups(Command,GraphQlClient):
             db_repos[u] = i
         stats['db_entries'] = len(db_repos.keys())
 
-        for ldap_group in get_unix_groups( 'ldaps://ldap601.slac.stanford.edu:636', 'dc=slac,dc=stanford,dc=edu' ):
+        server = 'ldaps://ldap601.slac.stanford.edu:636' if parsed_args.source == 'unix-admin' else 'ldap://psldap1'
+        basedn = 'dc=slac,dc=stanford,dc=edu' if parsed_args.source == 'unix-admin' else 'ou=Group,dc=reg,o=slac'
+
+        for ldap_group in get_unix_groups( server, basedn ):
             stats['ldap_entries'] += 1
             #self.LOG.info(f"{ldap_group}")
             name = ldap_group['name']
@@ -351,11 +352,45 @@ class PullGroups(Command,GraphQlClient):
                     }
                   }
                 """ % ( name, ldap_group['gidNumber'], str(ldap_group['users']).replace( "'", '"') ) 
-                #self.LOG.info(f" storing {create}")   
+                self.LOG.info(f"Adding {create}")   
                 self.query( create )
                 stats['added'] += 1
             else:
-                self.LOG.warning( f"modify repo {name}: {ldap_group} -> {db_repos[name]}" )
+                # diff
+                #self.LOG.warning( f"modify repo {name}:\n ldap {ldap_group}\n iris {db_repos[name]}" )
+                diff = []
+                for k,v in ldap_group.items():
+                    if k == 'users':
+                        v = sorted(v)
+                    if db_repos[name][k] == v:
+                        diff.append(False)
+                    else:
+                        db_repos[name][k] = v
+                        diff.append(True)
+
+                if not True in diff:
+                    stats['nochange'] += 1
+                else:
+                    modify = """
+                      mutation {
+                        updateRepo( data: {
+                          id: "%s",
+                          state: "Active",
+                          name: "%s",
+                          gidNumber: %s,
+                          users: %s    
+                        }){
+                          repo {
+                       	   id description name principal leaders users
+                          }
+                        }
+                      }
+                    """ % ( db_repos[name]['id'], name, db_repos[name]['gidNumber'], str(db_repos[name]['users']).replace( "'", '"') ) 
+                    #self.LOG.warning( f" -> {db_repos[name]} -> {modify}" )
+                    self.query( modify )
+                    stats['changed'] += 1
+
+        self.LOG.info(f"STATS {stats}")
 
 
 class Ldap(CommandManager):
