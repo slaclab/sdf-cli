@@ -3,6 +3,7 @@ from cliff.commandmanager import CommandManager
 
 from os.path import exists
 import bonsai
+import re
 
 from .utils.graphql import GraphQlClient
 
@@ -124,7 +125,7 @@ class PullUsers(Command,GraphQlClient):
     def get_parser(self, prog_name):
         parser = super(PullUsers, self).get_parser(prog_name)
         parser.add_argument('--bindpw_file',)
-        parser.add_argument('--dry-run', action='store_true', help='do not commit any changes', default=False)
+        parser.add_argument('--dry_run', action='store_true', help='do not commit any changes', default=False)
         return parser
 
     def take_action(self, parsed_args):
@@ -309,7 +310,8 @@ class PullGroups(Command,GraphQlClient):
 
     def get_parser(self, prog_name):
         parser = super(PullGroups, self).get_parser(prog_name)
-        parser.add_argument('--source', choices=['unix-admin','pcds'])
+        parser.add_argument('--source', choices=['unix-admin','pcds'], required=True )
+        parser.add_argument('--dry_run', action='store_true', help='do not commit any changes', default=False)
         return parser
 
     def take_action(self, parsed_args):
@@ -324,7 +326,7 @@ class PullGroups(Command,GraphQlClient):
         }
 
         # prefetch all users in db, recast as dict for lookup purposes
-        q = """query { repos { id name state gidNumber users principal leaders } }"""
+        q = """query { repos( filter: {} ) { Id name state gidNumber users principal leaders } }"""
         res = self.query(q)
         db_repos = {}
         for i in res['repos']:
@@ -341,22 +343,26 @@ class PullGroups(Command,GraphQlClient):
             name = ldap_group['name']
             if not name in db_repos:
                 #self.LOG.info( f"Add repo {name}: {ldap_group}" )
+                users = str(ldap_group['users']).replace( "'", '"')
+                if users == '':
+                    users = '[]'
                 create = """
                   mutation {
-                    createRepo( data: {
+                    repoCreate( data: {
                       state: "Active",
                       name: "%s",
                       gidNumber: %s,
-                      users: %s    
+                      users: %s,
+                      leaders: [],
                     }){
-                      repo {
-                   	   id description name principal leaders users
-                      }
+                   	   Id description name principal leaders users
                     }
                   }
-                """ % ( name, ldap_group['gidNumber'], str(ldap_group['users']).replace( "'", '"') ) 
-                self.LOG.info(f"Adding {create}")   
-                self.query( create )
+                """ % ( name, ldap_group['gidNumber'], users )
+                concat = re.sub( r'\s+', ' ', create.replace('\n','') )
+                self.LOG.info(f"Adding {concat}")   
+                if not parsed_args.dry_run:
+                    self.query( create )
                 stats['added'] += 1
             else:
                 # diff
@@ -376,21 +382,20 @@ class PullGroups(Command,GraphQlClient):
                 else:
                     modify = """
                       mutation {
-                        updateRepo( data: {
+                        repoUpdate( data: {
                           id: "%s",
                           state: "Active",
                           name: "%s",
                           gidNumber: %s,
                           users: %s    
                         }){
-                          repo {
-                       	   id description name principal leaders users
-                          }
+                       	   Id description name principal leaders users
                         }
                       }
                     """ % ( db_repos[name]['id'], name, db_repos[name]['gidNumber'], str(db_repos[name]['users']).replace( "'", '"') ) 
                     #self.LOG.warning( f" -> {db_repos[name]} -> {modify}" )
-                    self.query( modify )
+                    if not parsed_args.dry_run:
+                        self.query( modify )
                     stats['changed'] += 1
 
         self.LOG.info(f"STATS {stats}")
