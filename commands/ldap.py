@@ -84,12 +84,12 @@ def get_unix_users( server, basedn ):
         client.set_cert_policy('never')
         with client.connect() as conn:
             for d,ldif in get( conn, filter="(objectclass=posixAccount)", dn=basedn, fail_okay=[ 'eppns', ], map={
-              'uid': { 'attr': 'uid' },
+              'username': { 'attr': 'uid' },
               'uidNumber': { 'attr': 'uidNumber' },
               'eppns': { 'attr': 'mail', 'array': True },
 
             }):
-                if 'uid' in d:
+                if 'username' in d:
                     yield d
                 else:
                     for k in ('thumbnailPhoto', 'jpegPhoto', 'userCertificate'):
@@ -124,6 +124,7 @@ class PullUsers(Command,GraphQlClient):
     def get_parser(self, prog_name):
         parser = super(PullUsers, self).get_parser(prog_name)
         parser.add_argument('--bindpw_file',)
+        parser.add_argument('--dry-run', action='store_true', help='do not commit any changes', default=False)
         return parser
 
     def take_action(self, parsed_args):
@@ -138,47 +139,49 @@ class PullUsers(Command,GraphQlClient):
             'ldap_entries': 0,
             'added': 0,
             'changed': 0,
+            'nochange': 0,
         }
 
         # prefetch all users in db, recast as dict for lookup purposes
-        q = """query { users { id uid uidNumber eppns } }"""
+        self.LOG.info("Fetching existing users...")
+        q = """query { users( filter: {} ) { Id username uidNumber eppns } }"""
         res = self.query(q)
         db_users = {}
         for i in res['users']:
-            u = i['uid'] # key by uid or uidNumber?
+            u = i['username'] # key by uid or uidNumber?
             db_users[u] = i
         stats['db_entries'] = len(db_users.keys())
 
         #for k,v in db_users.items():
         #     self.LOG.warning(f" {k} = {v}")
 
+        self.LOG.info("Fetching ldap users...")
         for ldap_user in get_unix_users( 'ldaps://ldap601.slac.stanford.edu:636', 'dc=slac,dc=stanford,dc=edu' ):
             stats['ldap_entries'] += 1
 
             # 1) new entry, create in db
-            if not ldap_user['uid'] in db_users:
+            if not ldap_user['username'] in db_users:
                 create = """
                 mutation{
-                  createUser( data: {
-                    uid: "%s",
+                  userCreate( data: {
+                    username: "%s",
                     uidNumber: %s,
                     eppns: [%s]
                   }) {
-                    user {
-                      uid eppns uidNumber
-                    }
+                    username eppns uidNumber
                   }
                 }
-                """ % (user['uid'], user['uidNumber'], ','.join([ '"'+e+'"' for e in user['eppns'] ]) ) 
-                #self.LOG.warning( f"creating {create}" )
-                res = self.query( create )
+                """ % (ldap_user['username'], ldap_user['uidNumber'], ','.join([ '"'+e+'"' for e in ldap_user['eppns'] ]) ) 
+                self.LOG.info( f"  creating {create}" )
+                if not parsed_args.dry_run:
+                    res = self.query( create )
                 stats['added'] += 1
 
             # 2) check for changes and push if needed
             else:
 
-                db_user = db_users[ldap_user['uid']]
-                self.LOG.info(f"comparing {ldap_user} to {db_user}")
+                db_user = db_users[ldap_user['username']]
+                self.LOG.debug(f"  comparing {ldap_user} to {db_user}")
                 merged = db_user | ldap_user
                 # merge eppns
                 # assume local db always has more eppns than remote ldap
@@ -188,35 +191,36 @@ class PullUsers(Command,GraphQlClient):
                 
                 # commit back to db if changed
                 if not merged == db_user:
-                    self.LOG.info(f"changed: {merged} from {db_user}")
+                    self.LOG.info(f"  changed: {merged} from {db_user}")
                     update = """
                     mutation{
                       updateUser( data: {
-                        id: "%s",
-                        uid: "%s",
+                        Id: "%s",
+                        username: "%s",
                         uidNumber: %s,
                         eppns: [%s]
                       }) {
-                        user {
-                          uid eppns uidNumber
-                        }
+                          username eppns uidNumber
                       }
                     }
-                    """ % (merged['id'], merged['uid'], merged['uidNumber'], ','.join([ '"'+e+'"' for e in merged['eppns'] ]) )
-                    #self.LOG.error(update)
-                    self.query(update)
+                    """ % (merged['id'], merged['username'], merged['uidNumber'], ','.join([ '"'+e+'"' for e in merged['eppns'] ]) )
+                    if not parsed_args.dry_run:
+                      self.query(update)
                     stats['changed'] += 1
+
+                else:
+                    stats['nochange'] += 1
                     
         self.LOG.warning(f"STATS: {stats}")
 
 
 
 def dict2LdapEntry( d, basedn="ou=People,dc=sdf,dc=slac,dc=stanford,dc=edu,o=s3df" ):
-    entry = bonsai.LDAPEntry( f"cn={d['uid']},{basedn}" )
+    entry = bonsai.LDAPEntry( f"cn={d['username']},{basedn}" )
     entry['objectClass'] = [ 'top', 'posixAccount', 'iNetOrgPerson' ]
-    entry['cn'] = d['uid']
-    entry['sn'] = d['uid']
-    entry['uid'] = d['uid']
+    entry['cn'] = d['username']
+    entry['sn'] = d['usermame']
+    entry['uid'] = d['username']
     entry['uidNumber'] = d['uidNumber']
     entry['gidNumber'] = d['uidNumber']
     entry['homeDirectory'] = '/sdf/home/' + d['uid'][0:1] + '/' + d['uid']
@@ -242,16 +246,15 @@ class PushUsers(Command,GraphQlClient):
         
         # get all the users
         self.connectGraphQl()
-        q = "{ users { uid uidNumber eppns } }"
+        q = "{ users( filter: {} ) { username uidNumber eppns } }"
         res = self.query( q )
-        # self.LOG.info(f"{res['users']}")
-
         stats = {
             'added': 0,
             'modified': 0,
             'nochange': 0,
         }
             
+        # recast all the users in the db into ldifs to upload to the ldap server
         client.set_credentials( 'SIMPLE', parsed_args.binddn, get_password(parsed_args.bindpw_file) )
         with client.connect() as conn:
 
@@ -265,7 +268,7 @@ class PushUsers(Command,GraphQlClient):
             # make sure all entries in our db is in ldap
             for db_user in res['users']:
                 e = dict2LdapEntry( db_user )
-                uid = db_user['uid']
+                uid = db_user['username']
                 if uid in ldap_users:
                     same = []
                     for k,v in e.items():
