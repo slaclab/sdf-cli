@@ -23,6 +23,11 @@ class GraphQlClient:
     def connectGraphQl(self, graphql_uri=SDF_IRIS_URI, get_schema=False ):
         self.transport = AIOHTTPTransport(url=graphql_uri)
         self.client = Client(transport=self.transport, fetch_schema_from_transport=get_schema)
+        # lets reduce the logging from gql
+        for name in logging.root.manager.loggerDict:
+            if name.startswith('gql'):
+                logger = logging.getLogger(name) 
+                logger.setLevel(logging.WARNING)
 
     def query(self, query, var={} ):
         return self.client.execute( gql(query), variable_values=var )
@@ -35,5 +40,6 @@ class GraphQlLister(Lister, GraphQlClient):
     def __init__(self, app, app_args, cmd_name=None):
         super(GraphQlLister, self).__init__(app, app_args, cmd_name=cmd_name)
         self.connectGraphQl()
+        
 
 

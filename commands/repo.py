@@ -5,6 +5,11 @@ import logging
 
 from .utils.graphql import GraphQlLister
 
+def comma_separate( array, limit=10 ):
+    postfix = ''
+    if len(array) > limit:
+        postfix = ',...'
+    return ','.join( array[:limit] ) + postfix
 
 class List(GraphQlLister):
     "show list of Repo's available"
@@ -14,16 +19,16 @@ class List(GraphQlLister):
         # TODO: add filtering
 
         res = self.query("""
-        { repos { name state gidNumber users principal leaders users} }
+        { repos( filter: {} ) { facility name state accessGroups users principal leaders users} }
         """)
 
         # filter example
         # { repos(filters:{ name: "bd" } ) { name gid users }}
         
         return (
-            ('Name', 'State', 'GIDNumber', 'Principal', 'Leaders', 'Users'),
+            ('Facility', 'Name', 'State', 'Access Groups', 'Principal', 'Leaders', 'Users'),
             # ((r['name'], r['gid'], ','.join(r['users'])) for r in res['repos'])
-            ((r['name'], r['state'], r['gidNumber'], r['principal'], ','.join(r['leaders']), ','.join(r['users'][:10]) ) for r in res['repos'] )
+            (( r['facility'], r['name'], r['state'], comma_separate(r['accessGroups']), r['principal'], comma_separate(r['leaders']), comma_separate(r['users']) ) for r in res['repos'] )
         )
 
 

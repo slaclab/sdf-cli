@@ -383,7 +383,6 @@ class PullGroups(Command,GraphQlClient):
         if 'facilities' in res:
             for i in res['facilities']:
                 u = i['name']
-                self.LOG.warning(f"FOUND {u}")
                 db_facilities[u] = i
             stats['db_facility_entries'] = len(db_facilities.keys())
 
@@ -454,7 +453,7 @@ class PullGroups(Command,GraphQlClient):
 
                 if not str(db_accessGroups[gid_number]['name']) == str(entry['name']):
                     update = """mutation { accessGroupUpdate( data: { Id: "%s", name: "%s" } ) { Id gidNumber name } } """ % (db_accessGroups[gid_number]['Id'], entry['name'])
-                    self.LOG.info("Updating {update}")
+                    self.LOG.info(f"Updating {update}")
                     if not parsed_args.dry_run:
                         self.query( update )
                     #raise NotImplementedError(f"need to update access group {gid_number} name from {db_accessGroups[gid_number]['name']} to {entry['name']}: {update}") 
