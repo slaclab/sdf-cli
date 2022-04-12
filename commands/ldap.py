@@ -102,7 +102,7 @@ def get_unix_users( server, basedn ):
 
 def get_unix_groups( server, basedn ):
     client = bonsai.LDAPClient( server )
-    logging.error(f"connecting to {client}")
+    logging.info(f"connecting to {client}")
     client.set_cert_policy('never')
     with client.connect() as conn:
         for d,ldif in get( conn, filter="(objectclass=posixGroup)", dn=basedn, fail_okay=[ 'users', ], map={
@@ -311,92 +311,291 @@ class PullGroups(Command,GraphQlClient):
     def get_parser(self, prog_name):
         parser = super(PullGroups, self).get_parser(prog_name)
         parser.add_argument('--source', choices=['unix-admin','pcds'], required=True )
+        parser.add_argument('--server', required=False, help='ldap server uri' )
+        parser.add_argument('--basedn', required=False, help='ldap basedn for group query' )
         parser.add_argument('--dry_run', action='store_true', help='do not commit any changes', default=False)
         return parser
 
     def take_action(self, parsed_args):
 
+        # for each group in ldap, we must determine the AccessGroup (which is the unix group) and the associated Repo for the access group.
+        # for now,lets just assume the name of the AccessGroup is the same as that of the Repo it is associated to.
+
+        server = None
+        basedn = None
+        if str(parsed_args.source) == 'unix-admin':
+            server = 'ldaps://ldap601.slac.stanford.edu:636' 
+            basedn = 'dc=slac,dc=stanford,dc=edu'
+        elif str(parsed_args.source) == 'pcds':
+            server = 'ldap://psldap1'
+            basedn = 'ou=Group,dc=reg,o=slac'
+        else:
+            if not parsed_args.server and not parsed_args.basedn:
+                raise Exception("--server and --basedn required if --source undefined")
+            server = parsed_args.server
+            basedn = parsed_args.basedn
+
         self.connectGraphQl() 
         stats = {
-            'db_entries': 0,
+            'db_accessGroup_entries': 0,
+            'db_repo_entries': 0,
+            'db_facility_entries': 0,
             'ldap_entries': 0,
-            'added': 0,
-            'changed': 0,
-            'nochange': 0,
+            'access_group_added': 0,
+            'access_group_changed': 0,
+            'access_group_nochange': 0,
+            'repos_added': 0,
+            'repos_changed': 0,
+            'repos_nochange': 0,
+            'facilities_added': 0,
+            'facilities_changed': 0,
+            'facilities_nochange': 0,
         }
 
         # prefetch all users in db, recast as dict for lookup purposes
-        q = """query { repos( filter: {} ) { Id name state gidNumber users principal leaders } }"""
+        q = """
+          query accessGroups { accessGroups( filter: {} ) { Id name gidNumber } }
+        """
+        res = self.query(q)
+        db_accessGroups = {}
+        if 'accessGroups' in res:
+            for i in res['accessGroups']:
+                self.LOG.info(f"< {i}")
+                u = i['gidNumber']
+                db_accessGroups[u] = i
+            stats['db_accessGroup_entries'] = len(db_accessGroups.keys())
+        q = """
+          query repos { repos( filter: {} ) { Id name accessGroups state facility principal leaders users } } 
+        """
         res = self.query(q)
         db_repos = {}
-        for i in res['repos']:
-            u = i['name'] # key by uid or uidNumber?
-            db_repos[u] = i
-        stats['db_entries'] = len(db_repos.keys())
+        if 'repos' in res:
+            for i in res['repos']:
+                u = i['facility'] + ':' + i['name']
+                db_repos[u] = i
+            stats['db_repo_entries'] = len(db_repos.keys())
+        q = """
+          query facilities { facilities( filter: {} ) { Id name } }
+        """
+        res = self.query(q)
+        db_facilities = {}
+        if 'facilities' in res:
+            for i in res['facilities']:
+                u = i['name']
+                self.LOG.warning(f"FOUND {u}")
+                db_facilities[u] = i
+            stats['db_facility_entries'] = len(db_facilities.keys())
 
-        server = 'ldaps://ldap601.slac.stanford.edu:636' if parsed_args.source == 'unix-admin' else 'ldap://psldap1'
-        basedn = 'dc=slac,dc=stanford,dc=edu' if parsed_args.source == 'unix-admin' else 'ou=Group,dc=reg,o=slac'
+        # as nis limits the number of entries per group, we overload the name but keep the same gid
+        group_name_mapping = {
+            r'^atlas-\w$': 'atlas',
+            r'^lsst-\w$': 'lsst',
+            r'^bfact-\w$': 'bfact',
+            r'lcls-\w$': 'lcls',
+        }
 
-        for ldap_group in get_unix_groups( server, basedn ):
+        # not eh most efficient, but we just iterate through all entries and store them under ldap_groups, keyed on the gid. if 
+        # we've already seen the gid we append the list of members
+        # we also do some name remapping at the same time
+        ldap_groups = {}
+        for entry in get_unix_groups( server, basedn ):
             stats['ldap_entries'] += 1
-            #self.LOG.info(f"{ldap_group}")
-            name = ldap_group['name']
-            if not name in db_repos:
+
+            name = entry['name']
+            for r,setname in group_name_mapping.items():
+                if re.match( r, str(name) ):
+                    name = setname
+                    break
+
+            gid_number = entry['gidNumber']
+            self.LOG.debug(f"found {name} for gid {gid_number} with {entry['users']}")
+            # 1) new
+            if not gid_number in ldap_groups:
+                ldap_groups[gid_number] = { 'name': name, 'users': entry['users'] }
+            # 2) append
+            elif gid_number in ldap_groups and len(entry['users']):
+                ldap_groups[gid_number]['users'] = list( set(ldap_groups[gid_number]['users']) | set(entry['users']) )
+            # 3) empty
+            elif gid_number in ldap_groups and len(entry['users']) == 0:
+                # no members, okay to ignore?
+                pass
+            # 4) error!
+            else:
+                raise NotImplementedError(f"dunno what to do with {entry}")
+            
+        # lets populate the access groups
+        for gid_number, entry in ldap_groups.items():
+            #self.LOG.info(f"{gid_number} {entry['name']}\n  {entry['users']}")
+
+            # 1) insert new entry
+            if not gid_number in db_accessGroups:
                 #self.LOG.info( f"Add repo {name}: {ldap_group}" )
-                users = str(ldap_group['users']).replace( "'", '"')
-                if users == '':
-                    users = '[]'
                 create = """
                   mutation {
-                    repoCreate( data: {
+                    accessGroupCreate( data: {
                       state: "Active",
                       name: "%s",
                       gidNumber: %s,
-                      users: %s,
-                      leaders: [],
                     }){
-                   	   Id description name principal leaders users
+                   	   Id name gidNumber
                     }
                   }
-                """ % ( name, ldap_group['gidNumber'], users )
+                """ % ( entry['name'], gid_number )
                 concat = re.sub( r'\s+', ' ', create.replace('\n','') )
                 self.LOG.info(f"Adding {concat}")   
                 if not parsed_args.dry_run:
                     self.query( create )
-                stats['added'] += 1
-            else:
-                # diff
-                #self.LOG.warning( f"modify repo {name}:\n ldap {ldap_group}\n iris {db_repos[name]}" )
-                diff = []
-                for k,v in ldap_group.items():
-                    if k == 'users':
-                        v = sorted(v)
-                    if db_repos[name][k] == v:
-                        diff.append(False)
-                    else:
-                        db_repos[name][k] = v
-                        diff.append(True)
 
-                if not True in diff:
-                    stats['nochange'] += 1
+                stats['access_group_added'] += 1
+
+            # 2) gid exists, but differet name, update the name
+            elif gid_number in db_accessGroups:
+
+                if not str(db_accessGroups[gid_number]['name']) == str(entry['name']):
+                    update = """mutation { accessGroupUpdate( data: { Id: "%s", name: "%s" } ) { Id gidNumber name } } """ % (db_accessGroups[gid_number]['Id'], entry['name'])
+                    self.LOG.info("Updating {update}")
+                    if not parsed_args.dry_run:
+                        self.query( update )
+                    #raise NotImplementedError(f"need to update access group {gid_number} name from {db_accessGroups[gid_number]['name']} to {entry['name']}: {update}") 
+                    stats['access_group_changed'] += 1
+
+                # 3) its fine
                 else:
+                    stats['access_group_nochange'] += 1
+
+        facility_mapping = {
+            r'^esd': 'ESD',
+            r'^lcls': 'LCLS',
+            r'^lsst': 'Rubin',
+            r'^bfact': 'BFactory',
+            r'^bbr': 'BaBar',
+            r'^ltda': 'BaBar',
+            r'^cdms': 'CDMS',
+            r'^amo': 'LCLS',
+            r'^exo': 'EXO',
+            r'^cxi': 'LCLS',
+            r'^dia': 'LCLS',
+            r'^mec': 'LCLS',
+            r'^mfx': 'LCLS',
+            r'^mob': 'LCLS',
+            r'^kipac': 'KIPAC',
+            r'^ps-': 'LCLS',
+            r'^glast': 'Fermi',
+            r'^ilc': 'ILC',
+            r'^rix': 'LCLS',
+            r'^rubin': 'Rubin',
+            r'^pulse': 'Pulse',
+            r'^spear': 'Spear',
+            r'^suncat': 'SUNCAT',
+            r'^sxr': 'LCLS',
+            r'^tmo': 'LCLS',
+            r'^ued': 'UED',
+            r'^usr': 'LCLS',
+            r'^xcs': 'LCLS',
+            r'^xpp': 'LCLS',
+            r'^at$': 'USATLAS',
+            r'^atlas': 'USATLAS',
+            r'^xu$': 'LCLS',
+        } 
+        
+        # now we have to create the facilities and repos for each group
+        for gid_number, entry in ldap_groups.items():
+
+            # first assume the facility is the same as the group
+            the_facility = entry['name']
+
+            # go through mappins defined above
+            for k,v in facility_mapping.items():
+                if re.match( k, str(entry['name']) ):
+                    the_facility = v
+
+            if not str(the_facility) in db_facilities:
+                fac = """mutation { facilityCreate( data: { name: "%s" } ) { Id name } }""" % (the_facility,)
+                self.LOG.info(f"adding facility {the_facility}: {fac} {db_facilities}")
+                if not parsed_args.dry_run:
+                    self.query( fac )
+                stats['facilities_added'] += 1
+                # cache for future
+                db_facilities[str(the_facility)] = True
+
+            # validate
+            elif str(the_facility) in db_facilities:
+                # check to ensure that there are no changes
+                if not isinstance( db_facilities[str(the_facility)], bool) and not db_facilities[str(the_facility)]['name'] == str(the_facility):
+                     stats['facilities_changed'] += 1
+                     raise NotImplementedError(f"facility name change required from {db_facilities[str(the_facility)]} to {the_facility}")
+
+                stats['facilities_nochange'] += 1
+
+            #
+            # now deal with the repo
+            #
+            the_repo = str(entry['name'])
+
+            self.LOG.info(f"> {gid_number} ({entry['name']}) \t-> facility {the_facility} \t repo {the_repo}\t users: {entry['users']}")
+
+            key = str(the_facility) + ':' + str(the_repo)
+
+            # format the array into something taht we can pass into the graphql query
+            def arrayify( array ):
+                stuff = str(sorted(array)).replace("'", '"')
+                if stuff == '':
+                    stuff = '[]'
+                return stuff
+
+            users = arrayify( entry['users'] )
+            # TODO: how do we deal with repos with multiple access groups? aer we just assuming a 1:1 mapping for now?
+            access_groups = arrayify( [ str(the_repo), ] )
+
+            # does not curently exist in db, add it
+            if not key in db_repos:
+                q = """mutation { repoCreate( data: { name: "%s", facility: "%s", accessGroups: %s, principal: "%s", leaders: %s, users: %s}) { Id name facility accessGroups principal leaders users } }""" % ( the_repo, the_facility, access_groups, 'TBD', '[]', users )
+                self.LOG.info(f"adding repo {q}")
+                if not parsed_args.dry_run:
+                    self.query(q)
+                stats['repos_added'] += 1
+
+            # 2) entry already exist....
+            if key in db_repos:
+
+#                # lets see what changed
+#                diff = []
+#                for k,x in db_repos[key].items():
+#                    if k == 'users':
+#                        v = sorted(v)
+#                    elif k in ( 'state', ):
+#                        continue
+#                    if db_repos[key][k] == v:
+#                        diff.append(False)
+#                    else:
+#                        db_repos[key][k] = v
+#                        diff.append(True)
+
+                #self.LOG.warning(f"got {key} for {db_repos[key]} with {diff}")
+#                if not True in diff:
+#                    stats['repos_nochange'] += 1
+#                else:
+
+                if not [ str(the_repo), ] == db_repos[key]['accessGroups'] or \
+                    not sorted(entry['users']) == sorted(db_repos[key]['users']):
                     modify = """
                       mutation {
                         repoUpdate( data: {
-                          id: "%s",
-                          state: "Active",
-                          name: "%s",
-                          gidNumber: %s,
+                          Id: "%s",
+                          accessGroups: %s,
                           users: %s    
                         }){
                        	   Id description name principal leaders users
                         }
                       }
-                    """ % ( db_repos[name]['id'], name, db_repos[name]['gidNumber'], str(db_repos[name]['users']).replace( "'", '"') ) 
-                    #self.LOG.warning( f" -> {db_repos[name]} -> {modify}" )
+                    """ % ( db_repos[key]['Id'], access_groups, users )
+                    concat = re.sub( r'\s+', ' ', modify.replace('\n','') ) 
+                    self.LOG.info( f"changing repo {db_repos[key]} -> {concat}")
                     if not parsed_args.dry_run:
                         self.query( modify )
-                    stats['changed'] += 1
+                    stats['repos_changed'] += 1
+                else:
+                    stats['repos_nochange'] += 1
 
         self.LOG.info(f"STATS {stats}")
 
