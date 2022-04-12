@@ -9,6 +9,16 @@ from .utils.graphql import GraphQlClient
 
 import logging
 
+
+
+# format the array into something taht we can pass into the graphql query
+def arrayify( array ):
+    stuff = str(sorted(array)).replace("'", '"')
+    if stuff == '':
+        stuff = '[]'
+    return stuff
+
+
 def get( conn, dn="ou=Group,dc=reg,o=slac", filter="(objectclass=*)", map={'field': { 'attr': 'name', 'array': True } }, fail_okay=[] ):
     res = conn.search(dn, bonsai.LDAPSearchScope.SUB, filter )
     for r in res:
@@ -88,7 +98,7 @@ def get_unix_users( server, basedn ):
               'username': { 'attr': 'uid' },
               'uidNumber': { 'attr': 'uidNumber' },
               'eppns': { 'attr': 'mail', 'array': True },
-
+              'gidNumber': { 'attr': 'gidNumber' }
             }):
                 if 'username' in d:
                     yield d
@@ -141,6 +151,7 @@ class PullUsers(Command,GraphQlClient):
             'added': 0,
             'changed': 0,
             'nochange': 0,
+            'repo_updated': 0,
         }
 
         # prefetch all users in db, recast as dict for lookup purposes
@@ -156,9 +167,25 @@ class PullUsers(Command,GraphQlClient):
         #for k,v in db_users.items():
         #     self.LOG.warning(f" {k} = {v}")
 
+        # cache list of access groups for primary gid
+
+        query = """{ accessGroups( filter: { } ) { Id gidNumber name } }"""
+        concat = re.sub( r'\s+', ' ', query.replace('\n','') )
+        res = self.query( query )
+        access_groups = {}
+        for r in res['accessGroups']:
+            g = r['gidNumber']
+            access_groups[g] = r
+            #self.LOG.info(f" {g} -> {access_groups[g]}")
+
+        # lets keep a cache of the primary gids for each user so we don't have to do so many updates O(gid) rather thatn O(user)
+        gid_users = {}
+
         self.LOG.info("Fetching ldap users...")
         for ldap_user in get_unix_users( 'ldaps://ldap601.slac.stanford.edu:636', 'dc=slac,dc=stanford,dc=edu' ):
             stats['ldap_entries'] += 1
+
+            #self.LOG.warning(f"{ldap_user['username']} {ldap_user['gidNumber']}")
 
             # 1) new entry, create in db
             if not ldap_user['username'] in db_users:
@@ -183,7 +210,10 @@ class PullUsers(Command,GraphQlClient):
 
                 db_user = db_users[ldap_user['username']]
                 self.LOG.debug(f"  comparing {ldap_user} to {db_user}")
-                merged = db_user | ldap_user
+                # we need to ignore the gidNumber for comparisions
+                #merged = db_user | ldap_user
+                the_user = {k: ldap_user[k] for k in ldap_user.keys() - {'gidNumber',}}
+                merged = db_user | the_user 
                 # merge eppns
                 # assume local db always has more eppns than remote ldap
                 # always assume that the eppns are alphabetically sorted
@@ -192,10 +222,9 @@ class PullUsers(Command,GraphQlClient):
                 
                 # commit back to db if changed
                 if not merged == db_user:
-                    self.LOG.info(f"  changed: {merged} from {db_user}")
                     update = """
                     mutation{
-                      updateUser( data: {
+                      userUpdate( data: {
                         Id: "%s",
                         username: "%s",
                         uidNumber: %s,
@@ -204,14 +233,46 @@ class PullUsers(Command,GraphQlClient):
                           username eppns uidNumber
                       }
                     }
-                    """ % (merged['id'], merged['username'], merged['uidNumber'], ','.join([ '"'+e+'"' for e in merged['eppns'] ]) )
+                    """ % (merged['Id'], merged['username'], merged['uidNumber'], ','.join([ '"'+e+'"' for e in merged['eppns'] ]) )
+                    concat = re.sub( r'\s+', ' ', update.replace('\n','') )
+                    self.LOG.info(f"  changed: {db_user} -> {merged} -> {concat}")
                     if not parsed_args.dry_run:
                       self.query(update)
                     stats['changed'] += 1
 
                 else:
                     stats['nochange'] += 1
-                    
+
+            # make sure we add the primary gid to a matching access group if available
+            # we assume that the access group name is the same as that of the repo name to add the user to 
+            self.LOG.info(f" primary gid for user {ldap_user['username']}: {access_groups[ldap_user['gidNumber']]}")
+            gid_number = ldap_user['gidNumber']
+            if not gid_number in gid_users:
+                gid_users[gid_number] = []
+            gid_users[gid_number].append( ldap_user['username'] )
+
+
+        # lets update the repo users who has these users' primary gid
+        for gid_number, users in gid_users.items():
+            repo_name = access_groups[gid_number]['name']
+            query = """{ repo( filter: { name: "%s" } ){ Id users } }""" % (repo_name,)
+            res = self.query( query )
+            if 'repo' in res:
+                repo_id = res['repo']['Id']
+                repo_users = sorted(res['repo']['users'])
+                the_users = list( set(repo_users) | set(users) )
+                the_users.sort()
+                if not repo_users == the_users:
+                    update = """mutation { repoUpdate( data: { Id: "%s", users: %s } ) { Id name users } }""" % ( repo_id, arrayify(the_users), )
+                    concat = re.sub( r'\s+', ' ', update.replace('\n','') )
+                    self.LOG.info(f" update repo users {repo_users} -> {the_users} -> {concat}")
+                    if not parsed_args.dry_run:
+                        self.query(update)
+                    stats['repo_updated'] += 1
+    
+            else:
+                raise NotImplementedError(f"did not find {repo_name} in Repos for gid {gid_number}")
+
         self.LOG.warning(f"STATS: {stats}")
 
 
@@ -361,7 +422,7 @@ class PullGroups(Command,GraphQlClient):
         db_accessGroups = {}
         if 'accessGroups' in res:
             for i in res['accessGroups']:
-                self.LOG.info(f"< {i}")
+                #self.LOG.info(f"< {i}")
                 u = i['gidNumber']
                 db_accessGroups[u] = i
             stats['db_accessGroup_entries'] = len(db_accessGroups.keys())
@@ -372,7 +433,9 @@ class PullGroups(Command,GraphQlClient):
         db_repos = {}
         if 'repos' in res:
             for i in res['repos']:
-                u = i['facility'] + ':' + i['name']
+                # we assume all repos have unique names
+                u = i['name']
+                #u = i['facility'] + ':' + i['name']
                 db_repos[u] = i
             stats['db_repo_entries'] = len(db_repos.keys())
         q = """
@@ -468,7 +531,9 @@ class PullGroups(Command,GraphQlClient):
             r'^lcls': 'LCLS',
             r'^lsst': 'Rubin',
             r'^bfact': 'BFactory',
+            r'^bf': 'BFactory',
             r'^bbr': 'BaBar',
+            r'^babar': 'BaBar',
             r'^ltda': 'BaBar',
             r'^cdms': 'CDMS',
             r'^amo': 'LCLS',
@@ -480,7 +545,10 @@ class PullGroups(Command,GraphQlClient):
             r'^mob': 'LCLS',
             r'^kipac': 'KIPAC',
             r'^ps-': 'LCLS',
+            r'^ps_': 'LCLS',
             r'^glast': 'Fermi',
+            r'^geant': 'GEANT',
+            r'^ir2': 'IR2',
             r'^ilc': 'ILC',
             r'^rix': 'LCLS',
             r'^rubin': 'Rubin',
@@ -492,6 +560,7 @@ class PullGroups(Command,GraphQlClient):
             r'^ued': 'UED',
             r'^usr': 'LCLS',
             r'^xcs': 'LCLS',
+            r'^xs$': 'LCLS',
             r'^xpp': 'LCLS',
             r'^at$': 'USATLAS',
             r'^atlas': 'USATLAS',
@@ -532,16 +601,9 @@ class PullGroups(Command,GraphQlClient):
             #
             the_repo = str(entry['name'])
 
-            self.LOG.info(f"> {gid_number} ({entry['name']}) \t-> facility {the_facility} \t repo {the_repo}\t users: {entry['users']}")
+            #self.LOG.info(f"> {gid_number} ({entry['name']}) \t-> facility {the_facility} \t repo {the_repo}\t users: {entry['users']}")
 
-            key = str(the_facility) + ':' + str(the_repo)
-
-            # format the array into something taht we can pass into the graphql query
-            def arrayify( array ):
-                stuff = str(sorted(array)).replace("'", '"')
-                if stuff == '':
-                    stuff = '[]'
-                return stuff
+            key = str(the_repo)
 
             users = arrayify( entry['users'] )
             # TODO: how do we deal with repos with multiple access groups? aer we just assuming a 1:1 mapping for now?
@@ -591,18 +653,19 @@ class PullGroups(Command,GraphQlClient):
                     if not the_users == sorted(db_repos[key]['users']):
                         different_users = True
                      
-                if not [ str(the_repo), ] == db_repos[key]['accessGroups'] or different_users == True:
+                if not [ str(the_repo), ] == db_repos[key]['accessGroups'] or different_users == True or not the_facility == db_repos[key]['facility']:
                     modify = """
                       mutation {
                         repoUpdate( data: {
                           Id: "%s",
+                          facility: "%s",
                           accessGroups: %s,
                           users: %s    
                         }){
                        	   Id description name principal leaders users
                         }
                       }
-                    """ % ( db_repos[key]['Id'], access_groups, arrayify(the_users) )
+                    """ % ( db_repos[key]['Id'], the_facility, access_groups, arrayify(the_users) )
                     concat = re.sub( r'\s+', ' ', modify.replace('\n','') ) 
                     self.LOG.info( f"changing repo {db_repos[key]} -> {concat}")
                     if not parsed_args.dry_run:
