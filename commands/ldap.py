@@ -245,7 +245,7 @@ class PullUsers(Command,GraphQlClient):
 
             # make sure we add the primary gid to a matching access group if available
             # we assume that the access group name is the same as that of the repo name to add the user to 
-            self.LOG.info(f" primary gid for user {ldap_user['username']}: {access_groups[ldap_user['gidNumber']]}")
+            #self.LOG.info(f" primary gid for user {ldap_user['username']}: {access_groups[ldap_user['gidNumber']]}")
             gid_number = ldap_user['gidNumber']
             if not gid_number in gid_users:
                 gid_users[gid_number] = []
@@ -265,7 +265,7 @@ class PullUsers(Command,GraphQlClient):
                 if not repo_users == the_users:
                     update = """mutation { repoUpdate( data: { Id: "%s", users: %s } ) { Id name users } }""" % ( repo_id, arrayify(the_users), )
                     concat = re.sub( r'\s+', ' ', update.replace('\n','') )
-                    self.LOG.info(f" update repo users {repo_users} -> {the_users} -> {concat}")
+                    self.LOG.info(f" update repo users for repo {repo_name}, gid {gid_number}: {repo_users} -> {the_users} -> {concat}")
                     if not parsed_args.dry_run:
                         self.query(update)
                     stats['repo_updated'] += 1
@@ -530,12 +530,20 @@ class PullGroups(Command,GraphQlClient):
             r'^esd': 'ESD',
             r'^lcls': 'LCLS',
             r'^lsst': 'Rubin',
+            r'^desc$': 'Rubin',
+            r'^qb$': 'SSRL',
+            r'^bd$': 'CryoEM',
+            r'^bg$': 'CryoEM',
+            r'^bw$': 'CryoEM',
+            r'^cryo-data$': 'CryoEM',
             r'^bfact': 'BFactory',
             r'^bf': 'BFactory',
             r'^bbr': 'BaBar',
             r'^babar': 'BaBar',
+            r'^cta': 'CTA',
             r'^ltda': 'BaBar',
             r'^cdms': 'CDMS',
+            r'^hps$': 'HPS',
             r'^amo': 'LCLS',
             r'^exo': 'EXO',
             r'^cxi': 'LCLS',
@@ -547,12 +555,24 @@ class PullGroups(Command,GraphQlClient):
             r'^ps-': 'LCLS',
             r'^ps_': 'LCLS',
             r'^glast': 'Fermi',
+            r'^gl$': 'Fermi',
+            r'^gl-': 'Fermi',
+            r'^gldcm$': 'Fermi',
+            r'^glflight$': 'Fermi',
+            r'^glgr-ad$': 'Fermi',
+            r'^glonline$': 'Fermi',
+            r'^glstore$': 'Fermi',
+            r'^nu$': 'Neutrino',
             r'^geant': 'GEANT',
             r'^ir2': 'IR2',
+            r'^luxlz$': 'LUXLZ',
             r'^ilc': 'ILC',
+            r'^ldmx': 'LDMX',
             r'^rix': 'LCLS',
             r'^rubin': 'Rubin',
             r'^pulse': 'Pulse',
+            r'^simes$': 'SIMES',
+            r'^sld': 'SLD',
             r'^spear': 'Spear',
             r'^suncat': 'SUNCAT',
             r'^sxr': 'LCLS',
@@ -564,7 +584,53 @@ class PullGroups(Command,GraphQlClient):
             r'^xpp': 'LCLS',
             r'^at$': 'USATLAS',
             r'^atlas': 'USATLAS',
+            r'^OG$': 'USATLAS',
+            r'^gismo$': 'GISMo',
             r'^xu$': 'LCLS',
+            r'^oh$': 'SYSTEM',
+            r'^snmp$': 'SYSTEM',
+            r'^splunk': 'SYSTEM',
+            r'^x11': 'SYSTEM',
+            r'^tc': 'SYSTEM',
+            r'^docker': 'SYSTEM',
+            r'^GWAdmin': 'SYSTEM',
+            r'^GWOperator': 'SYSTEM',
+            r'^gwuser': 'SYSTEM',
+            r'^testypgroup': 'SYSTEM',
+            r'^test941': 'SYSTEM',
+            r'^test942': 'SYSTEM',
+            r'^testgrp$': 'SYSTEM',
+            r'^rac$': 'SYSTEM',
+            r'^xrootd$': 'SYSTEM',
+            r'^tapemorgue$': 'SYSTEM',
+            r'^hpss': 'SYSTEM',
+            r'^lsf$': 'SYSTEM',
+            r'^slurm$': 'SYSTEM',
+            r'^munge$': 'SYSTEM',
+            r'^netflow$': 'SYSTEM',
+            r'^nagios$': 'SYSTEM',
+            r'^netman$': 'SYSTEM',
+            r'^systests$': 'SYSTEM',
+            r'^cvmfs$': 'SYSTEM',
+            r'^dba$': 'SYSTEM',
+            r'^fuse$': 'SYSTEM',
+            r'^oinstall$': 'SYSTEM',
+            r'^ksa-group$': 'SYSTEM',
+            r'^binupd$': 'SYSTEM',
+            r'^asmdba$': 'SYSTEM',
+            r'^lanmon$': 'SYSTEM',
+            r'^ops$': 'SYSTEM',
+            r'^pctest$': 'SYSTEM',
+            r'^publib$': 'SYSTEM',
+            r'^radius$': 'SYSTEM',
+            r'^routers$': 'SYSTEM',
+            r'^scsadmin$': 'SYSTEM',
+            r'^lmadmin$': 'SYSTEM',
+            r'^encina$': 'SYSTEM',
+            r'^drupal-ops$': 'SYSTEM',
+            r'^cjadm$': 'SYSTEM',
+            r'^5': 'JUNK',
+            r'^B_to_pi_l_nu': 'JUNK',
         } 
         
         # now we have to create the facilities and repos for each group
@@ -580,7 +646,7 @@ class PullGroups(Command,GraphQlClient):
 
             if not str(the_facility) in db_facilities:
                 fac = """mutation { facilityCreate( data: { name: "%s" } ) { Id name } }""" % (the_facility,)
-                self.LOG.info(f"adding facility {the_facility}: {fac} {db_facilities}")
+                self.LOG.info(f"adding facility {the_facility}: {fac}")
                 if not parsed_args.dry_run:
                     self.query( fac )
                 stats['facilities_added'] += 1
@@ -652,7 +718,8 @@ class PullGroups(Command,GraphQlClient):
                     the_users.sort()
                     if not the_users == sorted(db_repos[key]['users']):
                         different_users = True
-                     
+
+                #self.LOG.info(f"the_users {entry['users']}") 
                 if not [ str(the_repo), ] == db_repos[key]['accessGroups'] or different_users == True or not the_facility == db_repos[key]['facility']:
                     modify = """
                       mutation {
