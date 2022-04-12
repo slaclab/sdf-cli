@@ -313,6 +313,7 @@ class PullGroups(Command,GraphQlClient):
         parser.add_argument('--source', choices=['unix-admin','pcds'], required=True )
         parser.add_argument('--server', required=False, help='ldap server uri' )
         parser.add_argument('--basedn', required=False, help='ldap basedn for group query' )
+        parser.add_argument('--no_merge_users', default=False, action='store_true', help='do not merge list of users/members from source' )
         parser.add_argument('--dry_run', action='store_true', help='do not commit any changes', default=False)
         return parser
 
@@ -576,8 +577,22 @@ class PullGroups(Command,GraphQlClient):
 #                    stats['repos_nochange'] += 1
 #                else:
 
-                if not [ str(the_repo), ] == db_repos[key]['accessGroups'] or \
-                    not sorted(entry['users']) == sorted(db_repos[key]['users']):
+                # detemrine how to deal with the list of users
+                different_users = False
+                the_users = []
+                # 1) take this source as the truth for what users belong in this repo
+                if parsed_args.no_merge_users:
+                    the_users = sorted(entry['users'])
+                    if the_users == sorted(db_repos[key]['users']):
+                        different_users = True
+                # 2) otherwise, just ensure that all the users defined here are in the list of users in iris
+                else:
+                    the_users = list( set(db_repos[key]['users']) | set(entry['users']))
+                    the_users.sort()
+                    if not the_users == sorted(db_repos[key]['users']):
+                        different_users = True
+                     
+                if not [ str(the_repo), ] == db_repos[key]['accessGroups'] or different_users == True:
                     modify = """
                       mutation {
                         repoUpdate( data: {
@@ -588,7 +603,7 @@ class PullGroups(Command,GraphQlClient):
                        	   Id description name principal leaders users
                         }
                       }
-                    """ % ( db_repos[key]['Id'], access_groups, users )
+                    """ % ( db_repos[key]['Id'], access_groups, arrayify(the_users) )
                     concat = re.sub( r'\s+', ' ', modify.replace('\n','') ) 
                     self.LOG.info( f"changing repo {db_repos[key]} -> {concat}")
                     if not parsed_args.dry_run:
