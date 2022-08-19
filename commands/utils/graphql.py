@@ -33,6 +33,26 @@ class GraphQlClient:
         return self.client.execute( gql(query), variable_values=var )
 
 
+class GraphQlSubscriber:
+
+    transport = None
+    client = None
+
+    def connectGraphQl(self, graphql_uri=SDF_IRIS_URI, get_schema=False ):
+        self.transport = AIOHTTPTransport(url=graphql_uri)
+        self.client = Client(transport=self.transport, fetch_schema_from_transport=get_schema)
+        # lets reduce the logging from gql
+        for name in logging.root.manager.loggerDict:
+            if name.startswith('gql'):
+                logger = logging.getLogger(name) 
+                logger.setLevel(logging.WARNING)
+
+    def query(self, query, var={} ):
+        return self.client.execute( gql(query), variable_values=var )
+
+
+
+
 class GraphQlLister(Lister, GraphQlClient):
     "Example of how to fetch data from graphql and dump output as a table"
     LOG = logging.getLogger(__name__)
