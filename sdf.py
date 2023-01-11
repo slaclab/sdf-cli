@@ -10,7 +10,7 @@ from cliff.help import HelpAction, HelpCommand
 from commands.menu import Menu
 from commands.repo import Repo
 from commands.user import User
-from commands.ldap import Ldap
+#from commands.ldap import Ldap
 from commands.coactd import Coactd
 
 import inspect
@@ -179,7 +179,8 @@ class MultiApp(App):
 
 def main(argv=sys.argv[1:]):
     app = MultiApp( description="S3DF Command Line Tools", version=1.0,
-         command_managers=[ User, Repo, Ldap, Menu, Coactd ])
+         #command_managers=[ User, Repo, Ldap, Menu, Coactd ])
+         command_managers=[ User, Repo, Menu, Coactd ])
     return app.run(argv)
 
 
