@@ -15,3 +15,30 @@ This is based upon the [cliff](https://docs.openstack.org/cliff/latest/index.htm
 We create a high level abstration for the cliff App class such that provide one more level of command in this command tree. This is implemented as a MultiApp class that should be instantiated with a List of command_managers - their `__name__` should be unique.
 
 
+# Installation
+
+We probably want to containerize this, but in lieu:
+
+run from host that can download stuff from the web, or use a proxy
+
+```
+sudo make deps
+```
+
+then install the main app
+
+```
+export HTTPS_PROXY=http://sdfproxy.sdf.slac.stanford.edu:3128
+```
+
+then run 
+```
+make apply
+```
+
+
+# Usage
+
+```
+./sdf.py
+```
