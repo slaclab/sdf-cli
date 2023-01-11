@@ -36,7 +36,6 @@ class GraphQlClient:
 
 class GraphQlSubscriber:
 
-<<<<<<< HEAD
     LOG = logging.getLogger(__name__)
 
     transport = None
@@ -45,13 +44,6 @@ class GraphQlSubscriber:
     def connectGraphQl(self, graphql_uri=SDF_COACT_URI, get_schema=False ):
         self.LOG.info(f"connecting to {graphql_uri}")
         self.transport = WebsocketsTransport(url=graphql_uri)
-=======
-    transport = None
-    client = None
-
-    def connectGraphQl(self, graphql_uri=SDF_IRIS_URI, get_schema=False ):
-        self.transport = AIOHTTPTransport(url=graphql_uri)
->>>>>>> 48bf1f3cb9d7e487471cd81f8e3ce2a626e31666
         self.client = Client(transport=self.transport, fetch_schema_from_transport=get_schema)
         # lets reduce the logging from gql
         for name in logging.root.manager.loggerDict:
@@ -59,15 +51,10 @@ class GraphQlSubscriber:
                 logger = logging.getLogger(name) 
                 logger.setLevel(logging.WARNING)
 
-<<<<<<< HEAD
     
     def subscribe(self, query, var={} ):
         self.connectGraphQl()
         return self.client.subscribe( gql(query), variable_values=var )
-=======
-    def query(self, query, var={} ):
-        return self.client.execute( gql(query), variable_values=var )
->>>>>>> 48bf1f3cb9d7e487471cd81f8e3ce2a626e31666
 
 
 
