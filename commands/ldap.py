@@ -134,7 +134,7 @@ class PullUsers(Command,GraphQlClient):
 
     def get_parser(self, prog_name):
         parser = super(PullUsers, self).get_parser(prog_name)
-        parser.add_argument('--bindpw_file',)
+        parser.add_argument('--bindpw_file',help='file containing clear text password for ldap binding', required=False)
         parser.add_argument('--dry_run', action='store_true', help='do not commit any changes', default=False)
         return parser
 
@@ -288,6 +288,18 @@ def dict2LdapEntry( d, basedn="ou=People,dc=sdf,dc=slac,dc=stanford,dc=edu,o=s3d
     entry['homeDirectory'] = '/sdf/home/' + d['uid'][0:1] + '/' + d['uid']
     entry['mail'] = d['eppns']
     entry['loginShell'] = '/bin/bash'
+    return entry
+
+def dict2GroupLdapEntry( d, basedn="ou=Group,dc=sdf,dc=slac,dc=stanford,dc=edu,o=s3df" ):
+    assert len(d['accessGroups']) == 1
+    name = d['accessGroups'][0]['name']
+    gid = d['accessGroups'][0]['gidNumber'] 
+    entry = bonsai.LDAPEntry( f"cn={name},{basedn}" )
+    entry['objectClass'] = [ 'top', 'posixGroup' ]
+    entry['cn'] = name
+    entry['gidNumber'] = gid
+    members = d['users']
+    entry['memberUid'] = members
     return entry
 
 class PushUsers(Command,GraphQlClient):
@@ -452,9 +464,12 @@ class PullGroups(Command,GraphQlClient):
         # as nis limits the number of entries per group, we overload the name but keep the same gid
         group_name_mapping = {
             r'^atlas-\w$': 'atlas',
+            r'^atlas-user-\w$': 'atlas-user',
+            r'^suncat-norm-\w$': 'suncat-norm',
             r'^lsst-\w$': 'lsst',
             r'^bfact-\w$': 'bfact',
             r'lcls-\w$': 'lcls',
+            r'exo-\w$': 'exo',
         }
 
         # not eh most efficient, but we just iterate through all entries and store them under ldap_groups, keyed on the gid. if 
@@ -536,16 +551,19 @@ class PullGroups(Command,GraphQlClient):
             r'^bg$': 'CryoEM',
             r'^bw$': 'CryoEM',
             r'^cryo-data$': 'CryoEM',
+            r'^slacml-school$': 'Machine Learning Initiative',
             r'^bfact': 'BFactory',
             r'^bf': 'BFactory',
             r'^bbr': 'BaBar',
             r'^babar': 'BaBar',
+            r'^ir2': 'BaBar',
             r'^cta': 'CTA',
             r'^ltda': 'BaBar',
             r'^cdms': 'CDMS',
             r'^hps$': 'HPS',
             r'^amo': 'LCLS',
             r'^exo': 'EXO',
+            r'^nexo': 'NEXO',
             r'^cxi': 'LCLS',
             r'^dia': 'LCLS',
             r'^mec': 'LCLS',
@@ -564,7 +582,6 @@ class PullGroups(Command,GraphQlClient):
             r'^glstore$': 'Fermi',
             r'^nu$': 'Neutrino',
             r'^geant': 'GEANT',
-            r'^ir2': 'IR2',
             r'^luxlz$': 'LUXLZ',
             r'^ilc': 'ILC',
             r'^ldmx': 'LDMX',
@@ -585,6 +602,7 @@ class PullGroups(Command,GraphQlClient):
             r'^at$': 'USATLAS',
             r'^atlas': 'USATLAS',
             r'^OG$': 'USATLAS',
+            r'^osg': 'USATLAS',
             r'^gismo$': 'GISMo',
             r'^xu$': 'LCLS',
             r'^oh$': 'SYSTEM',
@@ -604,6 +622,7 @@ class PullGroups(Command,GraphQlClient):
             r'^xrootd$': 'SYSTEM',
             r'^tapemorgue$': 'SYSTEM',
             r'^hpss': 'SYSTEM',
+            r'^tsmsrvrs': 'SYSTEM',
             r'^lsf$': 'SYSTEM',
             r'^slurm$': 'SYSTEM',
             r'^munge$': 'SYSTEM',
@@ -629,6 +648,13 @@ class PullGroups(Command,GraphQlClient):
             r'^encina$': 'SYSTEM',
             r'^drupal-ops$': 'SYSTEM',
             r'^cjadm$': 'SYSTEM',
+            r'^www$': 'SYSTEM',
+            r'^iepm$': 'SYSTEM',
+            r'^is$': 'SYSTEM',
+            r'^py$': 'SYSTEM',
+            r'^blanket$': 'SYSTEM',
+            r'^sf$': 'SYSTEM',
+            r'^sg$': 'SYSTEM',
             r'^5': 'JUNK',
             r'^B_to_pi_l_nu': 'JUNK',
         } 
@@ -720,6 +746,7 @@ class PullGroups(Command,GraphQlClient):
                         different_users = True
 
                 #self.LOG.info(f"the_users {entry['users']}") 
+                #self.LOG.info(f"  the_repo {the_repo} / {db_repos[key]['accessGroups']}")
                 if not [ str(the_repo), ] == db_repos[key]['accessGroups'] or different_users == True or not the_facility == db_repos[key]['facility']:
                     modify = """
                       mutation {
@@ -743,6 +770,104 @@ class PullGroups(Command,GraphQlClient):
 
         self.LOG.info(f"STATS {stats}")
 
+class PushGroups(Command,GraphQlClient):
+    "populate ldap groups from iris"
+    LOG = logging.getLogger(__name__)
+
+    def get_parser(self, prog_name):
+        parser = super(PushGroups, self).get_parser(prog_name)
+        parser.add_argument('--server', default="ldap://sdfns001.slac.stanford.edu:389")
+        parser.add_argument('--binddn', default="cn=Manager,dc=sdf,dc=slac,dc=stanford,dc=edu,o=s3df")
+        parser.add_argument('--bindpw_file', required=True)
+        return parser
+
+    def take_action(self, parsed_args):
+        client = bonsai.LDAPClient( parsed_args.server )
+        logging.error(f"connecting to {parsed_args.server}")
+        client.set_cert_policy('never')
+        self.connectGraphQl()
+
+        # get the access groups and cache
+        q = "{ accessGroups( filter: {} ) { gidNumber name } }"
+        res = self.query( q )
+        access_groups = {}
+        for r in res['accessGroups']:
+            access_groups[r['name']] = r['gidNumber']
+            self.LOG.debug(f" access_groups[ {r['name']} ] = {r['gidNumber']}" )
+        # get the repos and put in the gid numbers - we should probably get the backend to do this tbh
+        q = "{ repos( filter: {} ) { name accessGroups users } }"
+        res = self.query( q )
+        repos = []
+        for r in res['repos']:
+            this_repo = r
+            new_ag = []
+            try:
+                for a in this_repo['accessGroups']:
+                    d = { 'name': a, 'gidNumber': access_groups[a] }
+                new_ag.append(d)
+                this_repo['accessGroups'] = new_ag
+            except Exception as e:
+                self.LOG.warn(f"could not resolve access groups {this_repo['accessGroups']} for repo {this_repo['name']}: {e}")
+                del this_repo['accessGroups']
+            repos.append( this_repo )
+
+
+        stats = {
+            'added': 0,
+            'modified': 0,
+            'nochange': 0,
+        }
+            
+        # recast all the users in the db into ldifs to upload to the ldap server
+        client.set_credentials( 'SIMPLE', parsed_args.binddn, get_password(parsed_args.bindpw_file) )
+        with client.connect() as conn:
+
+            # cache the existing entries in ldap
+            ldap_query = conn.search("dc=sdf,dc=slac,dc=stanford,dc=edu,o=s3df", bonsai.LDAPSearchScope.SUB, "(objectClass=posixGroup)" )
+            ldap_groups = {}
+            for r in ldap_query:
+                ldap_groups[r['gidNumber'][0]] = r
+                self.LOG.info(f"ldap_groups[ {r['gidNumber'][0]} ] = {r}")
+
+            # make sure all entries in our db is in ldap
+            for db_group in repos:
+                #self.LOG.info(f"looking at {db_group}")
+                e = dict2GroupLdapEntry( db_group )
+                self.LOG.info(f"Parsed ldif {e} from repo {db_group}")
+                gid = e['gidNumber'][0]
+                if gid in ldap_groups:
+                    same = []
+                    for k,v in e.items():
+                        # can't match on object class, so skip it
+                        if k in ('objectClass',):
+                            continue
+                        if not k in ldap_users[uid]:
+                            same.append(False)
+                            self.LOG.warning(f"field {k} is missing from ldap {ldap_users[uid]}")
+                        elif ldap_users[uid][k] == v:
+                            same.append(True)
+                        else:
+                            same.append(False)
+                            self.LOG.warning(f"not same {k} {v}:\n iris {e}\n ldap {ldap_users[uid]}")
+                    #self.LOG.info(f"same? {same}")
+                    if not False in same:
+                        self.LOG.debug(f"entries identical {uid} -> iris {e} / ldap {ldap_users[uid]}") 
+                        stats['nochange'] += 1
+                    else:
+                        self.LOG.info(f"entries need updating {uid} -> \n iris {e}\n ldap {ldap_users[uid]}") 
+                        # just push the iris entry to ldap
+                        for k,v in e.items():
+                            ldap_users[uid][k] = v
+                        # ldap_users[uid].modify()
+                        stats['modified'] += 1
+                else:
+                    self.LOG.info(f"Add new {e}")
+                    if gid == 2113:
+                        conn.add(e)
+                    stats['added'] += 1
+
+        self.LOG.info(f"STATS {stats}")
+    
 
 class Ldap(CommandManager):
     "Manage LDAP information"
@@ -751,7 +876,7 @@ class Ldap(CommandManager):
 
     def __init__(self, namespace, convert_underscores=True):
         super(Ldap,self).__init__(namespace, convert_underscores=convert_underscores)
-        for cmd in [ PullUsers, PushUsers, PullGroups ]:
+        for cmd in [ PullUsers, PushUsers, PullGroups, PushGroups ]:
             self.add_command( cmd.__name__.lower(), cmd )
 
 
