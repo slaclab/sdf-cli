@@ -1,11 +1,13 @@
 PYTHON_BIN ?= ./bin/python3
 PIP_BIN ?= ./bin/pip3
 VENV_BIN ?= ./bin/activate
-VAULT_SECRET_PATH ?= secret/tid/sdf/coact
+VAULT_SECRET_PATH ?= secret/tid/coact
 
-get-secrets-from-vault:
+get-secrets:
 	mkdir etc/.secrets/ -p
-	set -e; for i in ldap_binddn ldap_bindpw; do vault kv get --field=$$i $(VAULT_SECRET_PATH) > etc/.secrets/$$i ; done
+	#set -e; for i in ldap_binddn ldap_bindpw; do vault kv get --field=$$i $(VAULT_SECRET_PATH) > etc/.secrets/$$i ; done
+	set -e; for i in password; do vault kv get --field=$$i $(VAULT_SECRET_PATH)/service-account > etc/.secrets/$$i ; done
+	chmod -R go-rwx etc/.secrets
 
 virtualenv:
 	python3 -m venv .

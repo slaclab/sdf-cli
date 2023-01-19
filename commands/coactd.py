@@ -5,7 +5,7 @@ from cliff.command import Command
 from cliff.commandmanager import CommandManager
 
 from .utils.graphql import GraphQlSubscriber
-from .utils.ldap import client as ldap_client
+#from .utils.ldap import client as ldap_client
 
 import smtplib
 from email.message import EmailMessage
@@ -67,16 +67,16 @@ class UserRegistration(Command,GraphQlSubscriber):
     def get_parser(self, prog_name):
         parser = super(UserRegistration, self).get_parser(prog_name)
         parser.add_argument('--verbose', help='verbose output', required=False)
-        parser.add_argument('--ldap-server', help='ldaps://sdfldap001.slac.stanford.edu')
-        parser.add_argument('--ldap-binddn', help='ldap admin user dn', default='uid=ldap-coact,ou=Admin,dc=sdf,dc=slac,dc=stanford,dc=edu')
-        parser.add_argument('--ldap-bindpw-file', help='filepath containing ldap admin password', required=True)
+#        parser.add_argument('--ldap-server', help='ldaps://sdfldap001.slac.stanford.edu')
+#        parser.add_argument('--ldap-binddn', help='ldap admin user dn', default='uid=ldap-coact,ou=Admin,dc=sdf,dc=slac,dc=stanford,dc=edu')
+#        parser.add_argument('--ldap-bindpw-file', help='filepath containing ldap admin password', required=True)
+        parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-cli', required=True)
+        parser.add_argument('--password-file', help='basic auth password for graphql service', required=True)
         return parser
 
     def take_action(self, parsed_args):
 
-        self.args = parsed_args
-
-        res = self.subscribe("""
+        res = self.subscribe( """
             subscription {
                 requests {
                     theRequest {
@@ -86,7 +86,10 @@ class UserRegistration(Command,GraphQlSubscriber):
                     }
                 }
             }
-        """)
+          """,
+          username=parsed_args.username, password_file=parsed_args.password_file
+        )
+
         for result in res:
             self.LOG.warning(f"GOT {result}")
 

@@ -12,8 +12,9 @@ requests_logger.setLevel(logging.ERROR)
 from gql.transport.websockets import log as websockets_logger
 websockets_logger.setLevel(logging.ERROR)
 
+import base64
 
-SDF_COACT_URI=getenv("SDF_COACT_URI", "http://localhost:8000/graphql")
+SDF_COACT_URI=getenv("SDF_COACT_URI", "wss://coact-dev.slac.stanford.edu:443/graphql-service")
 
 
 class GraphQlClient:
@@ -41,9 +42,13 @@ class GraphQlSubscriber:
     transport = None
     client = None
 
-    def connectGraphQl(self, graphql_uri=SDF_COACT_URI, get_schema=False ):
+    def connectGraphQl(self, graphql_uri=SDF_COACT_URI, get_schema=False, username=None, password=None ):
         self.LOG.info(f"connecting to {graphql_uri}")
-        self.transport = WebsocketsTransport(url=graphql_uri)
+        headers = {}
+        if username and password:
+          mux = f'{username}:{password}'.encode("ascii")
+          headers = { 'Authorization': f'Basic {base64.b64encode(mux).decode("ascii")}' }
+        self.transport = WebsocketsTransport(url=graphql_uri, headers=headers)
         self.client = Client(transport=self.transport, fetch_schema_from_transport=get_schema)
         # lets reduce the logging from gql
         for name in logging.root.manager.loggerDict:
@@ -52,8 +57,11 @@ class GraphQlSubscriber:
                 logger.setLevel(logging.WARNING)
 
     
-    def subscribe(self, query, var={} ):
-        self.connectGraphQl()
+    def subscribe(self, query, var={}, username=None, password_file=None ):
+        password = None
+        with open(password_file,'r') as f:
+          password = f.read()
+        self.connectGraphQl( username=username, password=password )
         return self.client.subscribe( gql(query), variable_values=var )
 
 
