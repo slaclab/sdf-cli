@@ -11,3 +11,4 @@ pkgs/
 share/
 shell/
 ssl/
+lib64
