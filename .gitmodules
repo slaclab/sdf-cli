@@ -1,0 +1,3 @@
+[submodule "ansible-runner/project"]
+	path = ansible-runner/project
+	url = git@github.com:slaclab/sdf-ansible.git

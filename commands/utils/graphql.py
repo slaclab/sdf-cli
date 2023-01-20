@@ -14,7 +14,7 @@ websockets_logger.setLevel(logging.ERROR)
 
 import base64
 
-SDF_COACT_URI=getenv("SDF_COACT_URI", "wss://coact-dev.slac.stanford.edu:443/graphql-service")
+SDF_COACT_URI=getenv("SDF_COACT_URI", "coact-dev.slac.stanford.edu:443/graphql-service")
 
 
 class GraphQlClient:
@@ -22,8 +22,24 @@ class GraphQlClient:
     transport = None
     client = None
 
-    def connectGraphQl(self, graphql_uri=SDF_COACT_URI, get_schema=False ):
-        self.transport = AIOHTTPTransport(url=graphql_uri)
+    def get_password( self, password_file=None ):
+        password = None
+        with open(password_file,'r') as f:
+          password = f.read()
+        return password
+
+    def get_basic_auth_headers( self, username=None, password=None ):
+        headers = {}
+        if username and password:
+          mux = f'{username}:{password}'.encode("ascii")
+          headers = { 'Authorization': f'Basic {base64.b64encode(mux).decode("ascii")}' }
+        return headers
+
+    def connect_graph_ql(self, graphql_uri='https://'+SDF_COACT_URI, get_schema=False, username=None, password_file=None, password=None ):
+        self.LOG.info(f"connecting to {graphql_uri}")
+        if password_file:
+            password = self.get_password( password_file=password_file )
+        self.transport = AIOHTTPTransport(url=graphql_uri, headers=self.get_basic_auth_headers( username=username, password=password ))
         self.client = Client(transport=self.transport, fetch_schema_from_transport=get_schema)
         # lets reduce the logging from gql
         for name in logging.root.manager.loggerDict:
@@ -35,20 +51,16 @@ class GraphQlClient:
         return self.client.execute( gql(query), variable_values=var )
 
 
-class GraphQlSubscriber:
+class GraphQlSubscriber( GraphQlClient ):
 
     LOG = logging.getLogger(__name__)
 
     transport = None
     client = None
 
-    def connectGraphQl(self, graphql_uri=SDF_COACT_URI, get_schema=False, username=None, password=None ):
+    def connect_subscriber(self, graphql_uri='wss://'+SDF_COACT_URI, get_schema=False, username=None, password=None ):
         self.LOG.info(f"connecting to {graphql_uri}")
-        headers = {}
-        if username and password:
-          mux = f'{username}:{password}'.encode("ascii")
-          headers = { 'Authorization': f'Basic {base64.b64encode(mux).decode("ascii")}' }
-        self.transport = WebsocketsTransport(url=graphql_uri, headers=headers)
+        self.transport = WebsocketsTransport(url=graphql_uri, headers=self.get_basic_auth_headers( username=username, password=password ))
         self.client = Client(transport=self.transport, fetch_schema_from_transport=get_schema)
         # lets reduce the logging from gql
         for name in logging.root.manager.loggerDict:
@@ -56,13 +68,17 @@ class GraphQlSubscriber:
                 logger = logging.getLogger(name) 
                 logger.setLevel(logging.WARNING)
 
-    
-    def subscribe(self, query, var={}, username=None, password_file=None ):
-        password = None
-        with open(password_file,'r') as f:
-          password = f.read()
-        self.connectGraphQl( username=username, password=password )
-        return self.client.subscribe( gql(query), variable_values=var )
+    def subscribe(self, query, var={}, username=None, password_file=None, password=None ):
+        if password_file:
+            password = self.get_password( password_file=password_file )
+        self.connect_subscriber( username=username, password=password )
+        for item in self.client.subscribe( gql(query), variable_values=var ):
+            req = item['requests'].get('theRequest', {})
+            optype = item['requests'].get("operationType", None )
+            reqtype = req.get('reqtype', None)
+            approval = req.get("approvalstatus", None)
+            yield optype, reqtype, approval, req
+            
 
 
 

@@ -10,8 +10,19 @@ from .utils.graphql import GraphQlSubscriber
 import smtplib
 from email.message import EmailMessage
 
+import ansible_runner
 
 import logging
+
+COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
+
+class AnsibleRunner():
+    LOG = logging.getLogger(__name__) 
+    def run_playbook(self, playbook, private_data_dir=COACT_ANSIBLE_RUNNER_PATH, **kwargs):
+        r = ansible_runner.run( private_data_dir=private_data_dir, playbook=playbook, extravars=kwargs )
+        self.LOG.info(r.stats)
+        if len(r.stats['failures']) > 0:
+            raise Exception(f"playbook run failed: {r.stats}")
 
 
 class EmailNotifications(Command,GraphQlSubscriber):
@@ -60,7 +71,9 @@ class EmailNotifications(Command,GraphQlSubscriber):
             )
   
 
-class UserRegistration(Command,GraphQlSubscriber):
+
+
+class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner):
     'workflow for user creation'
     LOG = logging.getLogger(__name__)
 
@@ -76,66 +89,43 @@ class UserRegistration(Command,GraphQlSubscriber):
 
     def take_action(self, parsed_args):
 
-        res = self.subscribe( """
+        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
+
+        sub = self.subscribe( """
             subscription {
                 requests {
                     theRequest {
-                    reqtype
-                    eppn
-                    preferredUserName
+                        reqtype
+                        approvalstatus
+                        eppn
+                        preferredUserName
+                        reponame
+                        facilityname
+                        principal
+                        username
+                        actedat
+                        actedby
+                        requestedby
+                        timeofrequest
                     }
+                    operationType
                 }
             }
           """,
           username=parsed_args.username, password_file=parsed_args.password_file
         )
 
-        for result in res:
-            self.LOG.warning(f"GOT {result}")
-
-            # idempotent workflow
-            this_username = 'ytl'
-
-
-            # make sure home directory exists
-            self.ensure_home_directories( this_username )
-
-            # add to general access for s3df
-            self.ensure_ldap_memberOf( this_username, 'sdf-users') # TODO full dn
-
-            # for each group the user is in, add to posixGroup
-            for g in groups:
-                self.ensure_ldap_memberOf( this_username, g )
-
-
-    def ensure_home_directories(self, username):
-
-        # 0. check the user is valid (running id)
-
-        # 1. ensure that the directory exists
-
-        # 2. setup quota
-
-        return
-
-    def ensure_ldap_memberOf( self, username, group ):
-
-        client = ldap_client( self.args.ldap_server, binddn=self.args.ldap_binddn, password_file=self.args.ldap_bindpw_file )
-        with client as ldap:
-            res = ldap.search(group)
-            for r in res:
-                self.LOG.warn( f'FOUND {r}' )
-
-            # check if user is in group
-
-            # append to list if not
-
-            # save
-
-        return
-
-    def remove_ldap_memberOf( self, usermame, group ):
-        return
+        for op_type, req_type, approval, req in sub:
+            try:
+                self.LOG.warning(f"GOT {op_type} {req_type} - {approval}: {req}")
+                user = req.get('preferredUserName', None)
+                facility = req.get('facilityname', None)
+                if not user or not facility:
+                    raise Exception('No valid username or user_facility present in request')
+                if approval == 'Approved':
+                    self.run_playbook( 'add_user.yaml', user='pav', user_facility='rubin' )
+            except Exception as e:
+                self.LOG.error( f'{e}' )
 
 
 
