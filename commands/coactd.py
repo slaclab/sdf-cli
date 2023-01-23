@@ -23,6 +23,7 @@ class AnsibleRunner():
         self.LOG.info(r.stats)
         if len(r.stats['failures']) > 0:
             raise Exception(f"playbook run failed: {r.stats}")
+        return r
 
 
 class EmailNotifications(Command,GraphQlSubscriber):
@@ -89,12 +90,13 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner):
 
     def take_action(self, parsed_args):
 
-        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
+        self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
 
         sub = self.subscribe( """
             subscription {
                 requests {
                     theRequest {
+                        Id
                         reqtype
                         approvalstatus
                         eppn
@@ -115,17 +117,21 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner):
           username=parsed_args.username, password_file=parsed_args.password_file
         )
 
-        for op_type, req_type, approval, req in sub:
+        for req_id, op_type, req_type, approval, req in sub:
+            self.LOG.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
             try:
-                self.LOG.warning(f"GOT {op_type} {req_type} - {approval}: {req}")
                 user = req.get('preferredUserName', None)
                 facility = req.get('facilityname', None)
                 if not user or not facility:
                     raise Exception('No valid username or user_facility present in request')
-                if approval == 'Approved':
-                    self.run_playbook( 'add_user.yaml', user='pav', user_facility='rubin' )
+                if approval in [ 'Approved', 'Incomplete', 'Complete' ]:
+                    ansible_output = self.run_playbook( 'add_user.yaml', user='pav', user_facility='rubin' )
+                    self.LOG.info(f"Marking request {req_id} complete")
+                    self.markCompleteRequest( req, 'AnsibleRunner completed' )
             except Exception as e:
-                self.LOG.error( f'{e}' )
+                self.LOG.error( f'Request {req_id} failed to complete: {e}' )
+                self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+            self.LOG.warning("DONE")
 
 
 

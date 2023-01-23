@@ -16,6 +16,8 @@ import base64
 
 SDF_COACT_URI=getenv("SDF_COACT_URI", "coact-dev.slac.stanford.edu:443/graphql-service")
 
+REQUEST_COMPLETE_MUTATION = gql('''mutation markRequestComplete( $Id: String!, $notes: String! ) { completeRequest( id: $Id, notes: $notes ) }''')
+REQUEST_INCOMPLETE_MUTATION = gql('''mutation markRequestIncomplete( $Id: String!, $notes: String! ) { markRequestIncomplete( id: $Id, notes: $notes ) }''')
 
 class GraphQlClient:
 
@@ -50,18 +52,23 @@ class GraphQlClient:
     def query(self, query, var={} ):
         return self.client.execute( gql(query), variable_values=var )
 
+    def markCompleteRequest( self, req, notes ):
+        return self.client.execute( REQUEST_COMPLETE_MUTATION, variable_values={ 'Id': req['Id'], 'notes': notes } )
+
+    def markIncompleteRequest( self, req, notes ):
+        return self.client.execute( REQUEST_INCOMPLETE_MUTATION, variable_values={ 'Id': req['Id'], 'notes': notes } )
 
 class GraphQlSubscriber( GraphQlClient ):
 
     LOG = logging.getLogger(__name__)
 
-    transport = None
-    client = None
+    subscription_transport = None
+    subscription = None
 
     def connect_subscriber(self, graphql_uri='wss://'+SDF_COACT_URI, get_schema=False, username=None, password=None ):
         self.LOG.info(f"connecting to {graphql_uri}")
-        self.transport = WebsocketsTransport(url=graphql_uri, headers=self.get_basic_auth_headers( username=username, password=password ))
-        self.client = Client(transport=self.transport, fetch_schema_from_transport=get_schema)
+        self.subscription_transport = WebsocketsTransport(url=graphql_uri, headers=self.get_basic_auth_headers( username=username, password=password ))
+        self.subscription = Client(transport=self.subscription_transport, fetch_schema_from_transport=get_schema)
         # lets reduce the logging from gql
         for name in logging.root.manager.loggerDict:
             if name.startswith('gql'):
@@ -72,12 +79,15 @@ class GraphQlSubscriber( GraphQlClient ):
         if password_file:
             password = self.get_password( password_file=password_file )
         self.connect_subscriber( username=username, password=password )
-        for item in self.client.subscribe( gql(query), variable_values=var ):
+        self.LOG.info(f'sending query {query}')
+        for item in self.subscription.subscribe( gql(query), variable_values=var ):
             req = item['requests'].get('theRequest', {})
             optype = item['requests'].get("operationType", None )
+            req_id = req.get('Id', None)
             reqtype = req.get('reqtype', None)
             approval = req.get("approvalstatus", None)
-            yield optype, reqtype, approval, req
+            yield req_id, optype, reqtype, approval, req
+        return None, None, None, None, {}
             
 
 
