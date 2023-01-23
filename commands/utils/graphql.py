@@ -79,7 +79,6 @@ class GraphQlSubscriber( GraphQlClient ):
         if password_file:
             password = self.get_password( password_file=password_file )
         self.connect_subscriber( username=username, password=password )
-        self.LOG.info(f'sending query {query}')
         for item in self.subscription.subscribe( gql(query), variable_values=var ):
             req = item['requests'].get('theRequest', {})
             optype = item['requests'].get("operationType", None )
