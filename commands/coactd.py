@@ -1,5 +1,7 @@
 import os
 import sys
+import inspect
+from enum import Enum
 
 from cliff.command import Command
 from cliff.commandmanager import CommandManager
@@ -7,8 +9,11 @@ from cliff.commandmanager import CommandManager
 from .utils.graphql import GraphQlSubscriber
 #from .utils.ldap import client as ldap_client
 
+import jinja2
 import smtplib
 from email.message import EmailMessage
+
+from gql import gql
 
 import ansible_runner
 
@@ -16,12 +21,19 @@ import logging
 
 COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
 
+# order of class inherietence important: https://stackoverflow.com/questions/58608361/string-based-enum-in-python
+class RequestStatus(str,Enum):
+  APPROVED = 'Approved'
+  NOT_ACTED_ON = 'NotActedOn'
+  REJECTED = 'Rejected'
+  COMPLETED = 'Complete'
+  INCOMPLETE = 'Incomplete'
 
 
 NEW_USER_REQUEST_EMAIL = """
-Dear {facility} Czar,
+Dear {{facility}} Czar,
 
-User {user} ({eppn}) has requested membership of your facility. In order to proceed, you must approve or deny their request at
+User {{user}} ({{eppn}}) has requested membership of your facility. In order to proceed, you must approve or deny their request at
 
 https://coact-dev.slac.stanford.edu/requests
 
@@ -31,9 +43,9 @@ Team S3DF
 """
 
 NEW_USER_COMPLETE_CZAR_EMAIL = """
-Dear {facility} Czar,
+Dear {{facility}} Czar,
 
-User {user}'s S3DF account registration has been completed. They may access S3DF immediately.
+User {{user}}'s S3DF account registration has been completed. They may access S3DF immediately.
 
 Please note that access to storage and batch resources will require users to be assigned to Repo's in Coact. More details at...
 
@@ -56,14 +68,6 @@ Thanks,
 Team S3DF
 """
 
-class render_fstring:
-    def __init__(self, payload):
-        self.payload = payload
-    def __str__(self):
-        vars = inspect.currentframe().f_back.f_globals.copy()
-        vars.update(inspect.currentframe().f_back.f_locals)
-        return self.payload.format(**vars)
-
 
 class AnsibleRunner():
     LOG = logging.getLogger(__name__) 
@@ -78,18 +82,21 @@ class EmailRunner():
     LOG = logging.getLogger(__name__)
     smtp_server = None
     subject_prefix = '[Coact] '
+    j2 = jinja2.Environment()
     
-    def send_email(self, receiver, body, sender='s3df-help@slac.stanford.edu', subject=None, smtp_server=None ):
+    def send_email(self, receiver, body, sender='s3df-help@slac.stanford.edu', subject=None, smtp_server=None, vars={} ):
         msg = EmailMessage()
         msg['Subject'] = self.subject_prefix + str(subject)
         msg['From'] = sender
         msg['To'] = receiver
-        msg.set_content( render_fstring(body) )
-        server = smtp_server if smpt_server else self.smtp_server
+        #msg.set_content( render_fstring(body) )
+        t = self.j2.from_string( body )
+        msg.set_content( t.render(**vars) )
+        server = smtp_server if smtp_server else self.smtp_server
         if not server:
             raise Exception("No smtp server configured")
         s = smtplib.SMTP(server)
-        self.LOG.warning(f"sending email {msg}")
+        self.LOG.info(f"sending email {msg}")
         s.send_message(msg)
         return s.quit()
 
@@ -148,8 +155,8 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
         self.smtp_server = parsed_args.smtp_server
 
         # connect
-        self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
-        sub = self.subscribe( """
+        back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
+        q = """
             subscription {
                 requests {
                     theRequest {
@@ -170,49 +177,61 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
                     operationType
                 }
             }
-          """,
-          username=parsed_args.username, password_file=parsed_args.password_file
-        )
+        """
 
-        for req_id, op_type, req_type, approval, req in sub:
+        sub = self.connect_subscriber( username=parsed_args.username, password=self.get_password(parsed_args.password_file ) )
+        for req_id, op_type, req_type, approval, req in self.subscribe( q ):
             self.LOG.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
-            try:
 
-                if req_type == 'UserAccount':
+            v = {}
 
-                    user = req.get('preferredUserName', None)
-                    facility = req.get('facilityname', None)
-                    if not user or not facility:
-                        raise Exception('No valid username or user_facility present in request')
+            if req_type == 'UserAccount':
 
-                    # determine the czars
-                    # TODO
-                    czars = [ 'ytl@slac.stanford.edu', ]
-                    eppn = 'ytl@slac.stanford.edu'
+                v['user'] = req.get('preferredUserName', None)
+                v['facility'] = req.get('facilityname', None)
+                v['eppn'] = req.get('eppn',None)
 
-                    if approval in [ 'NotActedOn', ]:
-                        self.LOG.info("Sending email to czars about new user request")
-                        self.send_email( czars, NEW_USER_REQUEST_EMAIL, subject=f'New User Request for {user}' )
+                if not v['user'] or not v['facility']:
+                    raise Exception('No valid username or user_facility present in request')
 
-                    # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
-                    # email to all parties that its completed
-                    elif approval in [ 'Approved', 'Incomplete', 'Complete' ]:
+                # determine the czars
+                # TODO
+                czars = [ 'ytl@slac.stanford.edu', ]
+
+                if approval in [ RequestStatus.NOT_ACTED_ON, ]:
+                    self.LOG.info("Sending email to czars about new user request")
+                    self.send_email( czars, NEW_USER_REQUEST_EMAIL, subject=f'New User Request for {v["user"]}', vars=v )
+
+                # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
+                # email to all parties that its completed
+                # make sure this is idempotent
+                elif approval in [ RequestStatus.APPROVED ]:
+
+                    try:
+
                         ansible_output = self.run_playbook( 'add_user.yaml', user='pav', user_facility='rubin' )
                         self.LOG.info(f"Marking request {req_id} complete")
                         self.markCompleteRequest( req, 'AnsibleRunner completed' )
-                        self.send_email( czars, NEW_USER_COMPLETE_CZAR_EMAIL, subject=f'User {user} registration complete' ) 
-                        self.send_email( eppn, NEW_USER_COMPLETE__USER_EMAIL, subject=f'Your S3DF account registration is complete' ) 
+
+                    except Exception as e:
+                        self.LOG.error( f'Request {req_id} failed to complete: {e}' )
+                        self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+
+                elif approval in [ RequestStatus.COMPLETED ]:
+                        self.send_email( czars, NEW_USER_COMPLETE_CZAR_EMAIL, subject=f'User {v["user"]} registration complete', vars=v ) 
+                        eppn = 'ytl@slac.stanford.edu'
+                        self.send_email( eppn, NEW_USER_COMPLETE__USER_EMAIL, subject=f'Your S3DF account registration is complete', vars=v ) 
 
 
-                    else:
-                        self.LOG.warn(f"dunno what to do with {approval} state")
+                elif approval in [ RequestStatus.INCOMPLETE ]:
+                    self.LOG.warn(f"what to do here then with an incomplete requests?")
+                    # email s3df-admin?
 
                 else:
-                    self.LOG.warn(f"Not acting on req_type {req_type}")
+                    self.LOG.warn(f"Ingoring {approval} state request")
 
-            except Exception as e:
-                self.LOG.error( f'Request {req_id} failed to complete: {e}' )
-                self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+            else:
+                self.LOG.warn(f"Ignoring request type {req_type}")
 
             self.LOG.warning(f"Done processing {req_id}")
 

@@ -48,6 +48,7 @@ class GraphQlClient:
             if name.startswith('gql'):
                 logger = logging.getLogger(name) 
                 logger.setLevel(logging.WARNING)
+        return self.client
 
     def query(self, query, var={} ):
         return self.client.execute( gql(query), variable_values=var )
@@ -58,28 +59,29 @@ class GraphQlClient:
     def markIncompleteRequest( self, req, notes ):
         return self.client.execute( REQUEST_INCOMPLETE_MUTATION, variable_values={ 'Id': req['Id'], 'notes': notes } )
 
+
 class GraphQlSubscriber( GraphQlClient ):
 
     LOG = logging.getLogger(__name__)
 
     subscription_transport = None
-    subscription = None
+    subscription_client = None
 
-    def connect_subscriber(self, graphql_uri='wss://'+SDF_COACT_URI, get_schema=False, username=None, password=None ):
+    def connect_subscriber(self, graphql_uri='wss://'+SDF_COACT_URI, get_schema=False, username=None, password_file=None, password=None ):
         self.LOG.info(f"connecting to {graphql_uri}")
+        if password_file:
+            password = self.get_password( password_file=password_file )
         self.subscription_transport = WebsocketsTransport(url=graphql_uri, headers=self.get_basic_auth_headers( username=username, password=password ))
-        self.subscription = Client(transport=self.subscription_transport, fetch_schema_from_transport=get_schema)
+        self.subscription_client = Client(transport=self.subscription_transport, fetch_schema_from_transport=get_schema)
         # lets reduce the logging from gql
         for name in logging.root.manager.loggerDict:
             if name.startswith('gql'):
                 logger = logging.getLogger(name) 
                 logger.setLevel(logging.WARNING)
+        return self.subscription_client
 
-    def subscribe(self, query, var={}, username=None, password_file=None, password=None ):
-        if password_file:
-            password = self.get_password( password_file=password_file )
-        self.connect_subscriber( username=username, password=password )
-        for item in self.subscription.subscribe( gql(query), variable_values=var ):
+    def subscribe(self, query, var={}):
+        for item in self.subscription_client.subscribe( gql(query), variable_values=var ):
             req = item['requests'].get('theRequest', {})
             optype = item['requests'].get("operationType", None )
             req_id = req.get('Id', None)

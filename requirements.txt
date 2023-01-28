@@ -4,3 +4,4 @@ cliff
 gql[all]
 bonsai
 ansible-runner
+Jinja2

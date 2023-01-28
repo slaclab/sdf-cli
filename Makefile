@@ -22,4 +22,7 @@ deps:
 	dnf groupinstall -y "Development Tools"
 	dnf install -y python36-devel openldap-devel
 
-apply: venv pip
+update-sdf-ansible:
+	git submodule update --init --recursive
+
+apply: venv pip get-secrets update-sdf-ansible
