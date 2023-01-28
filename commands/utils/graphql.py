@@ -16,8 +16,8 @@ import base64
 
 SDF_COACT_URI=getenv("SDF_COACT_URI", "coact-dev.slac.stanford.edu:443/graphql-service")
 
-REQUEST_COMPLETE_MUTATION = gql('''mutation markRequestComplete( $Id: String!, $notes: String! ) { completeRequest( id: $Id, notes: $notes ) }''')
-REQUEST_INCOMPLETE_MUTATION = gql('''mutation markRequestIncomplete( $Id: String!, $notes: String! ) { markRequestIncomplete( id: $Id, notes: $notes ) }''')
+REQUEST_COMPLETE_MUTATION = gql('''mutation requestComplete( $Id: String!, $notes: String! ) { requestComplete( id: $Id, notes: $notes ) }''')
+REQUEST_INCOMPLETE_MUTATION = gql('''mutation requestIncomplete( $Id: String!, $notes: String! ) { requestIncomplete( id: $Id, notes: $notes ) }''')
 
 class GraphQlClient:
 
