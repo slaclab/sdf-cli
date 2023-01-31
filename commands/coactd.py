@@ -30,45 +30,6 @@ class RequestStatus(str,Enum):
   INCOMPLETE = 'Incomplete'
 
 
-NEW_USER_REQUEST_EMAIL = """
-Dear {{facility}} Czar,
-
-User {{user}} ({{eppn}}) has requested membership of your facility. In order to proceed, you must approve or deny their request at
-
-https://coact-dev.slac.stanford.edu/requests
-
-Thanks,
-
-Team S3DF
-"""
-
-NEW_USER_COMPLETE_CZAR_EMAIL = """
-Dear {{facility}} Czar,
-
-User {{user}}'s S3DF account registration has been completed. They may access S3DF immediately.
-
-Please note that access to storage and batch resources will require users to be assigned to Repo's in Coact. More details at...
-
-Thanks,
-
-Team S3DF
-"""
-
-NEW_USER_COMPLETE_USER_EMAIL = """
-Dear S3DF user,
-
-Your account registration is complete. 
-
-Connection information is available at https://s3df.slac.stanford.edu/public/doc/#/accounts-and-access?id=how-to-connect.
-
-Questions and issues may be directed to s3df-help@slac.stanford.edu.
-
-Thanks,
-
-Team S3DF
-"""
-
-
 class AnsibleRunner():
     LOG = logging.getLogger(__name__) 
     def run_playbook(self, playbook, private_data_dir=COACT_ANSIBLE_RUNNER_PATH, **kwargs):
@@ -101,41 +62,6 @@ class EmailRunner():
         return s.quit()
 
 
-class EmailNotifications(Command,GraphQlSubscriber,EmailRunner):
-    'sends email notifications from requests'
-    LOG = logging.getLogger(__name__)
-
-    def get_parser(self, prog_name):
-        parser = super(EmailNotifications, self).get_parser(prog_name)
-        parser.add_argument('--verbose', help='verbose output', required=False)
-        parser.add_argument('--smtp-server', help='smtp relay address', default='smtp.slac.stanford.edu')
-        return parser
-
-    def take_action(self, parsed_args):
-        # set global values
-        self.smtp_server = parsed_args.smtp_server
-
-        # Provide a GraphQL query
-        res = self.subscribe("""
-            subscription {
-                requests {
-                    theRequest {
-                    reqtype
-                    eppn
-                    preferredUserName
-                    }
-                }
-            }
-        """)
-        for result in res:
-            self.send_email( 
-                "ytl@slac.stanford.edu",
-                f"{result}",
-                subject='test email',
-            )
-  
-
-
 
 class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
     'workflow for user creation'
@@ -150,9 +76,6 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
         return parser
 
     def take_action(self, parsed_args):
-
-        # config email
-        self.smtp_server = parsed_args.smtp_server
 
         # connect
         back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
@@ -189,18 +112,9 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
 
                 v['user'] = req.get('preferredUserName', None)
                 v['facility'] = req.get('facilityname', None)
-                v['eppn'] = req.get('eppn',None)
 
                 if not v['user'] or not v['facility']:
                     raise Exception('No valid username or user_facility present in request')
-
-                # determine the czars
-                # TODO
-                czars = [ 'ytl@slac.stanford.edu', ]
-
-                if approval in [ RequestStatus.NOT_ACTED_ON, ]:
-                    self.LOG.info("Sending email to czars about new user request")
-                    self.send_email( czars, NEW_USER_REQUEST_EMAIL, subject=f'New User Request for {v["user"]}', vars=v )
 
                 # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
                 # email to all parties that its completed
@@ -209,23 +123,13 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
 
                     try:
 
-                        ansible_output = self.run_playbook( 'add_user.yaml', user='pav', user_facility='rubin' )
+                        ansible_output = self.run_playbook( 'true.yaml', user='pav', user_facility='rubin' )
                         self.LOG.info(f"Marking request {req_id} complete")
                         self.markCompleteRequest( req, 'AnsibleRunner completed' )
 
                     except Exception as e:
                         self.LOG.error( f'Request {req_id} failed to complete: {e}' )
                         self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
-
-                elif approval in [ RequestStatus.COMPLETED ]:
-                        self.send_email( czars, NEW_USER_COMPLETE_CZAR_EMAIL, subject=f'User {v["user"]} registration complete', vars=v ) 
-                        eppn = 'ytl@slac.stanford.edu'
-                        self.send_email( eppn, NEW_USER_COMPLETE__USER_EMAIL, subject=f'Your S3DF account registration is complete', vars=v ) 
-
-
-                elif approval in [ RequestStatus.INCOMPLETE ]:
-                    self.LOG.warn(f"what to do here then with an incomplete requests?")
-                    # email s3df-admin?
 
                 else:
                     self.LOG.warn(f"Ingoring {approval} state request")
@@ -271,7 +175,7 @@ class Coactd(CommandManager):
 
     def __init__(self, namespace, convert_underscores=True):
         super(Coactd,self).__init__(namespace, convert_underscores=convert_underscores)
-        for cmd in [ EmailNotifications, UserRegistration, Get, ]:
+        for cmd in [ UserRegistration, Get, ]:
             self.add_command( cmd.__name__.lower(), cmd )
 
 
