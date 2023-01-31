@@ -32,8 +32,8 @@ class RequestStatus(str,Enum):
 
 class AnsibleRunner():
     LOG = logging.getLogger(__name__) 
-    def run_playbook(self, playbook, private_data_dir=COACT_ANSIBLE_RUNNER_PATH, **kwargs):
-        r = ansible_runner.run( private_data_dir=private_data_dir, playbook=playbook, extravars=kwargs )
+    def run_playbook(self, playbook, private_data_dir=COACT_ANSIBLE_RUNNER_PATH, tags='', **kwargs):
+        r = ansible_runner.run( private_data_dir=private_data_dir, playbook=playbook, tags=tags, extravars=kwargs )
         self.LOG.info(r.stats)
         if len(r.stats['failures']) > 0:
             raise Exception(f"playbook run failed: {r.stats}")
@@ -110,10 +110,10 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
 
             if req_type == 'UserAccount':
 
-                v['user'] = req.get('preferredUserName', None)
-                v['facility'] = req.get('facilityname', None)
+                user = req.get('preferredUserName', None)
+                facility = req.get('facilityname', None)
 
-                if not v['user'] or not v['facility']:
+                if not user or not facility:
                     raise Exception('No valid username or user_facility present in request')
 
                 # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
@@ -122,8 +122,11 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
                 elif approval in [ RequestStatus.APPROVED ]:
 
                     try:
+                        playbook = 'add_user.yaml'
 
-                        ansible_output = self.run_playbook( 'true.yaml', user='pav', user_facility='rubin' )
+                        ansible_output = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
+                        ansible_output = self.run_playbook( playbook, user=user, user_facility=facility, tags='home' )
+                        ansible_output = self.run_playbook( playbook, user=user, user_facility=facility, tags='facility' )
                         self.LOG.info(f"Marking request {req_id} complete")
                         self.markCompleteRequest( req, 'AnsibleRunner completed' )
 
