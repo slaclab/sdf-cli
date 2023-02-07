@@ -52,6 +52,8 @@ class GraphQlClient:
 
     def query(self, query, var={} ):
         return self.client.execute( gql(query), variable_values=var )
+    def mutate(self, query, var={} ):
+        return self.query( query, var=var )
 
     def markCompleteRequest( self, req, notes ):
         return self.client.execute( REQUEST_COMPLETE_MUTATION, variable_values={ 'Id': req['Id'], 'notes': notes } )
@@ -82,12 +84,16 @@ class GraphQlSubscriber( GraphQlClient ):
 
     def subscribe(self, query, var={}):
         for item in self.subscription_client.subscribe( gql(query), variable_values=var ):
-            req = item['requests'].get('theRequest', {})
-            optype = item['requests'].get("operationType", None )
-            req_id = req.get('Id', None)
-            reqtype = req.get('reqtype', None)
-            approval = req.get("approvalstatus", None)
-            yield req_id, optype, reqtype, approval, req
+            #self.LOG.info(f"GOT {item}")
+            optype = item.get("operationType", None )
+            if not optype in [ 'delete', ]:
+                this = item.get('requests',{})
+                req = this.get('theRequest', {})
+                if req:
+                    req_id = req.get('Id', None)
+                    reqtype = req.get('reqtype', None)
+                    approval = req.get("approvalstatus", None)
+                    yield req_id, optype, reqtype, approval, req
         return None, None, None, None, {}
             
 

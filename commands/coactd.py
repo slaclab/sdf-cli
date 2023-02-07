@@ -21,6 +21,23 @@ import logging
 
 COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
 
+USER_UPSERT_GQL = gql("""
+    mutation userUpsert($user: UserInput!) {
+        userUpsert(user: $user) {
+            Id
+        }
+    }
+    """)
+
+USER_STORAGE_GQL = gql("""
+    mutation userStorageAllocationUpsert($user: UserInput!, $userstorage: UserStorageInput!) {
+        userStorageAllocationUpsert(user: $user, userstorage: $userstorage) {
+            Id
+        }
+    }
+    """)
+
+
 # order of class inherietence important: https://stackoverflow.com/questions/58608361/string-based-enum-in-python
 class RequestStatus(str,Enum):
   APPROVED = 'Approved'
@@ -34,10 +51,18 @@ class AnsibleRunner():
     LOG = logging.getLogger(__name__) 
     def run_playbook(self, playbook, private_data_dir=COACT_ANSIBLE_RUNNER_PATH, tags='', **kwargs):
         r = ansible_runner.run( private_data_dir=private_data_dir, playbook=playbook, tags=tags, extravars=kwargs )
-        self.LOG.info(r.stats)
+        self.LOG.debug(r.stats)
         if len(r.stats['failures']) > 0:
             raise Exception(f"playbook run failed: {r.stats}")
         return r
+    def playbook_events(self,runner):
+        for e in runner.events:
+            yield e['event_data']
+    def playbook_task_res(self, play, task, runner):
+        for e in self.playbook_events(runner):
+            #self.LOG.info(f"looking for {play} / {task}: {e}")
+            if 'play' in e and play == e['play'] and 'task' in e and task == e['task'] and 'res' in e:
+                return e['res']
 
 class EmailRunner():
     LOG = logging.getLogger(__name__)
@@ -66,6 +91,7 @@ class EmailRunner():
 class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
     'workflow for user creation'
     LOG = logging.getLogger(__name__)
+    back_channel = None
 
     def get_parser(self, prog_name):
         parser = super(UserRegistration, self).get_parser(prog_name)
@@ -78,7 +104,7 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
     def take_action(self, parsed_args):
 
         # connect
-        back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
+        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
         q = """
             subscription {
                 requests {
@@ -110,22 +136,60 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
 
             if req_type == 'UserAccount':
 
-                user = req.get('preferredUserName', None)
-                facility = req.get('facilityname', None)
-
-                if not user or not facility:
+                try:
+                    user = req.get('preferredUserName', None)
+                    facility = req.get('facilityname', None)
+                    eppn = req.get('eppn', None )
+                    assert user and facility and eppn
+                except Exception as e:
                     raise Exception('No valid username or user_facility present in request')
 
                 # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
                 # email to all parties that its completed
                 # make sure this is idempotent
-                elif approval in [ RequestStatus.APPROVED ]:
+                if approval in [ RequestStatus.APPROVED ]:
 
                     try:
                         playbook = 'add_user.yaml'
 
-                        ansible_output = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
-                        ansible_output = self.run_playbook( playbook, user=user, user_facility=facility, tags='home' )
+                        self.LOG.info(f"Initiating {req_type} request for {user} at facility {facility} using {playbook}")
+
+                        # enable ldap
+                        output = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
+                        ldap_facts = self.playbook_task_res( 'Create user', 'gather user ldap facts', output )['ansible_facts']
+                        self.LOG.debug(f"ldap facts: {ldap_facts}")
+                        user_create_req = {
+                            'user': {
+                                'username': user,
+                                'eppns': [ eppn, ],
+                                'shell': ldap_facts['ldap_user_default_shell'],
+                                'preferredemail': eppn,
+                                'uidnumber': int(ldap_facts['ldap_user_uidNumber']),
+                                'fullname': ldap_facts['ldap_user_gecos'],
+                            }
+                        }
+                        self.LOG.debug(f"upserting user record {user_create_req}")
+                        self.back_channel.execute( USER_UPSERT_GQL, user_create_req ) 
+
+                        # configure home directory
+                        output = self.run_playbook( playbook, user=user, user_facility=facility, tags='home' )
+                        # TODO determine the storage paths and amount
+                        user_storage_req = {
+                            'user' : {
+                                'username': user,
+                            },
+                            'userstorage': {
+                                'username': user,
+                                'purpose': "home",
+                                'gigabytes': 25,
+                                'storagename': "sdfhome",
+                                'rootfolder': ldap_facts['ldap_user_homedir'],
+                            }
+                        }
+                        self.LOG.debug(f"upserting user storage record {user_storage_req}")
+                        self.back_channel.execute( USER_STORAGE_GQL, user_storage_req )
+
+                        # do any facility specific tasks
                         ansible_output = self.run_playbook( playbook, user=user, user_facility=facility, tags='facility' )
                         self.LOG.info(f"Marking request {req_id} complete")
                         self.markCompleteRequest( req, 'AnsibleRunner completed' )
@@ -135,12 +199,12 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
                         self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
 
                 else:
-                    self.LOG.warn(f"Ingoring {approval} state request")
+                    self.LOG.info(f"Ingoring {approval} state request")
 
             else:
-                self.LOG.warn(f"Ignoring request type {req_type}")
+                self.LOG.info(f"Ignoring request type {req_type}")
 
-            self.LOG.warning(f"Done processing {req_id}")
+            self.LOG.info(f"Done processing {req_id}")
 
 
 
