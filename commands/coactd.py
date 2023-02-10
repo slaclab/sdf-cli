@@ -157,7 +157,9 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
                         # enable ldap
                         output = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
                         ldap_facts = self.playbook_task_res( 'Create user', 'gather user ldap facts', output )['ansible_facts']
+                        shell = self.run_playbook( playbook, user=user, user_facility=facility, tags='shell' )
                         self.LOG.debug(f"ldap facts: {ldap_facts}")
+
                         user_create_req = {
                             'user': {
                                 'username': user,
@@ -170,6 +172,7 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
                         }
                         self.LOG.debug(f"upserting user record {user_create_req}")
                         self.back_channel.execute( USER_UPSERT_GQL, user_create_req ) 
+
 
                         # configure home directory
                         output = self.run_playbook( playbook, user=user, user_facility=facility, tags='home' )
