@@ -37,6 +37,13 @@ USER_STORAGE_GQL = gql("""
     }
     """)
 
+REPO_UPSERT_GQL = gql("""
+    mutation repoUpsert($repo: RepoInput! ) {
+        repoUpsert(repo: $repo) {
+            Id
+        }
+    }
+    """)
 
 # order of class inherietence important: https://stackoverflow.com/questions/58608361/string-based-enum-in-python
 class RequestStatus(str,Enum):
@@ -210,6 +217,83 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
             self.LOG.info(f"Done processing {req_id}")
 
 
+class RepoRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
+    'workflow for repo creation'
+    LOG = logging.getLogger(__name__)
+    back_channel = None
+
+    def get_parser(self, prog_name):
+        parser = super(RepoRegistration, self).get_parser(prog_name)
+        parser.add_argument('--verbose', help='verbose output', required=False)
+        parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-cli')
+        parser.add_argument('--password-file', help='basic auth password for graphql service', required=True)
+        return parser
+
+    def take_action(self, parsed_args):
+
+        # connect
+        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
+        q = """
+            subscription {
+                requests {
+                    theRequest {
+                        Id
+                        reqtype
+                        approvalstatus
+                        eppn
+                        preferredUserName
+                        reponame
+                        facilityname
+                        principal
+                        username
+                        actedat
+                        actedby
+                        requestedby
+                        timeofrequest
+                    }
+                    operationType
+                }
+            }
+        """
+
+        sub = self.connect_subscriber( username=parsed_args.username, password=self.get_password(parsed_args.password_file ) )
+        for req_id, op_type, req_type, approval, req in self.subscribe( q ):
+            self.LOG.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
+            if req_type == 'NewRepo':
+
+                try:
+                    name = req.get('reponame', None)
+                    facility = req.get('facilityname', None)
+                    principal = req.get('principal', None )
+                    assert name and facility and principal
+                except Exception as e:
+                    raise Exception('No valid facility, name and principal present in request')
+
+                # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
+                # email to all parties that its completed
+                # make sure this is idempotent
+                if approval in [ RequestStatus.APPROVED ]:
+
+                    try:
+                        repo_create_req = {
+                            'repo': {
+                                'name': name,
+                                'facility': facility,
+                                'principal': principal,
+                            }
+                        }
+                        self.LOG.info(f"upserting repo record {repo_create_req}")
+                        self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
+
+                        self.LOG.info(f"Marking request {req_id} complete")
+                        self.markCompleteRequest( req, 'AnsibleRunner completed' )
+
+                    except Exception as e:
+                        self.LOG.error( f'Request {req_id} failed to complete: {e}' )
+                        self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+            
+
+
 
 class Get(Command,GraphQlSubscriber):
     'just streams output from requests subscription'
@@ -245,7 +329,7 @@ class Coactd(CommandManager):
 
     def __init__(self, namespace, convert_underscores=True):
         super(Coactd,self).__init__(namespace, convert_underscores=convert_underscores)
-        for cmd in [ UserRegistration, Get, ]:
+        for cmd in [ UserRegistration, RepoRegistration, Get, ]:
             self.add_command( cmd.__name__.lower(), cmd )
 
 
