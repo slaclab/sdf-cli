@@ -2,6 +2,7 @@ import os
 import sys
 import inspect
 from enum import Enum
+from typing import Any
 
 from cliff.command import Command
 from cliff.commandmanager import CommandManager
@@ -49,16 +50,17 @@ class RequestStatus(str,Enum):
 
 class AnsibleRunner():
     LOG = logging.getLogger(__name__) 
-    def run_playbook(self, playbook, private_data_dir=COACT_ANSIBLE_RUNNER_PATH, tags='', **kwargs):
+    def run_playbook(self, playbook: str, private_data_dir: str = COACT_ANSIBLE_RUNNER_PATH, tags: str = '', **kwargs) -> ansible_runner.runner.Runner:
         r = ansible_runner.run( private_data_dir=private_data_dir, playbook=playbook, tags=tags, extravars=kwargs )
         self.LOG.debug(r.stats)
         if len(r.stats['failures']) > 0:
             raise Exception(f"playbook run failed: {r.stats}")
         return r
-    def playbook_events(self,runner):
+    def playbook_events(self,runner: ansible_runner.runner.Runner) -> dict:
         for e in runner.events:
-            yield e['event_data']
-    def playbook_task_res(self, play, task, runner):
+            if 'event_data' in e:
+                yield e['event_data']
+    def playbook_task_res(self, runner: ansible_runner.runner.Runner, play: str, task: str) -> dict:
         for e in self.playbook_events(runner):
             #self.LOG.info(f"looking for {play} / {task}: {e}")
             if 'play' in e and play == e['play'] and 'task' in e and task == e['task'] and 'res' in e:
@@ -96,7 +98,7 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
     def get_parser(self, prog_name):
         parser = super(UserRegistration, self).get_parser(prog_name)
         parser.add_argument('--verbose', help='verbose output', required=False)
-        parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-cli')
+        parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
         parser.add_argument('--password-file', help='basic auth password for graphql service', required=True)
         parser.add_argument('--smtp-server', help='smtp relay address', default='smtp.slac.stanford.edu')
         return parser
@@ -155,8 +157,8 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
                         self.LOG.info(f"Initiating {req_type} request for {user} at facility {facility} using {playbook}")
 
                         # enable ldap
-                        output = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
-                        ldap_facts = self.playbook_task_res( 'Create user', 'gather user ldap facts', output )['ansible_facts']
+                        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
+                        ldap_facts = self.playbook_task_res( runner, 'Create user', 'gather user ldap facts' )['ansible_facts']
                         shell = self.run_playbook( playbook, user=user, user_facility=facility, tags='shell' )
                         self.LOG.debug(f"ldap facts: {ldap_facts}")
 
@@ -175,7 +177,7 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
 
 
                         # configure home directory
-                        output = self.run_playbook( playbook, user=user, user_facility=facility, tags='home' )
+                        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='home' )
                         # TODO determine the storage paths and amount
                         user_storage_req = {
                             'user' : {
@@ -193,7 +195,7 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
                         self.back_channel.execute( USER_STORAGE_GQL, user_storage_req )
 
                         # do any facility specific tasks
-                        ansible_output = self.run_playbook( playbook, user=user, user_facility=facility, tags='facility' )
+                        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='facility' )
                         self.LOG.info(f"Marking request {req_id} complete")
                         self.markCompleteRequest( req, 'AnsibleRunner completed' )
 
