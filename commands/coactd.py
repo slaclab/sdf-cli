@@ -274,43 +274,90 @@ class RepoRegistration(Registration):
     def do(self, req_id, op_type, req_type, approval, req):
 
         if req_type == 'NewRepo':
+            return self.do_new_repo( self, req_id, op_type, req_type, approval, req )
+        elif req_type == 'RepoMembership':
+            return self.do_repo_membership( self, req_id, op_type, req_type, approval, req )
+
+    def do_new_repo( self, req_id, op_type, req_type, approval, req):
+
+        try:
+            name = req.get('reponame', None)
+            facility = req.get('facilityname', None)
+            principal = req.get('principal', None )
+            assert name and facility and principal
+        except Exception as e:
+            raise Exception('No valid facility, name and principal present in request')
+
+        # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
+        # email to all parties that its completed
+        # make sure this is idempotent
+        if approval in [ RequestStatus.APPROVED ]:
 
             try:
-                name = req.get('reponame', None)
-                facility = req.get('facilityname', None)
-                principal = req.get('principal', None )
-                assert name and facility and principal
-            except Exception as e:
-                raise Exception('No valid facility, name and principal present in request')
 
-            # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
-            # email to all parties that its completed
-            # make sure this is idempotent
-            if approval in [ RequestStatus.APPROVED ]:
+                # add repo as new account in slurm
+                
+                # deal with storage
 
-                try:
-
-                    # write back to coact the repo information
-                    repo_create_req = {
-                        'repo': {
-                            'name': name,
-                            'facility': facility,
-                            'principal': principal,
-                            'leaders': [],
-                            'users': [],
-                        }
+                # write back to coact the repo information
+                repo_create_req = {
+                    'repo': {
+                        'name': name,
+                        'facility': facility,
+                        'principal': principal,
+                        'leaders': [],
+                        'users': [],
                     }
-                    self.LOG.info(f"upserting repo record {repo_create_req}")
-                    self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
+                }
+                self.LOG.info(f"upserting repo record {repo_create_req}")
+                self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
 
-                    # mark the request complete
-                    self.LOG.info(f"Marking request {req_id} complete")
-                    self.markCompleteRequest( req, 'AnsibleRunner completed' )
+                # mark the request complete
+                self.LOG.info(f"Marking request {req_id} complete")
+                self.markCompleteRequest( req, 'AnsibleRunner completed' )
 
-                except Exception as e:
-                    self.LOG.error( f'Request {req_id} failed to complete: {e}' )
-                    self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
-        
+            except Exception as e:
+                self.LOG.error( f'Request {req_id} failed to complete: {e}' )
+                self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+    
+    def do_repo_membership( self, req_id, op_type, req_type, approval, req):
+
+        try:
+            repo = req.get('reponame', None)
+            facility = req.get('facilityname', None)
+            assert repo and facility
+        except Exception as e:
+            raise Exception('No valid facility, name and principal present in request')
+
+        # make sure this is idempotent
+        if approval in [ RequestStatus.APPROVED ]:
+            playbook = 'add_slurmuser.yaml'
+
+            try:
+
+                # determine slurm account name; facility:repo
+                raise NotImplementedError("need 'user' var")
+                account_name = f'{facility}:{repo}'
+                
+                # run playbook to add that user to the account
+                runner = self.run_playbook( playbook, user=user, user_account=account_name )
+                
+                # fetch for the list of all users for the repo
+
+                # sync slurm accounts to repo's members
+
+                # deal with qoses for slurm account
+
+                #self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
+
+                # mark the request complete
+                self.LOG.info(f"Marking request {req_id} complete")
+                self.markCompleteRequest( req, 'AnsibleRunner completed' )
+
+            except Exception as e:
+                self.LOG.error( f'Request {req_id} failed to complete: {e}' )
+                self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+    
 
 
 
