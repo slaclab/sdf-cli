@@ -2,7 +2,6 @@
 ansible-runner/artifacts
 pip-selfcheck.json
 
-
 __pycache__
 bin/
 lib/
