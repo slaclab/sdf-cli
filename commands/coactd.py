@@ -96,6 +96,54 @@ class EmailRunner():
         return s.quit()
 
 
+class Registration(Command, GraphQlSubscriber, AnsibleRunner):
+    'Base class for servicing Coact Requests'
+    LOG = logging.getLogger(__name__)
+    back_channel = None
+    request_types = []
+
+    def get_parser(self, prog_name):
+        parser = super(Registration, self).get_parser(prog_name)
+        parser.add_argument('--verbose', help='verbose output', required=False)
+        parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
+        parser.add_argument('--password-file', help='basic auth password for graphql service', required=True)
+        return parser
+
+    def take_action(self, parsed_args):
+        # connect
+        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
+        q = """
+            subscription {
+                requests {
+                    theRequest {
+                        Id
+                        reqtype
+                        approvalstatus
+                        eppn
+                        preferredUserName
+                        reponame
+                        facilityname
+                        principal
+                        username
+                        actedat
+                        actedby
+                        requestedby
+                        timeofrequest
+                    }
+                    operationType
+                }
+            }
+        """
+        sub = self.connect_subscriber( username=parsed_args.username, password=self.get_password(parsed_args.password_file ) )
+        for req_id, op_type, req_type, approval, req in self.subscribe( q ):
+            self.LOG.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
+            if req_type in self.request_types:
+                self.do( req_id, op_type, req_type, approval, req )
+        
+
+    def do(self, req_id, op_type, req_type, approval, req):
+        raise NotImplementedError('do() is abstract')
+
 
 class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner):
     'workflow for user creation'
@@ -219,86 +267,50 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner):
             self.LOG.info(f"Done processing {req_id}")
 
 
-class RepoRegistration(Command,GraphQlSubscriber,AnsibleRunner):
+class RepoRegistration(Registration):
     'workflow for repo creation'
-    LOG = logging.getLogger(__name__)
-    back_channel = None
+    request_types = [ 'NewRepo', 'RepoMembership' ]
 
-    def get_parser(self, prog_name):
-        parser = super(RepoRegistration, self).get_parser(prog_name)
-        parser.add_argument('--verbose', help='verbose output', required=False)
-        parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-cli')
-        parser.add_argument('--password-file', help='basic auth password for graphql service', required=True)
-        return parser
+    def do(self, req_id, op_type, req_type, approval, req):
 
-    def take_action(self, parsed_args):
+        if req_type == 'NewRepo':
 
-        # connect
-        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
-        q = """
-            subscription {
-                requests {
-                    theRequest {
-                        Id
-                        reqtype
-                        approvalstatus
-                        eppn
-                        preferredUserName
-                        reponame
-                        facilityname
-                        principal
-                        username
-                        actedat
-                        actedby
-                        requestedby
-                        timeofrequest
-                    }
-                    operationType
-                }
-            }
-        """
+            try:
+                name = req.get('reponame', None)
+                facility = req.get('facilityname', None)
+                principal = req.get('principal', None )
+                assert name and facility and principal
+            except Exception as e:
+                raise Exception('No valid facility, name and principal present in request')
 
-        sub = self.connect_subscriber( username=parsed_args.username, password=self.get_password(parsed_args.password_file ) )
-        for req_id, op_type, req_type, approval, req in self.subscribe( q ):
-            self.LOG.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
-            if req_type == 'NewRepo':
+            # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
+            # email to all parties that its completed
+            # make sure this is idempotent
+            if approval in [ RequestStatus.APPROVED ]:
 
                 try:
-                    name = req.get('reponame', None)
-                    facility = req.get('facilityname', None)
-                    principal = req.get('principal', None )
-                    assert name and facility and principal
-                except Exception as e:
-                    raise Exception('No valid facility, name and principal present in request')
 
-                # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
-                # email to all parties that its completed
-                # make sure this is idempotent
-                if approval in [ RequestStatus.APPROVED ]:
-
-                    try:
-
-                        # write back to coact the repo information
-                        repo_create_req = {
-                            'repo': {
-                                'name': name,
-                                'facility': facility,
-                                'principal': principal,
-                                'leaders': [],
-                                'users': [],
-                            }
+                    # write back to coact the repo information
+                    repo_create_req = {
+                        'repo': {
+                            'name': name,
+                            'facility': facility,
+                            'principal': principal,
+                            'leaders': [],
+                            'users': [],
                         }
-                        self.LOG.info(f"upserting repo record {repo_create_req}")
-                        self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
+                    }
+                    self.LOG.info(f"upserting repo record {repo_create_req}")
+                    self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
 
-                        # mark the request complete
-                        self.LOG.info(f"Marking request {req_id} complete")
-                        self.markCompleteRequest( req, 'AnsibleRunner completed' )
+                    # mark the request complete
+                    self.LOG.info(f"Marking request {req_id} complete")
+                    self.markCompleteRequest( req, 'AnsibleRunner completed' )
 
-                    except Exception as e:
-                        self.LOG.error( f'Request {req_id} failed to complete: {e}' )
-                        self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
-            
+                except Exception as e:
+                    self.LOG.error( f'Request {req_id} failed to complete: {e}' )
+                    self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+        
 
 
 
