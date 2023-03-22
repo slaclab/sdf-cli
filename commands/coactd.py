@@ -277,16 +277,21 @@ class RepoRegistration(Command,GraphQlSubscriber,AnsibleRunner):
                 if approval in [ RequestStatus.APPROVED ]:
 
                     try:
+
+                        # write back to coact the repo information
                         repo_create_req = {
                             'repo': {
                                 'name': name,
                                 'facility': facility,
                                 'principal': principal,
+                                'leaders': [],
+                                'users': [],
                             }
                         }
                         self.LOG.info(f"upserting repo record {repo_create_req}")
                         self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
 
+                        # mark the request complete
                         self.LOG.info(f"Marking request {req_id} complete")
                         self.markCompleteRequest( req, 'AnsibleRunner completed' )
 
