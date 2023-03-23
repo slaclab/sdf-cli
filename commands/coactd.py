@@ -274,9 +274,9 @@ class RepoRegistration(Registration):
     def do(self, req_id, op_type, req_type, approval, req):
 
         if req_type == 'NewRepo':
-            return self.do_new_repo( self, req_id, op_type, req_type, approval, req )
+            return self.do_new_repo( req_id, op_type, req_type, approval, req )
         elif req_type == 'RepoMembership':
-            return self.do_repo_membership( self, req_id, op_type, req_type, approval, req )
+            return self.do_repo_membership( req_id, op_type, req_type, approval, req )
 
     def do_new_repo( self, req_id, op_type, req_type, approval, req):
 
@@ -305,8 +305,8 @@ class RepoRegistration(Registration):
                         'name': name,
                         'facility': facility,
                         'principal': principal,
-                        'leaders': [],
-                        'users': [],
+                        'leaders': [ principal, ],
+                        'users': [ principal, ],
                     }
                 }
                 self.LOG.info(f"upserting repo record {repo_create_req}")
