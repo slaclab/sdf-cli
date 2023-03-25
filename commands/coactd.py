@@ -141,7 +141,7 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
                 self.do( req_id, op_type, req_type, approval, req )
         
 
-    def do(self, req_id, op_type, req_type, approval, req):
+    def do(self, req_id: str, op_type: Any, req_type: Any, approval: str, req: dict):
         raise NotImplementedError('do() is abstract')
 
 
@@ -271,8 +271,18 @@ class RepoRegistration(Registration):
     'workflow for repo creation'
     request_types = [ 'NewRepo', 'RepoMembership' ]
 
+
+
+    REPO_USERS_GQL = gql("""
+      query getRepoUsers ( $repo: RepoInput! ) {
+        repo( filter: $repo ) {
+            users
+        }
+      }""")
+
     def do(self, req_id, op_type, req_type, approval, req):
 
+        #self.LOG.debug(f"GOT REQ_TYPE: req_id: {req_id} ({type(req_id)}), op_type: {op_type} ({type(op_type)}), req_type: {req_type} ({type(req_type)}), approval: {approval} ({type(approval)}), req {req} ({type(req)})")
         if req_type == 'NewRepo':
             return self.do_new_repo( req_id, op_type, req_type, approval, req )
         elif req_type == 'RepoMembership':
@@ -327,24 +337,23 @@ class RepoRegistration(Registration):
             facility = req.get('facilityname', None)
             assert repo and facility
         except Exception as e:
-            raise Exception('No valid facility, name and principal present in request')
+            raise Exception('No valid facility or repo present in request')
 
         # make sure this is idempotent
         if approval in [ RequestStatus.APPROVED ]:
-            playbook = 'add_slurmuser.yaml'
 
             try:
 
                 # determine slurm account name; facility:repo
-                raise NotImplementedError("need 'user' var")
-                account_name = f'{facility}:{repo}'
-                
-                # run playbook to add that user to the account
-                runner = self.run_playbook( playbook, user=user, user_account=account_name )
-                
-                # fetch for the list of all users for the repo
+                account_name = f'{facility}:{repo}'.lower()
 
-                # sync slurm accounts to repo's members
+                # fetch for the list of all users for the repo
+                users = self.back_channel.execute( self.REPO_USERS_GQL, { 'repo': {'facility': facility, 'name': repo }} )['repo']['users']
+                users_str = ','.join(users)
+                self.LOG.info(f"setting account {account_name} to users {users_str}")
+                
+                # run playbook to sync users to the slurm account
+                runner = self.run_playbook( 'slurm-users.yaml', users=users_str, user_account=account_name )
 
                 # deal with qoses for slurm account
 
