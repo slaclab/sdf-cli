@@ -22,22 +22,6 @@ import logging
 
 COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
 
-USER_UPSERT_GQL = gql("""
-    mutation userUpsert($user: UserInput!) {
-        userUpsert(user: $user) {
-            Id
-        }
-    }
-    """)
-
-USER_STORAGE_GQL = gql("""
-    mutation userStorageAllocationUpsert($user: UserInput!, $userstorage: UserStorageInput!) {
-        userStorageAllocationUpsert(user: $user, userstorage: $userstorage) {
-            Id
-        }
-    }
-    """)
-
 REPO_UPSERT_GQL = gql("""
     mutation repoUpsert($repo: RepoInput! ) {
         repoUpsert(repo: $repo) {
@@ -145,126 +129,102 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
         raise NotImplementedError('do() is abstract')
 
 
-class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner):
+class UserRegistration(Registration):
     'workflow for user creation'
-    LOG = logging.getLogger(__name__)
-    back_channel = None
+    request_types = [ 'UserAccount', ]
 
-    def get_parser(self, prog_name):
-        parser = super(UserRegistration, self).get_parser(prog_name)
-        parser.add_argument('--verbose', help='verbose output', required=False)
-        parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
-        parser.add_argument('--password-file', help='basic auth password for graphql service', required=True)
-        parser.add_argument('--smtp-server', help='smtp relay address', default='smtp.slac.stanford.edu')
-        return parser
-
-    def take_action(self, parsed_args):
-
-        # connect
-        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
-        q = """
-            subscription {
-                requests {
-                    theRequest {
-                        Id
-                        reqtype
-                        approvalstatus
-                        eppn
-                        preferredUserName
-                        reponame
-                        facilityname
-                        principal
-                        username
-                        actedat
-                        actedby
-                        requestedby
-                        timeofrequest
-                    }
-                    operationType
-                }
+    USER_UPSERT_GQL = gql("""
+        mutation userUpsert($user: UserInput!) {
+            userUpsert(user: $user) {
+                Id
             }
-        """
+        }
+        """)
 
-        sub = self.connect_subscriber( username=parsed_args.username, password=self.get_password(parsed_args.password_file ) )
-        for req_id, op_type, req_type, approval, req in self.subscribe( q ):
-            self.LOG.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
+    USER_STORAGE_GQL = gql("""
+        mutation userStorageAllocationUpsert($user: UserInput!, $userstorage: UserStorageInput!) {
+            userStorageAllocationUpsert(user: $user, userstorage: $userstorage) {
+                Id
+            }
+        }
+        """)
 
-            v = {}
+    def do(self, req_id, op_type, req_type, approval, req):
+        if req_type == 'UserAccount':
+            return self.do_user_account( req_id, op_type, req_type, approval, req )
 
-            if req_type == 'UserAccount':
+    def do_user_account(self, req_id, op_type, req_type, approval, req):
 
-                try:
-                    user = req.get('preferredUserName', None)
-                    facility = req.get('facilityname', None)
-                    eppn = req.get('eppn', None )
-                    assert user and facility and eppn
-                except Exception as e:
-                    raise Exception('No valid username or user_facility present in request')
+        try:
+            user = req.get('preferredUserName', None)
+            facility = req.get('facilityname', None)
+            eppn = req.get('eppn', None )
+            assert user and facility and eppn
+        except Exception as e:
+            raise Exception('No valid username or user_facility present in request')
 
-                # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
-                # email to all parties that its completed
-                # make sure this is idempotent
-                if approval in [ RequestStatus.APPROVED ]:
+        # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
+        # email to all parties that its completed
+        # make sure this is idempotent
+        if approval in [ RequestStatus.APPROVED ]:
 
-                    try:
-                        playbook = 'add_user.yaml'
+            try:
+                playbook = 'add_user.yaml'
 
-                        self.LOG.info(f"Initiating {req_type} request for {user} at facility {facility} using {playbook}")
+                self.LOG.info(f"Initiating {req_type} request for {user} at facility {facility} using {playbook}")
 
-                        # enable ldap
-                        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
-                        ldap_facts = self.playbook_task_res( runner, 'Create user', 'gather user ldap facts' )['ansible_facts']
-                        shell = self.run_playbook( playbook, user=user, user_facility=facility, tags='shell' )
-                        self.LOG.debug(f"ldap facts: {ldap_facts}")
+                # enable ldap
+                runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
+                ldap_facts = self.playbook_task_res( runner, 'Create user', 'gather user ldap facts' )['ansible_facts']
+                shell = self.run_playbook( playbook, user=user, user_facility=facility, tags='shell' )
+                self.LOG.debug(f"ldap facts: {ldap_facts}")
 
-                        user_create_req = {
-                            'user': {
-                                'username': user,
-                                'eppns': [ eppn, ],
-                                'shell': ldap_facts['ldap_user_default_shell'],
-                                'preferredemail': eppn,
-                                'uidnumber': int(ldap_facts['ldap_user_uidNumber']),
-                                'fullname': ldap_facts['ldap_user_gecos'],
-                            }
-                        }
-                        self.LOG.debug(f"upserting user record {user_create_req}")
-                        self.back_channel.execute( USER_UPSERT_GQL, user_create_req ) 
+                user_create_req = {
+                    'user': {
+                        'username': user,
+                        'eppns': [ eppn, ],
+                        'shell': ldap_facts['ldap_user_default_shell'],
+                        'preferredemail': eppn,
+                        'uidnumber': int(ldap_facts['ldap_user_uidNumber']),
+                        'fullname': ldap_facts['ldap_user_gecos'],
+                    }
+                }
+                self.LOG.debug(f"upserting user record {user_create_req}")
+                self.back_channel.execute( self.USER_UPSERT_GQL, user_create_req ) 
 
 
-                        # configure home directory
-                        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='home' )
-                        # TODO determine the storage paths and amount
-                        user_storage_req = {
-                            'user' : {
-                                'username': user,
-                            },
-                            'userstorage': {
-                                'username': user,
-                                'purpose': "home",
-                                'gigabytes': 25,
-                                'storagename': "sdfhome",
-                                'rootfolder': ldap_facts['ldap_user_homedir'],
-                            }
-                        }
-                        self.LOG.debug(f"upserting user storage record {user_storage_req}")
-                        self.back_channel.execute( USER_STORAGE_GQL, user_storage_req )
+                # configure home directory; need force_copy_skel incase they already belong to another facility
+                runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='home', force_copy_skel=True )
+                # TODO determine the storage paths and amount
+                user_storage_req = {
+                    'user' : {
+                        'username': user,
+                    },
+                    'userstorage': {
+                        'username': user,
+                        'purpose': "home",
+                        'gigabytes': 25,
+                        'storagename': "sdfhome",
+                        'rootfolder': ldap_facts['ldap_user_homedir'],
+                    }
+                }
+                self.LOG.debug(f"upserting user storage record {user_storage_req}")
+                self.back_channel.execute( self.USER_STORAGE_GQL, user_storage_req )
 
-                        # do any facility specific tasks
-                        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='facility' )
-                        self.LOG.info(f"Marking request {req_id} complete")
-                        self.markCompleteRequest( req, 'AnsibleRunner completed' )
+                # do any facility specific tasks
+                runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='facility' )
+                self.LOG.info(f"Marking request {req_id} complete")
+                self.markCompleteRequest( req, 'AnsibleRunner completed' )
 
-                    except Exception as e:
-                        self.LOG.error( f'Request {req_id} failed to complete: {e}' )
-                        self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+            except Exception as e:
+                self.LOG.error( f'Request {req_id} failed to complete: {e}' )
+                self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
 
-                else:
-                    self.LOG.info(f"Ingoring {approval} state request")
+        else:
+            self.LOG.info(f"Ingoring {approval} state request")
 
-            else:
-                self.LOG.info(f"Ignoring request type {req_type}")
-
-            self.LOG.info(f"Done processing {req_id}")
+        self.LOG.info(f"Done processing {req_id}")
+        return True
 
 
 class RepoRegistration(Registration):
