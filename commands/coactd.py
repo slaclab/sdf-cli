@@ -121,12 +121,27 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
         sub = self.connect_subscriber( username=parsed_args.username, password=self.get_password(parsed_args.password_file ) )
         for req_id, op_type, req_type, approval, req in self.subscribe( q ):
             self.LOG.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
-            if req_type in self.request_types:
-                self.do( req_id, op_type, req_type, approval, req )
+            try:
+
+                if req_type in self.request_types:
+
+                    result = self.do( req_id, op_type, req_type, approval, req )
+                    if result:
+                        self.LOG.info(f"Marking request {req_id} complete")
+                        self.markCompleteRequest( req, 'AnsibleRunner completed' )
+                        self.LOG.info(f"Done processing {req_id}")
+                        
+                else:
+                    self.LOG.info(f"Ignoring {req_id}")
+
+            except Exception as e:
+                self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+                self.LOG.error(f"Error processing {req_id}: {e}")
         
 
     def do(self, req_id: str, op_type: Any, req_type: Any, approval: str, req: dict):
         raise NotImplementedError('do() is abstract')
+        return True
 
 
 class UserRegistration(Registration):
@@ -150,81 +165,68 @@ class UserRegistration(Registration):
         """)
 
     def do(self, req_id, op_type, req_type, approval, req):
-        if req_type == 'UserAccount':
-            return self.do_user_account( req_id, op_type, req_type, approval, req )
 
-    def do_user_account(self, req_id, op_type, req_type, approval, req):
-
-        try:
-            user = req.get('preferredUserName', None)
-            facility = req.get('facilityname', None)
-            eppn = req.get('eppn', None )
-            assert user and facility and eppn
-        except Exception as e:
-            raise Exception('No valid username or user_facility present in request')
+        user = req.get('preferredUserName', None)
+        facility = req.get('facilityname', None)
+        eppn = req.get('eppn', None )
+        assert user and facility and eppn
 
         # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
         # email to all parties that its completed
         # make sure this is idempotent
         if approval in [ RequestStatus.APPROVED ]:
 
-            try:
-                playbook = 'add_user.yaml'
+            playbook = 'add_user.yaml'
 
-                self.LOG.info(f"Initiating {req_type} request for {user} at facility {facility} using {playbook}")
+            self.LOG.info(f"Initiating {req_type} request for {user} at facility {facility} using {playbook}")
 
-                # enable ldap
-                runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
-                ldap_facts = self.playbook_task_res( runner, 'Create user', 'gather user ldap facts' )['ansible_facts']
-                shell = self.run_playbook( playbook, user=user, user_facility=facility, tags='shell' )
-                self.LOG.debug(f"ldap facts: {ldap_facts}")
+            # enable ldap
+            runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
+            ldap_facts = self.playbook_task_res( runner, 'Create user', 'gather user ldap facts' )['ansible_facts']
+            shell = self.run_playbook( playbook, user=user, user_facility=facility, tags='shell' )
+            self.LOG.debug(f"ldap facts: {ldap_facts}")
 
-                user_create_req = {
-                    'user': {
-                        'username': user,
-                        'eppns': [ eppn, ],
-                        'shell': ldap_facts['ldap_user_default_shell'],
-                        'preferredemail': eppn,
-                        'uidnumber': int(ldap_facts['ldap_user_uidNumber']),
-                        'fullname': ldap_facts['ldap_user_gecos'],
-                    }
+            user_create_req = {
+                'user': {
+                    'username': user,
+                    'eppns': [ eppn, ],
+                    'shell': ldap_facts['ldap_user_default_shell'],
+                    'preferredemail': eppn,
+                    'uidnumber': int(ldap_facts['ldap_user_uidNumber']),
+                    'fullname': ldap_facts['ldap_user_gecos'],
                 }
-                self.LOG.debug(f"upserting user record {user_create_req}")
-                self.back_channel.execute( self.USER_UPSERT_GQL, user_create_req ) 
+            }
+            self.LOG.debug(f"upserting user record {user_create_req}")
+            self.back_channel.execute( self.USER_UPSERT_GQL, user_create_req ) 
 
 
-                # configure home directory; need force_copy_skel incase they already belong to another facility
-                runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='home', force_copy_skel=True )
-                # TODO determine the storage paths and amount
-                user_storage_req = {
-                    'user' : {
-                        'username': user,
-                    },
-                    'userstorage': {
-                        'username': user,
-                        'purpose': "home",
-                        'gigabytes': 25,
-                        'storagename': "sdfhome",
-                        'rootfolder': ldap_facts['ldap_user_homedir'],
-                    }
+            # configure home directory; need force_copy_skel incase they already belong to another facility
+            runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='home', force_copy_skel=True )
+            # TODO determine the storage paths and amount
+            user_storage_req = {
+                'user' : {
+                    'username': user,
+                },
+                'userstorage': {
+                    'username': user,
+                    'purpose': "home",
+                    'gigabytes': 25,
+                    'storagename': "sdfhome",
+                    'rootfolder': ldap_facts['ldap_user_homedir'],
                 }
-                self.LOG.debug(f"upserting user storage record {user_storage_req}")
-                self.back_channel.execute( self.USER_STORAGE_GQL, user_storage_req )
+            }
+            self.LOG.debug(f"upserting user storage record {user_storage_req}")
+            self.back_channel.execute( self.USER_STORAGE_GQL, user_storage_req )
 
-                # do any facility specific tasks
-                runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='facility' )
-                self.LOG.info(f"Marking request {req_id} complete")
-                self.markCompleteRequest( req, 'AnsibleRunner completed' )
+            # do any facility specific tasks
+            runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='facility' )
 
-            except Exception as e:
-                self.LOG.error( f'Request {req_id} failed to complete: {e}' )
-                self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+            return True
 
         else:
             self.LOG.info(f"Ingoring {approval} state request")
+            return None
 
-        self.LOG.info(f"Done processing {req_id}")
-        return True
 
 
 class RepoRegistration(Registration):
@@ -242,7 +244,6 @@ class RepoRegistration(Registration):
 
     def do(self, req_id, op_type, req_type, approval, req):
 
-        #self.LOG.debug(f"GOT REQ_TYPE: req_id: {req_id} ({type(req_id)}), op_type: {op_type} ({type(op_type)}), req_type: {req_type} ({type(req_type)}), approval: {approval} ({type(approval)}), req {req} ({type(req)})")
         if req_type == 'NewRepo':
             return self.do_new_repo( req_id, op_type, req_type, approval, req )
         elif req_type == 'RepoMembership':
@@ -250,82 +251,65 @@ class RepoRegistration(Registration):
 
     def do_new_repo( self, req_id, op_type, req_type, approval, req):
 
-        try:
-            name = req.get('reponame', None)
-            facility = req.get('facilityname', None)
-            principal = req.get('principal', None )
-            assert name and facility and principal
-        except Exception as e:
-            raise Exception('No valid facility, name and principal present in request')
+        name = req.get('reponame', None)
+        facility = req.get('facilityname', None)
+        principal = req.get('principal', None )
+        assert name and facility and principal
 
         # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
         # email to all parties that its completed
         # make sure this is idempotent
         if approval in [ RequestStatus.APPROVED ]:
 
-            try:
+            # add repo as new account in slurm
+            
+            # deal with storage
 
-                # add repo as new account in slurm
-                
-                # deal with storage
-
-                # write back to coact the repo information
-                repo_create_req = {
-                    'repo': {
-                        'name': name,
-                        'facility': facility,
-                        'principal': principal,
-                        'leaders': [ principal, ],
-                        'users': [ principal, ],
-                    }
+            # write back to coact the repo information
+            repo_create_req = {
+                'repo': {
+                    'name': name,
+                    'facility': facility,
+                    'principal': principal,
+                    'leaders': [ principal, ],
+                    'users': [ principal, ],
                 }
-                self.LOG.info(f"upserting repo record {repo_create_req}")
-                self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
+            }
+            self.LOG.info(f"upserting repo record {repo_create_req}")
+            self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
 
-                # mark the request complete
-                self.LOG.info(f"Marking request {req_id} complete")
-                self.markCompleteRequest( req, 'AnsibleRunner completed' )
+            return True
 
-            except Exception as e:
-                self.LOG.error( f'Request {req_id} failed to complete: {e}' )
-                self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+        return None
+
     
     def do_repo_membership( self, req_id, op_type, req_type, approval, req):
 
-        try:
-            repo = req.get('reponame', None)
-            facility = req.get('facilityname', None)
-            assert repo and facility
-        except Exception as e:
-            raise Exception('No valid facility or repo present in request')
+        repo = req.get('reponame', None)
+        facility = req.get('facilityname', None)
+        assert repo and facility
 
         # make sure this is idempotent
         if approval in [ RequestStatus.APPROVED ]:
 
-            try:
+            # determine slurm account name; facility:repo
+            account_name = f'{facility}:{repo}'.lower()
 
-                # determine slurm account name; facility:repo
-                account_name = f'{facility}:{repo}'.lower()
+            # fetch for the list of all users for the repo
+            users = self.back_channel.execute( self.REPO_USERS_GQL, { 'repo': {'facility': facility, 'name': repo }} )['repo']['users']
+            users_str = ','.join(users)
+            self.LOG.info(f"setting account {account_name} to users {users_str}")
+            
+            # run playbook to sync users to the slurm account
+            runner = self.run_playbook( 'slurm-users.yaml', users=users_str, user_account=account_name )
 
-                # fetch for the list of all users for the repo
-                users = self.back_channel.execute( self.REPO_USERS_GQL, { 'repo': {'facility': facility, 'name': repo }} )['repo']['users']
-                users_str = ','.join(users)
-                self.LOG.info(f"setting account {account_name} to users {users_str}")
-                
-                # run playbook to sync users to the slurm account
-                runner = self.run_playbook( 'slurm-users.yaml', users=users_str, user_account=account_name )
+            # deal with qoses for slurm account
 
-                # deal with qoses for slurm account
+            #self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
 
-                #self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
+            return True
 
-                # mark the request complete
-                self.LOG.info(f"Marking request {req_id} complete")
-                self.markCompleteRequest( req, 'AnsibleRunner completed' )
-
-            except Exception as e:
-                self.LOG.error( f'Request {req_id} failed to complete: {e}' )
-                self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+        return None
     
 
 
