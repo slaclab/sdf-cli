@@ -22,13 +22,6 @@ import logging
 
 COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
 
-REPO_UPSERT_GQL = gql("""
-    mutation repoUpsert($repo: RepoInput! ) {
-        repoUpsert(repo: $repo) {
-            Id
-        }
-    }
-    """)
 
 # order of class inherietence important: https://stackoverflow.com/questions/58608361/string-based-enum-in-python
 class RequestStatus(str,Enum):
@@ -233,14 +226,20 @@ class RepoRegistration(Registration):
     'workflow for repo creation'
     request_types = [ 'NewRepo', 'RepoMembership' ]
 
-
-
     REPO_USERS_GQL = gql("""
       query getRepoUsers ( $repo: RepoInput! ) {
         repo( filter: $repo ) {
             users
         }
       }""")
+
+    REPO_UPSERT_GQL = gql("""
+        mutation repoUpsert($repo: RepoInput! ) {
+            repoUpsert(repo: $repo) {
+                Id
+            }
+        }
+        """)
 
     def do(self, req_id, op_type, req_type, approval, req):
 
@@ -276,7 +275,7 @@ class RepoRegistration(Registration):
                 }
             }
             self.LOG.info(f"upserting repo record {repo_create_req}")
-            self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
+            self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
 
             return True
 
@@ -305,7 +304,7 @@ class RepoRegistration(Registration):
 
             # deal with qoses for slurm account
 
-            #self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
+            #self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
 
             return True
 
