@@ -231,8 +231,8 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner):
                         self.back_channel.execute( USER_UPSERT_GQL, user_create_req ) 
 
 
-                        # configure home directory
-                        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='home' )
+                        # configure home directory; need force_copy_skel incase they already belong to another facility
+                        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='home', force_copy_skel=True )
                         # TODO determine the storage paths and amount
                         user_storage_req = {
                             'user' : {
