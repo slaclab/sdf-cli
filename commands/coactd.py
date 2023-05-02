@@ -38,6 +38,13 @@ USER_STORAGE_GQL = gql("""
     }
     """)
 
+REPO_UPSERT_GQL = gql("""
+    mutation repoUpsert($repo: RepoInput! ) {
+        repoUpsert(repo: $repo) {
+            Id
+        }
+    }
+    """)
 
 # order of class inherietence important: https://stackoverflow.com/questions/58608361/string-based-enum-in-python
 class RequestStatus(str,Enum):
@@ -89,8 +96,56 @@ class EmailRunner():
         return s.quit()
 
 
+class Registration(Command, GraphQlSubscriber, AnsibleRunner):
+    'Base class for servicing Coact Requests'
+    LOG = logging.getLogger(__name__)
+    back_channel = None
+    request_types = []
 
-class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
+    def get_parser(self, prog_name):
+        parser = super(Registration, self).get_parser(prog_name)
+        parser.add_argument('--verbose', help='verbose output', required=False)
+        parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
+        parser.add_argument('--password-file', help='basic auth password for graphql service', required=True)
+        return parser
+
+    def take_action(self, parsed_args):
+        # connect
+        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
+        q = """
+            subscription {
+                requests {
+                    theRequest {
+                        Id
+                        reqtype
+                        approvalstatus
+                        eppn
+                        preferredUserName
+                        reponame
+                        facilityname
+                        principal
+                        username
+                        actedat
+                        actedby
+                        requestedby
+                        timeofrequest
+                    }
+                    operationType
+                }
+            }
+        """
+        sub = self.connect_subscriber( username=parsed_args.username, password=self.get_password(parsed_args.password_file ) )
+        for req_id, op_type, req_type, approval, req in self.subscribe( q ):
+            self.LOG.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
+            if req_type in self.request_types:
+                self.do( req_id, op_type, req_type, approval, req )
+        
+
+    def do(self, req_id: str, op_type: Any, req_type: Any, approval: str, req: dict):
+        raise NotImplementedError('do() is abstract')
+
+
+class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner):
     'workflow for user creation'
     LOG = logging.getLogger(__name__)
     back_channel = None
@@ -212,6 +267,108 @@ class UserRegistration(Command,GraphQlSubscriber,AnsibleRunner,EmailRunner):
             self.LOG.info(f"Done processing {req_id}")
 
 
+class RepoRegistration(Registration):
+    'workflow for repo creation'
+    request_types = [ 'NewRepo', 'RepoMembership' ]
+
+
+
+    REPO_USERS_GQL = gql("""
+      query getRepoUsers ( $repo: RepoInput! ) {
+        repo( filter: $repo ) {
+            users
+        }
+      }""")
+
+    def do(self, req_id, op_type, req_type, approval, req):
+
+        #self.LOG.debug(f"GOT REQ_TYPE: req_id: {req_id} ({type(req_id)}), op_type: {op_type} ({type(op_type)}), req_type: {req_type} ({type(req_type)}), approval: {approval} ({type(approval)}), req {req} ({type(req)})")
+        if req_type == 'NewRepo':
+            return self.do_new_repo( req_id, op_type, req_type, approval, req )
+        elif req_type == 'RepoMembership':
+            return self.do_repo_membership( req_id, op_type, req_type, approval, req )
+
+    def do_new_repo( self, req_id, op_type, req_type, approval, req):
+
+        try:
+            name = req.get('reponame', None)
+            facility = req.get('facilityname', None)
+            principal = req.get('principal', None )
+            assert name and facility and principal
+        except Exception as e:
+            raise Exception('No valid facility, name and principal present in request')
+
+        # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
+        # email to all parties that its completed
+        # make sure this is idempotent
+        if approval in [ RequestStatus.APPROVED ]:
+
+            try:
+
+                # add repo as new account in slurm
+                
+                # deal with storage
+
+                # write back to coact the repo information
+                repo_create_req = {
+                    'repo': {
+                        'name': name,
+                        'facility': facility,
+                        'principal': principal,
+                        'leaders': [ principal, ],
+                        'users': [ principal, ],
+                    }
+                }
+                self.LOG.info(f"upserting repo record {repo_create_req}")
+                self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
+
+                # mark the request complete
+                self.LOG.info(f"Marking request {req_id} complete")
+                self.markCompleteRequest( req, 'AnsibleRunner completed' )
+
+            except Exception as e:
+                self.LOG.error( f'Request {req_id} failed to complete: {e}' )
+                self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+    
+    def do_repo_membership( self, req_id, op_type, req_type, approval, req):
+
+        try:
+            repo = req.get('reponame', None)
+            facility = req.get('facilityname', None)
+            assert repo and facility
+        except Exception as e:
+            raise Exception('No valid facility or repo present in request')
+
+        # make sure this is idempotent
+        if approval in [ RequestStatus.APPROVED ]:
+
+            try:
+
+                # determine slurm account name; facility:repo
+                account_name = f'{facility}:{repo}'.lower()
+
+                # fetch for the list of all users for the repo
+                users = self.back_channel.execute( self.REPO_USERS_GQL, { 'repo': {'facility': facility, 'name': repo }} )['repo']['users']
+                users_str = ','.join(users)
+                self.LOG.info(f"setting account {account_name} to users {users_str}")
+                
+                # run playbook to sync users to the slurm account
+                runner = self.run_playbook( 'slurm-users.yaml', users=users_str, user_account=account_name )
+
+                # deal with qoses for slurm account
+
+                #self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
+
+                # mark the request complete
+                self.LOG.info(f"Marking request {req_id} complete")
+                self.markCompleteRequest( req, 'AnsibleRunner completed' )
+
+            except Exception as e:
+                self.LOG.error( f'Request {req_id} failed to complete: {e}' )
+                self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+    
+
+
 
 class Get(Command,GraphQlSubscriber):
     'just streams output from requests subscription'
@@ -247,7 +404,7 @@ class Coactd(CommandManager):
 
     def __init__(self, namespace, convert_underscores=True):
         super(Coactd,self).__init__(namespace, convert_underscores=convert_underscores)
-        for cmd in [ UserRegistration, Get, ]:
+        for cmd in [ UserRegistration, RepoRegistration, Get, ]:
             self.add_command( cmd.__name__.lower(), cmd )
 
 

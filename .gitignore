@@ -1,3 +1,5 @@
+# ignore the ansible outputs
+ansible-runner/artifacts
 pip-selfcheck.json
 
 __pycache__
