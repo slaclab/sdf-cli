@@ -192,6 +192,8 @@ class UserRegistration(Registration):
             self.LOG.debug(f"upserting user record {user_create_req}")
             self.back_channel.execute( self.USER_UPSERT_GQL, user_create_req ) 
 
+            # sshkeys
+            runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='sshkey' )
 
             # configure home directory; need force_copy_skel incase they already belong to another facility
             runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='home', force_copy_skel=True )
