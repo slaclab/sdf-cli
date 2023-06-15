@@ -157,6 +157,12 @@ class UserRegistration(Registration):
         }
         """)
 
+    REPO_ADD_USER_GQL = gql("""
+        mutation repoAddUser($repo: RepoInput!, $user: UserInput!) {
+            repoAddUser(repo: $repo, user: $user) { Id }
+        }
+        """)
+
     def do(self, req_id, op_type, req_type, approval, req):
 
         user = req.get('preferredUserName', None)
@@ -190,7 +196,8 @@ class UserRegistration(Registration):
                 }
             }
             self.LOG.debug(f"upserting user record {user_create_req}")
-            self.back_channel.execute( self.USER_UPSERT_GQL, user_create_req ) 
+            user_id = self.back_channel.execute( self.USER_UPSERT_GQL, user_create_req ) 
+            self.LOG.debug(f"upserted user {user_id}")
 
             # sshkeys
             runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='sshkey' )
@@ -215,6 +222,15 @@ class UserRegistration(Registration):
 
             # do any facility specific tasks
             runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='facility' )
+
+            # always register user with the facility's `default` Repo
+            # Id references don't work in mutation for some reason
+            add_user_req = {
+                'repo': { 'facility': facility, 'name': 'default' },
+                'user': { 'username': user },
+            }
+            self.LOG.debug(f"add to default repo {add_user_req}")
+            self.back_channel.execute( self.REPO_ADD_USER_GQL, add_user_req )
 
             return True
 
