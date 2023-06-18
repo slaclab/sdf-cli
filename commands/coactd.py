@@ -249,8 +249,8 @@ class UserRegistration(Registration):
 
 
 class RepoRegistration(Registration):
-    'workflow for repo creation'
-    request_types = [ 'NewRepo', 'RepoMembership' ]
+    'workflow for repo maintenance'
+    request_types = [ 'NewRepo', 'RepoMembership', 'RepoChangeComputeRequirement' ]
 
     REPO_USERS_GQL = gql("""
       query getRepoUsers ( $repo: RepoInput! ) {
@@ -273,6 +273,7 @@ class RepoRegistration(Registration):
         repo = req.get('reponame', None)
         facility = req.get('facilityname', None)
         principal = req.get('principal', None )
+        requirement = req.get('computerequirement', None)
 
         if req_type == 'NewRepo':
             assert repo and facility and principal
@@ -283,6 +284,11 @@ class RepoRegistration(Registration):
             assert user and repo and facility
             if approval in [ RequestStatus.APPROVED ]:
                 return self.do_repo_membership( user, repo, facility )
+
+        if req_type == 'RepoChangeComputeRequirement':
+            assert repo and facility and requirement
+            if approval in [ RequestStatus.APPROVED ]:
+                return self.do_compute_requirement( repo, facility, requirement )
 
         return None
 
@@ -336,32 +342,7 @@ class RepoRegistration(Registration):
 
         return True
 
-    
-class ComputeRequirementRegistration(Registration):
-    'workflow for updating repo compute requirements like when a repo goes on/off shift'
-    request_types = [ 'RepoChangeComputeRequirement' ]
-
-    REPO_USERS_GQL = gql("""
-      query getRepoUsers ( $repo: RepoInput! ) {
-        repo( filter: $repo ) {
-            users
-        }
-      }""")
-
-    def do(self, req_id, op_type, req_type, approval, req):
-
-        repo = req.get('reponame', None)
-        facility = req.get('facilityname', None)
-        requirement = req.get('computerequirement', None)
-
-        if req_type == 'RepoChangeComputeRequirement':
-            assert repo and facility and requirement
-            if approval in [ RequestStatus.APPROVED ]:
-                return self.do_compute_requirement( repo, facility, requirement )
-
-        return None
-
-    def do_new_repo( self, repo: str, facility: str, requirement: str, playbook: str="repo_change_compute_requirement.yaml" ) -> bool:
+    def do_compute_requirement( self, repo: str, facility: str, requirement: str, playbook: str="repo_change_compute_requirement.yaml" ) -> bool:
         raise NotImplementedError()
 
 
@@ -400,7 +381,7 @@ class Coactd(CommandManager):
 
     def __init__(self, namespace, convert_underscores=True):
         super(Coactd,self).__init__(namespace, convert_underscores=convert_underscores)
-        for cmd in [ UserRegistration, RepoRegistration, ComputeRequirementRegistration, Get, ]:
+        for cmd in [ UserRegistration, RepoRegistration, Get, ]:
             self.add_command( cmd.__name__.lower(), cmd )
 
 
