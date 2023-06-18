@@ -128,13 +128,13 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
                     self.LOG.info(f"Ignoring {req_id}")
 
             except Exception as e:
-                self.markIncompleteRequest( req, 'AnsibleRunner did not complete' )
+                self.markIncompleteRequest( req, f'AnsibleRunner did not complete: {e}' )
                 self.LOG.error(f"Error processing {req_id}: {e}")
         
 
-    def do(self, req_id: str, op_type: Any, req_type: Any, approval: str, req: dict):
+    def do(self, req_id: str, op_type: Any, req_type: Any, approval: str, req: dict) -> bool:
         raise NotImplementedError('do() is abstract')
-        return True
+        return False
 
 
 class UserRegistration(Registration):
@@ -261,74 +261,74 @@ class RepoRegistration(Registration):
 
     def do(self, req_id, op_type, req_type, approval, req):
 
-        if req_type == 'NewRepo':
-            return self.do_new_repo( req_id, op_type, req_type, approval, req )
-        elif req_type == 'RepoMembership':
-            return self.do_repo_membership( req_id, op_type, req_type, approval, req )
-
-    def do_new_repo( self, req_id, op_type, req_type, approval, req):
-
-        name = req.get('reponame', None)
-        facility = req.get('facilityname', None)
-        principal = req.get('principal', None )
-        assert name and facility and principal
-
-        # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
-        # email to all parties that its completed
-        # make sure this is idempotent
-        if approval in [ RequestStatus.APPROVED ]:
-
-            # add repo as new account in slurm
-            
-            # deal with storage
-
-            # write back to coact the repo information
-            repo_create_req = {
-                'repo': {
-                    'name': name,
-                    'facility': facility,
-                    'principal': principal,
-                    'leaders': [ principal, ],
-                    'users': [ principal, ],
-                }
-            }
-            self.LOG.info(f"upserting repo record {repo_create_req}")
-            self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
-
-            return True
-
-        return None
-
-    
-    def do_repo_membership( self, req_id, op_type, req_type, approval, req):
-
+        user = req.get('username', None)
         repo = req.get('reponame', None)
         facility = req.get('facilityname', None)
-        assert repo and facility
+        principal = req.get('principal', None )
 
-        # make sure this is idempotent
-        if approval in [ RequestStatus.APPROVED ]:
+        if req_type == 'NewRepo':
+            assert name and facility and principal
+            if approval in [ RequestStatus.APPROVED ]:
+                return self.do_new_repo( repo, facility, principal )
 
-            # determine slurm account name; facility:repo
-            account_name = f'{facility}:{repo}'.lower()
-
-            # fetch for the list of all users for the repo
-            users = self.back_channel.execute( self.REPO_USERS_GQL, { 'repo': {'facility': facility, 'name': repo }} )['repo']['users']
-            users_str = ','.join(users)
-            self.LOG.info(f"setting account {account_name} to users {users_str}")
-            
-            # run playbook to sync users to the slurm account
-            runner = self.run_playbook( 'slurm-users.yaml', users=users_str, user_account=account_name )
-
-            # deal with qoses for slurm account
-
-            #self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
-
-            return True
+        elif req_type == 'RepoMembership':
+            assert user and repo and facility
+            if approval in [ RequestStatus.APPROVED ]:
+                return self.do_repo_membership( user, repo, facility )
 
         return None
-    
 
+    def do_new_repo( self, repo: str, facility: str, principal: str, playbook: str="add_repo.yaml" ) -> bool:
+
+        # add facility specific Repos
+        runner = self.run_playbook( playbook, facility=facility, repo=repo )
+        self.LOG.warn(f"add_repo.yaml: {runner}")
+
+        # deal with storage
+
+        # write back to coact the repo information
+        repo_create_req = {
+            'repo': {
+                'name': name,
+                'facility': facility,
+                'principal': principal,
+                'leaders': [ principal, ],
+                'users': [ principal, ],
+            }
+        }
+        self.LOG.info(f"upserting repo record {repo_create_req}")
+        self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
+
+        # add compute record for repo
+
+        return True
+
+    def do_repo_membership( self, user: str, repo: str, facility: str, playbook: str="slurm-users.yaml" ) -> bool:
+
+        # determine slurm account name; facility:repo
+        account_name = f'{facility}:{repo}'.lower()
+
+        # fetch for the list of all users for the repo
+        runner = self.back_channel.execute( self.REPO_USERS_GQL, { 'repo': {'facility': facility, 'name': repo }} )
+        users = runner['repo']['users']
+        assert user in users
+
+        users_str = ','.join(users)
+        self.LOG.info(f"setting account {account_name} with users {users_str}")
+
+        # run playbook to sync users to the slurm account
+        runner = self.run_playbook( playbook, users=users_str, user_account=account_name )
+        self.LOG.info(f"{playbook} output: {runner}")
+
+        # ensure requested user has been added and the runner output defines user
+        
+        # deal with qoses for slurm account
+
+        #self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
+
+        return True
+
+    
 
 
 class Get(Command,GraphQlSubscriber):
