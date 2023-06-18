@@ -35,7 +35,13 @@ class RequestStatus(str,Enum):
 class AnsibleRunner():
     LOG = logging.getLogger(__name__) 
     def run_playbook(self, playbook: str, private_data_dir: str = COACT_ANSIBLE_RUNNER_PATH, tags: str = '', **kwargs) -> ansible_runner.runner.Runner:
-        r = ansible_runner.run( private_data_dir=private_data_dir, playbook=playbook, tags=tags, extravars=kwargs )
+        r = ansible_runner.run( 
+            private_data_dir=private_data_dir, 
+            playbook=playbook, 
+            tags=tags, 
+            extravars=kwargs, 
+            cancel_callback=lambda: None
+        )
         self.LOG.debug(r.stats)
         if len(r.stats['failures']) > 0:
             raise Exception(f"playbook run failed: {r.stats}")
