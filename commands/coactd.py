@@ -275,19 +275,18 @@ class RepoRegistration(Registration):
         principal = req.get('principal', None )
         requirement = req.get('computerequirement', None)
 
-        if req_type == 'NewRepo':
-            assert repo and facility and principal
-            if approval in [ RequestStatus.APPROVED ]:
+        if approval in [ RequestStatus.APPROVED ]:
+
+            if req_type == 'NewRepo':
+                assert repo and facility and principal
                 return self.do_new_repo( repo, facility, principal )
 
-        elif req_type == 'RepoMembership':
-            assert user and repo and facility
-            if approval in [ RequestStatus.APPROVED ]:
+            elif req_type == 'RepoMembership':
+                assert user and repo and facility
                 return self.do_repo_membership( user, repo, facility )
 
-        if req_type == 'RepoChangeComputeRequirement':
-            assert repo and facility and requirement
-            if approval in [ RequestStatus.APPROVED ]:
+            elif req_type == 'RepoChangeComputeRequirement':
+                assert repo and facility and requirement
                 return self.do_compute_requirement( repo, facility, requirement )
 
         return None
