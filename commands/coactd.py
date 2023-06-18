@@ -171,73 +171,71 @@ class UserRegistration(Registration):
         eppn = req.get('eppn', None )
         assert user and facility and eppn
 
-        # if the Request is valid, then run the ansible playbook, mark the request complete/failed, and send
-        # email to all parties that its completed
-        # make sure this is idempotent
         if approval in [ RequestStatus.APPROVED ]:
 
-            playbook = 'add_user.yaml'
-
             self.LOG.info(f"Initiating {req_type} request for {user} at facility {facility} using {playbook}")
-
-            # enable ldap
-            runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
-            ldap_facts = self.playbook_task_res( runner, 'Create user', 'gather user ldap facts' )['ansible_facts']
-            shell = self.run_playbook( playbook, user=user, user_facility=facility, tags='shell' )
-            self.LOG.debug(f"ldap facts: {ldap_facts}")
-
-            user_create_req = {
-                'user': {
-                    'username': user,
-                    'eppns': [ eppn, ],
-                    'shell': ldap_facts['ldap_user_default_shell'],
-                    'preferredemail': eppn,
-                    'uidnumber': int(ldap_facts['ldap_user_uidNumber']),
-                    'fullname': ldap_facts['ldap_user_gecos'],
-                }
-            }
-            self.LOG.debug(f"upserting user record {user_create_req}")
-            user_id = self.back_channel.execute( self.USER_UPSERT_GQL, user_create_req ) 
-            self.LOG.debug(f"upserted user {user_id}")
-
-            # sshkeys
-            runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='sshkey' )
-
-            # configure home directory; need force_copy_skel incase they already belong to another facility
-            runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='home', force_copy_skel=True )
-            # TODO determine the storage paths and amount
-            user_storage_req = {
-                'user' : {
-                    'username': user,
-                },
-                'userstorage': {
-                    'username': user,
-                    'purpose': "home",
-                    'gigabytes': 25,
-                    'storagename': "sdfhome",
-                    'rootfolder': ldap_facts['ldap_user_homedir'],
-                }
-            }
-            self.LOG.debug(f"upserting user storage record {user_storage_req}")
-            self.back_channel.execute( self.USER_STORAGE_GQL, user_storage_req )
-
-            # do any facility specific tasks
-            runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='facility' )
-
-            # always register user with the facility's `default` Repo
-            # Id references don't work in mutation for some reason
-            add_user_req = {
-                'repo': { 'facility': facility, 'name': 'default' },
-                'user': { 'username': user },
-            }
-            self.LOG.debug(f"add to default repo {add_user_req}")
-            self.back_channel.execute( self.REPO_ADD_USER_GQL, add_user_req )
-
-            return True
+            return do_new_user( user, eppn, facility )
 
         else:
             self.LOG.info(f"Ingoring {approval} state request")
             return None
+
+    def do_new_user( self, user: str, eppn: str, facility: str, playbook: str="add_user.yaml" ) -> bool:
+
+        # enable ldap
+        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
+        ldap_facts = self.playbook_task_res( runner, 'Create user', 'gather user ldap facts' )['ansible_facts']
+        shell = self.run_playbook( playbook, user=user, user_facility=facility, tags='shell' )
+        self.LOG.debug(f"ldap facts: {ldap_facts}")
+
+        user_create_req = {
+            'user': {
+                'username': user,
+                'eppns': [ eppn, ],
+                'shell': ldap_facts['ldap_user_default_shell'],
+                'preferredemail': eppn,
+                'uidnumber': int(ldap_facts['ldap_user_uidNumber']),
+                'fullname': ldap_facts['ldap_user_gecos'],
+            }
+        }
+        self.LOG.debug(f"upserting user record {user_create_req}")
+        user_id = self.back_channel.execute( self.USER_UPSERT_GQL, user_create_req ) 
+        self.LOG.debug(f"upserted user {user_id}")
+
+        # sshkeys
+        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='sshkey' )
+
+        # configure home directory; need force_copy_skel incase they already belong to another facility
+        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='home', force_copy_skel=True )
+        # TODO determine the storage paths and amount
+        user_storage_req = {
+            'user' : {
+                'username': user,
+            },
+            'userstorage': {
+                'username': user,
+                'purpose': "home",
+                'gigabytes': 25,
+                'storagename': "sdfhome",
+                'rootfolder': ldap_facts['ldap_user_homedir'],
+            }
+        }
+        self.LOG.debug(f"upserting user storage record {user_storage_req}")
+        self.back_channel.execute( self.USER_STORAGE_GQL, user_storage_req )
+
+        # do any facility specific tasks
+        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='facility' )
+
+        # always register user with the facility's `default` Repo
+        # Id references don't work in mutation for some reason
+        add_user_req = {
+            'repo': { 'facility': facility, 'name': 'default' },
+            'user': { 'username': user },
+        }
+        self.LOG.debug(f"add to default repo {add_user_req}")
+        self.back_channel.execute( self.REPO_ADD_USER_GQL, add_user_req )
+
+        return True
 
 
 
