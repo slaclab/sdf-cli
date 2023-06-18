@@ -34,12 +34,14 @@ class RequestStatus(str,Enum):
 
 class AnsibleRunner():
     LOG = logging.getLogger(__name__) 
+    ident = None # use this to create a directory for the ansible run output of the same name (eg the coact request id)
     def run_playbook(self, playbook: str, private_data_dir: str = COACT_ANSIBLE_RUNNER_PATH, tags: str = '', **kwargs) -> ansible_runner.runner.Runner:
         r = ansible_runner.run( 
             private_data_dir=private_data_dir, 
             playbook=playbook, 
             tags=tags, 
-            extravars=kwargs, 
+            extravars=kwargs,
+            ident=self.ident,
             cancel_callback=lambda: None
         )
         self.LOG.debug(r.stats)
@@ -121,6 +123,7 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
         sub = self.connect_subscriber( username=parsed_args.username, password=self.get_password(parsed_args.password_file ) )
         for req_id, op_type, req_type, approval, req in self.subscribe( self.SUBSCRIPTION_STR ):
             self.LOG.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
+            self.ident = req_id # set the request id for ansible runner
             try:
 
                 if req_type in self.request_types:
@@ -135,7 +138,7 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
                     self.LOG.info(f"Ignoring {req_id}")
 
             except Exception as e:
-                self.markIncompleteRequest( req, f'AnsibleRunner did not complete: {e}' )
+                self.markIncompleteRequest( req, f'AnsibleRunner for request {self.ident} did not complete: {e}' )
                 self.LOG.error(f"Error processing {req_id}: {e}")
         
 
@@ -272,7 +275,7 @@ class RepoRegistration(Registration):
         principal = req.get('principal', None )
 
         if req_type == 'NewRepo':
-            assert name and facility and principal
+            assert repo and facility and principal
             if approval in [ RequestStatus.APPROVED ]:
                 return self.do_new_repo( repo, facility, principal )
 
@@ -294,7 +297,7 @@ class RepoRegistration(Registration):
         # write back to coact the repo information
         repo_create_req = {
             'repo': {
-                'name': name,
+                'name': repo,
                 'facility': facility,
                 'principal': principal,
                 'leaders': [ principal, ],
@@ -334,6 +337,33 @@ class RepoRegistration(Registration):
         return True
 
     
+class ComputeRequirementRegistration(Registration):
+    'workflow for updating repo compute requirements like when a repo goes on/off shift'
+    request_types = [ 'RepoChangeComputeRequirement' ]
+
+    REPO_USERS_GQL = gql("""
+      query getRepoUsers ( $repo: RepoInput! ) {
+        repo( filter: $repo ) {
+            users
+        }
+      }""")
+
+    def do(self, req_id, op_type, req_type, approval, req):
+
+        repo = req.get('reponame', None)
+        facility = req.get('facilityname', None)
+        requirement = req.get('computerequirement', None)
+
+        if req_type == 'RepoChangeComputeRequirement':
+            assert repo and facility and requirement
+            if approval in [ RequestStatus.APPROVED ]:
+                return self.do_compute_requirement( repo, facility, requirement )
+
+        return None
+
+    def do_new_repo( self, repo: str, facility: str, requirement: str, playbook: str="repo_change_compute_requirement.yaml" ) -> bool:
+        raise NotImplementedError()
+
 
 
 class Get(Command,GraphQlSubscriber):
@@ -370,7 +400,7 @@ class Coactd(CommandManager):
 
     def __init__(self, namespace, convert_underscores=True):
         super(Coactd,self).__init__(namespace, convert_underscores=convert_underscores)
-        for cmd in [ UserRegistration, RepoRegistration, Get, ]:
+        for cmd in [ UserRegistration, RepoRegistration, ComputeRequirementRegistration, Get, ]:
             self.add_command( cmd.__name__.lower(), cmd )
 
 
