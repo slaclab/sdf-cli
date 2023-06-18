@@ -79,6 +79,29 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
     back_channel = None
     request_types = []
 
+    SUBSCRIPTION_STR = """
+        subscription {
+            requests {
+                theRequest {
+                    Id
+                    reqtype
+                    approvalstatus
+                    eppn
+                    preferredUserName
+                    reponame
+                    facilityname
+                    principal
+                    username
+                    actedat
+                    actedby
+                    requestedby
+                    timeofrequest
+                }
+                operationType
+            }
+        }
+    """
+
     def get_parser(self, prog_name):
         parser = super(Registration, self).get_parser(prog_name)
         parser.add_argument('--verbose', help='verbose output', required=False)
@@ -89,30 +112,8 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
     def take_action(self, parsed_args):
         # connect
         self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
-        q = """
-            subscription {
-                requests {
-                    theRequest {
-                        Id
-                        reqtype
-                        approvalstatus
-                        eppn
-                        preferredUserName
-                        reponame
-                        facilityname
-                        principal
-                        username
-                        actedat
-                        actedby
-                        requestedby
-                        timeofrequest
-                    }
-                    operationType
-                }
-            }
-        """
         sub = self.connect_subscriber( username=parsed_args.username, password=self.get_password(parsed_args.password_file ) )
-        for req_id, op_type, req_type, approval, req in self.subscribe( q ):
+        for req_id, op_type, req_type, approval, req in self.subscribe( self.SUBSCRIPTION_STR ):
             self.LOG.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
             try:
 
