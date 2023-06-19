@@ -46,8 +46,8 @@ class AnsibleRunner():
             cancel_callback=lambda: None
         )
         self.LOG.debug(r.stats)
-        if len(r.stats['failures']) > 0:
-            raise Exception(f"playbook run failed: {r.stats}")
+        if not r.rc == 0:
+            raise Exception(f"AnsibleRunner failed")
         return r
     def playbook_events(self,runner: ansible_runner.runner.Runner) -> dict:
         for e in runner.events:
@@ -132,7 +132,7 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
                     result = self.do( req_id, op_type, req_type, approval, req )
                     if result:
                         self.LOG.info(f"Marking request {req_id} complete")
-                        self.markCompleteRequest( req, 'AnsibleRunner completed' )
+                        self.markCompleteRequest( req, f'Request {self.ident} completed' )
                         self.LOG.info(f"Done processing {req_id}")
                     else:
                         self.LOG.warning(f"Unknown return for {req_id}")
@@ -141,7 +141,7 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
                     self.LOG.info(f"Ignoring {req_id}")
 
             except Exception as e:
-                self.markIncompleteRequest( req, f'AnsibleRunner for request {self.ident} did not complete: {e}' )
+                self.markIncompleteRequest( req, f'Request {self.ident} did not complete: {e}' )
                 self.LOG.error(f"Error processing {req_id}: {e}")
         
 
@@ -278,6 +278,14 @@ class RepoRegistration(Registration):
         }
         """)
 
+    REPO_APPEND_USER_GQL = gql("""
+        mutation repoAppendMember($repo: RepoInput!, $user: UserInput!) {
+            repoAppendMember(repo: $repo, user: $user) {
+                Id
+            }
+        }
+        """)
+
     def do(self, req_id, op_type, req_type, approval, req):
 
         user = req.get('username', None)
@@ -360,15 +368,18 @@ class RepoRegistration(Registration):
         users_str = ','.join(users)
         self.LOG.info(f"setting account {account_name} with users {users_str}")
 
-        # run playbook to sync users to the slurm account
+        # run playbook to add this user and existsing repo users to the slurm account
         runner = self.run_playbook( playbook, user=user, users=users_str, account=account_name, partition='milano', defaultqos="normal", qos="normal,preemptable" )
         self.LOG.info(f"{playbook} output: {runner}")
 
-        # ensure requested user has been added and the runner output defines user
-        
-        # deal with qoses for slurm account
+        # TODO: deal with qoses and partitions for slurm account
 
-        #self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
+        # add user into repo back in coact
+        add_user_req = {
+            "repo": { "name": repo, "facility": facility },
+            "user": { "username": user }
+        }
+        self.back_channel.execute( self.REPO_APPEND_USER_GQL, add_user_req ) 
 
         return True
 
