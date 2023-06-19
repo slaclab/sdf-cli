@@ -69,11 +69,11 @@ class GraphQlSubscriber( GraphQlClient ):
     subscription_transport = None
     subscription_client = None
 
-    def connect_subscriber(self, graphql_uri='wss://'+SDF_COACT_URI, get_schema=False, username=None, password_file=None, password=None ):
+    def connect_subscriber(self, graphql_uri='wss://'+SDF_COACT_URI, get_schema=False, username=None, password_file=None, password=None, ping_interval=120, pong_timeout=20 ):
         self.LOG.info(f"connecting to {graphql_uri}")
         if password_file:
             password = self.get_password( password_file=password_file )
-        self.subscription_transport = WebsocketsTransport(url=graphql_uri, headers=self.get_basic_auth_headers( username=username, password=password ))
+        self.subscription_transport = WebsocketsTransport(url=graphql_uri, headers=self.get_basic_auth_headers( username=username, password=password ), ping_interval=ping_interval, pong_timeout=pong_timeout)
         self.subscription_client = Client(transport=self.subscription_transport, fetch_schema_from_transport=get_schema)
         # lets reduce the logging from gql
         for name in logging.root.manager.loggerDict:
