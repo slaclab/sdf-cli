@@ -134,6 +134,8 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
                         self.LOG.info(f"Marking request {req_id} complete")
                         self.markCompleteRequest( req, 'AnsibleRunner completed' )
                         self.LOG.info(f"Done processing {req_id}")
+                    else:
+                        self.LOG.warning(f"Unknown return for {req_id}")
                         
                 else:
                     self.LOG.info(f"Ignoring {req_id}")
@@ -348,17 +350,18 @@ class RepoRegistration(Registration):
 
         # determine slurm account name; facility:repo
         account_name = f'{facility}:{repo}'.lower()
+        if account_name.endswith( ':default' ):
+            account_name = f'{facility}'.lower()
 
         # fetch for the list of all users for the repo
         runner = self.back_channel.execute( self.REPO_USERS_GQL, { 'repo': {'facility': facility, 'name': repo }} )
         users = runner['repo']['users']
-        assert user in users
 
         users_str = ','.join(users)
         self.LOG.info(f"setting account {account_name} with users {users_str}")
 
         # run playbook to sync users to the slurm account
-        runner = self.run_playbook( playbook, users=users_str, user_account=account_name )
+        runner = self.run_playbook( playbook, user=user, users=users_str, account=account_name, partition='milano', defaultqos="normal", qos="normal,preemptable" )
         self.LOG.info(f"{playbook} output: {runner}")
 
         # ensure requested user has been added and the runner output defines user

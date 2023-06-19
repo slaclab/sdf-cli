@@ -69,7 +69,7 @@ class GraphQlSubscriber( GraphQlClient ):
     subscription_transport = None
     subscription_client = None
 
-    def connect_subscriber(self, graphql_uri='wss://'+SDF_COACT_URI, get_schema=False, username=None, password_file=None, password=None, ping_interval=120, pong_timeout=20 ):
+    def connect_subscriber(self, graphql_uri='wss://'+SDF_COACT_URI, get_schema=False, username=None, password_file=None, password=None, ping_interval=120, pong_timeout=60 ):
         self.LOG.info(f"connecting to {graphql_uri}")
         if password_file:
             password = self.get_password( password_file=password_file )
