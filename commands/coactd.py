@@ -19,6 +19,7 @@ from gql import gql
 import ansible_runner
 
 import logging
+import datetime
 
 COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
 
@@ -181,15 +182,15 @@ class UserRegistration(Registration):
         assert user and facility and eppn
 
         if approval in [ RequestStatus.APPROVED ]:
-
-            self.LOG.info(f"Initiating {req_type} request for {user} at facility {facility} using {playbook}")
-            return do_new_user( user, eppn, facility )
+            return self.do_new_user( user, eppn, facility )
 
         else:
             self.LOG.info(f"Ingoring {approval} state request")
             return None
 
     def do_new_user( self, user: str, eppn: str, facility: str, playbook: str="add_user.yaml" ) -> bool:
+
+        self.LOG.info(f"Creating user {user} at facility {facility} using {playbook}")
 
         # enable ldap
         runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
@@ -267,6 +268,14 @@ class RepoRegistration(Registration):
         }
         """)
 
+    COMPUTE_ALLOCATION_UPSERT_GQL = gql("""
+        mutation repoComputeAllocationUpsert($repo: RepoInput!, $repocompute: RepoComputeAllocationInput!, $qosinputs: [QosInput!]!) {
+            repoComputeAllocationUpsert(repo: $repo, repocompute: $repocompute, qosinputs: $qosinputs) {
+                Id
+            } 
+        }
+        """)
+
     def do(self, req_id, op_type, req_type, approval, req):
 
         user = req.get('username', None)
@@ -310,9 +319,28 @@ class RepoRegistration(Registration):
             }
         }
         self.LOG.info(f"upserting repo record {repo_create_req}")
-        self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
+        res = self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
 
-        # add compute record for repo
+        repo_id = res['repoUpsert']['Id']
+        start = datetime.datetime( 2023, 7, 1).isoformat()
+        end = datetime.datetime( 2024, 7, 1).isoformat()
+        for cluster in [ "milano", ]:
+            # add compute record for repo
+            compute_allocation_req = {
+                'repo': { 'Id': repo_id },
+                'repocompute': { 
+                    'repoid': repo_id, 'clustername': cluster, 
+                    'start': start, 'end': end
+                },
+                'qosinputs': [ {
+                     'name': 'normal',
+                     'slachours': 1,
+                     'chargefactor': 1.0
+                } ]
+            }
+            self.LOG.info(f"creating compute allocation for {facility}:{repo} {compute_allocation_req}")
+            res = self.back_channel.execute( self.COMPUTE_ALLOCATION_UPSERT_GQL, compute_allocation_req )
+            self.LOG.info(f"compute allocation creation: {res}")
 
         return True
 
