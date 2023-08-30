@@ -36,13 +36,13 @@ class RequestStatus(str,Enum):
 class AnsibleRunner():
     LOG = logging.getLogger(__name__) 
     ident = None # use this to create a directory for the ansible run output of the same name (eg the coact request id)
-    def run_playbook(self, playbook: str, private_data_dir: str = COACT_ANSIBLE_RUNNER_PATH, tags: str = '', **kwargs) -> ansible_runner.runner.Runner:
+    def run_playbook(self, playbook: str, private_data_dir: str = COACT_ANSIBLE_RUNNER_PATH, tags: str = 'all', **kwargs) -> ansible_runner.runner.Runner:
         r = ansible_runner.run( 
-            private_data_dir=private_data_dir, 
+            private_data_dir=private_data_dir,
             playbook=playbook, 
             tags=tags, 
             extravars=kwargs,
-            ident=self.ident,
+            ident=f'{self.ident}_{tags}',
             cancel_callback=lambda: None
         )
         self.LOG.debug(r.stats)
@@ -55,7 +55,7 @@ class AnsibleRunner():
                 yield e['event_data']
     def playbook_task_res(self, runner: ansible_runner.runner.Runner, play: str, task: str) -> dict:
         for e in self.playbook_events(runner):
-            #self.LOG.info(f"looking for {play} / {task}: {e}")
+            # self.LOG.info(f"looking for {play} / {task}: {e}")
             if 'play' in e and play == e['play'] and 'task' in e and task == e['task'] and 'res' in e:
                 return e['res']
 
@@ -196,6 +196,7 @@ class UserRegistration(Registration):
 
         # enable ldap
         runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='ldap' )
+        self.LOG.error(f"FACTS: {self.playbook_task_res( runner, 'Create user', 'gather user ldap facts' )}")
         ldap_facts = self.playbook_task_res( runner, 'Create user', 'gather user ldap facts' )['ansible_facts']
         shell = self.run_playbook( playbook, user=user, user_facility=facility, tags='shell' )
         self.LOG.debug(f"ldap facts: {ldap_facts}")
@@ -214,11 +215,8 @@ class UserRegistration(Registration):
         user_id = self.back_channel.execute( self.USER_UPSERT_GQL, user_create_req ) 
         self.LOG.debug(f"upserted user {user_id}")
 
-        # sshkeys
-        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='sshkey' )
-
         # configure home directory; need force_copy_skel incase they already belong to another facility
-        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='home', force_copy_skel=True )
+        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='home', force_copy_skel=False ) #True )
         # TODO determine the storage paths and amount
         user_storage_req = {
             'user' : {
@@ -234,6 +232,9 @@ class UserRegistration(Registration):
         }
         self.LOG.debug(f"upserting user storage record {user_storage_req}")
         self.back_channel.execute( self.USER_STORAGE_GQL, user_storage_req )
+
+        # sshkeys
+        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='sshkey' )
 
         # do any facility specific tasks
         runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='facility' )
@@ -286,6 +287,20 @@ class RepoRegistration(Registration):
         }
         """)
 
+    REPO_CURRENT_COMPUTE_REQUIREMENT_GQL = gql("""
+        query repo( $repo: RepoInput! ) {
+          repo(filter: $repo) {
+            name
+            facility
+            users
+            currentComputeAllocations {
+              clustername
+              computerequirement
+            }
+          }
+        }
+        """)
+
     def do(self, req_id, op_type, req_type, approval, req):
 
         user = req.get('username', None)
@@ -310,7 +325,7 @@ class RepoRegistration(Registration):
 
         return None
 
-    def do_new_repo( self, repo: str, facility: str, principal: str, playbook: str="add_repo.yaml" ) -> bool:
+    def do_new_repo( self, repo: str, facility: str, principal: str, playbook: str="coact/add_repo.yaml" ) -> bool:
 
         # add facility specific Repos
         runner = self.run_playbook( playbook, facility=facility, repo=repo )
@@ -332,7 +347,7 @@ class RepoRegistration(Registration):
         res = self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
 
         repo_id = res['repoUpsert']['Id']
-        start = datetime.datetime( 2023, 7, 1).isoformat()
+        start = datetime.datetime( 2023, 6, 1).isoformat()
         end = datetime.datetime( 2024, 7, 1).isoformat()
         for cluster in [ "milano", ]:
             # add compute record for repo
@@ -354,12 +369,17 @@ class RepoRegistration(Registration):
 
         return True
 
-    def do_repo_membership( self, user: str, repo: str, facility: str, playbook: str="slurm-users.yaml" ) -> bool:
 
-        # determine slurm account name; facility:repo
+    def get_account_name( self, facility: str, repo: str ) -> str:
         account_name = f'{facility}:{repo}'.lower()
         if account_name.endswith( ':default' ):
             account_name = f'{facility}'.lower()
+        return account_name
+
+    def do_repo_membership( self, user: str, repo: str, facility: str, playbook: str="coact/slurm-users.yaml" ) -> bool:
+
+        # determine slurm account name; facility:repo
+        account_name = self.get_account_name( facility, repo )
 
         # fetch for the list of all users for the repo
         runner = self.back_channel.execute( self.REPO_USERS_GQL, { 'repo': {'facility': facility, 'name': repo }} )
@@ -383,9 +403,62 @@ class RepoRegistration(Registration):
 
         return True
 
-    def do_compute_requirement( self, repo: str, facility: str, requirement: str, playbook: str="repo_change_compute_requirement.yaml" ) -> bool:
+    def do_compute_requirement( self, repo: str, facility: str, requirement: str, playbook: str="coact/repo_change_compute_requirement.yaml" ) -> bool:
+        # get current compute requirement
+        repo = self.back_channel.execute( self.REPO_CURRENT_COMPUTE_REQUIREMENT_GQL, { 'repo': {'facility': facility, 'name': repo }} )
+        self.LOG.info(f"repo: {repo}")
+        current = repo['repo']['currentComputeAllocations']['computerequirement']
+        users = repo['repo']['users']
+        users_str = ','.join(users)
+        self.LOG.info(f"setting account {account_name} with users {users_str}")
+
+        self.LOG.info(f"change {facility} {repo}'s compute requirement from {current} to {requirement} for users {users_str}")
+
+
+        self.QOS_ENUMS = {
+            'offshift': 'high',
+            'onshift': 'expedite',
+            'normal': 'normal',
+            'preemptable': 'preemptable',
+        }
+        allowed_qos = [ self.QOS_ENUMS['normal'], self.QOS_ENUMS['preemptable'] ]
+        default_qos = self.QOS_ENUMS[requirement]
+
+        # 1) promote from normal to offshift
+        # add qos to slurm account, set defaultqos to offshift
+        if requirement == 'offshift':
+            allowed_qos.append( self.QOS_ENUMS['offshift'] )
+
+        # 2) promote from offshit to onshift
+        # keep offshift qos, add onshift qos, set default qos to onshift
+        elif requirement == 'onshift':
+            allowed_qos.append( self.QOS_ENUMS['offshift'], self.QOS_ENUMS['onshift'] )
+
+        # 3) promote from normal to onshift
+        # add both onshift and offshift qos, set default to onshift
+
+        # 4) demote from onshift to offshift
+        # remove onshift qos, set default to offshift
+
+        # 5) demote from offshift to normal
+        # remove both onshift and offshift qos, set default to normal
+
+        # 6) demote from onshift to normal
+        # remove both onshift and offshift qos, set default to normal
+
+
         raise NotImplementedError()
 
+        account_name = self.get_account_name( facility, repo )
+
+        # setup the permissions to the qos
+        runner = self.run_playbook( playbook, users=users_str, account=account_name, partition='milano', defaultqos=default_qos, qos=','.join(allowed_qos) )
+
+
+        # reconfigure all jobs for this account
+        
+        # 1) onshift to offshift
+        # 
 
 
 class Get(Command,GraphQlSubscriber):
