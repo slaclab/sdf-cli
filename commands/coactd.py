@@ -376,7 +376,7 @@ class RepoRegistration(Registration):
             account_name = f'{facility}'.lower()
         return account_name
 
-    def do_repo_membership( self, user: str, repo: str, facility: str, playbook: str="coact/slurm-users.yaml" ) -> bool:
+    def do_repo_membership( self, user: str, repo: str, facility: str, playbook: str="coact/slurm-users-partition.yaml" ) -> bool:
 
         # determine slurm account name; facility:repo
         account_name = self.get_account_name( facility, repo )
@@ -389,8 +389,13 @@ class RepoRegistration(Registration):
         self.LOG.info(f"setting account {account_name} with users {users_str}")
 
         # run playbook to add this user and existsing repo users to the slurm account
-        runner = self.run_playbook( playbook, user=user, users=users_str, account=account_name, partition='milano', defaultqos="normal", qos="normal,preemptable" )
-        self.LOG.info(f"{playbook} output: {runner}")
+        if facility.lower() in ( 'rubin', 'cryoem' ):
+            runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, users=users_str, account=account_name, defaultqos="normal", qos="normal,preemptable" )
+        else:
+            runner = self.run_playbook( playbook, user=user, users=users_str, account=account_name, partition='milano', defaultqos="normal", qos="normal,preemptable" )
+            runner = self.run_playbook( playbook, user=user, users=users_str, account=account_name, partition='roma', defaultqos="normal", qos="normal,preemptable" )
+            runner = self.run_playbook( playbook, user=user, users=users_str, account=account_name, partition='ampere', defaultqos="normal", qos="normal,preemptable" )
+            self.LOG.info(f"{playbook} output: {runner}")
 
         # TODO: deal with qoses and partitions for slurm account
 
