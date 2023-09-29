@@ -9,6 +9,9 @@ get-secrets:
 	set -e; for i in password; do vault kv get --field=$$i $(VAULT_SECRET_PATH)/service-account > etc/.secrets/$$i ; done
 	chmod -R go-rwx etc/.secrets
 
+clean-secrets:
+	rm -rf etc/.secrets
+
 virtualenv:
 	python3 -m venv .
 
@@ -18,11 +21,15 @@ pip:
 	$(PYTHON_BIN) -m pip install --upgrade pip
 	source $(VENV_BIN) && $(PIP_BIN) install -r requirements.txt
 
+# OS level dependencies
 deps:
 	dnf groupinstall -y "Development Tools"
 	dnf install -y python36-devel openldap-devel
 
+# run this to configure the dev environment
+environment: venv pip
+
 update-sdf-ansible:
 	git submodule update --init --recursive
 
-apply: venv pip get-secrets update-sdf-ansible
+apply: environment get-secrets update-sdf-ansible
