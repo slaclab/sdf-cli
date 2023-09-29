@@ -89,8 +89,8 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
     request_types = []
 
     SUBSCRIPTION_STR = """
-        subscription {
-            requests {
+        subscription( $clientName: String ) {
+            requests( clientName: $clientName ) {
                 theRequest {
                     Id
                     reqtype
@@ -116,13 +116,14 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
         parser.add_argument('--verbose', help='verbose output', required=False)
         parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
         parser.add_argument('--password-file', help='basic auth password for graphql service', required=True)
+        parser.add_argument('--client-name', help='subscriber queue name to connect to', default=f'sdf-bot-{self.__class__.__name__}')
         return parser
 
     def take_action(self, parsed_args):
         # connect
         self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
         sub = self.connect_subscriber( username=parsed_args.username, password=self.get_password(parsed_args.password_file ) )
-        for req_id, op_type, req_type, approval, req in self.subscribe( self.SUBSCRIPTION_STR ):
+        for req_id, op_type, req_type, approval, req in self.subscribe( self.SUBSCRIPTION_STR, var={"clientName": parsed_args.client_name} ):
             self.LOG.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
             self.ident = req_id # set the request id for ansible runner
             try:
