@@ -1,7 +1,7 @@
 PYTHON_BIN ?= ./bin/python3
 PIP_BIN ?= ./bin/pip3
 VENV_BIN ?= ./bin/activate
-VAULT_SECRET_PATH ?= secret/tid/coact
+VAULT_SECRET_PATH ?= secret/tid/coact-dev
 
 get-secrets:
 	mkdir etc/.secrets/ -p

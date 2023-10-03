@@ -14,7 +14,7 @@ websockets_logger.setLevel(logging.ERROR)
 
 import base64
 
-SDF_COACT_URI=getenv("SDF_COACT_URI", "coact-dev.slac.stanford.edu:443/graphql-service")
+SDF_COACT_URI=getenv("SDF_COACT_URI", "coact-dev.slac.stanford.edu:443/graphql-service-dev")
 
 REQUEST_COMPLETE_MUTATION = gql('''mutation requestComplete( $Id: String!, $notes: String! ) { requestComplete( id: $Id, notes: $notes ) }''')
 REQUEST_INCOMPLETE_MUTATION = gql('''mutation requestIncomplete( $Id: String!, $notes: String! ) { requestIncomplete( id: $Id, notes: $notes ) }''')
@@ -41,7 +41,9 @@ class GraphQlClient:
         self.LOG.info(f"connecting to {graphql_uri}")
         if password_file:
             password = self.get_password( password_file=password_file )
-        self.transport = AIOHTTPTransport(url=graphql_uri, headers=self.get_basic_auth_headers( username=username, password=password ))
+            self.transport = AIOHTTPTransport(url=graphql_uri, headers=self.get_basic_auth_headers( username=username, password=password ))
+        else:
+            self.transport = AIOHTTPTransport(url=graphql_uri)
         self.client = Client(transport=self.transport, fetch_schema_from_transport=get_schema)
         # lets reduce the logging from gql
         for name in logging.root.manager.loggerDict:
@@ -73,7 +75,9 @@ class GraphQlSubscriber( GraphQlClient ):
         self.LOG.info(f"connecting to {graphql_uri}")
         if password_file:
             password = self.get_password( password_file=password_file )
-        self.subscription_transport = WebsocketsTransport(url=graphql_uri, headers=self.get_basic_auth_headers( username=username, password=password ), ping_interval=ping_interval, pong_timeout=pong_timeout)
+            self.subscription_transport = WebsocketsTransport(url=graphql_uri, headers=self.get_basic_auth_headers( username=username, password=password ), ping_interval=ping_interval, pong_timeout=pong_timeout)
+        else:
+            self.subscription_transport = WebsocketsTransport(url=graphql_uri, ping_interval=ping_interval, pong_timeout=pong_timeout)
         self.subscription_client = Client(transport=self.subscription_transport, fetch_schema_from_transport=get_schema)
         # lets reduce the logging from gql
         for name in logging.root.manager.loggerDict:

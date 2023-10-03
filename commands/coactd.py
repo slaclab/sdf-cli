@@ -117,6 +117,8 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
         parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
         parser.add_argument('--password-file', help='basic auth password for graphql service', required=True)
         parser.add_argument('--client-name', help='subscriber queue name to connect to', default=f'sdf-bot-{self.__class__.__name__}')
+        #parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot', required=False)
+        #parser.add_argument('--password-file', help='basic auth password for graphql service', required=False)
         return parser
 
     def take_action(self, parsed_args):
@@ -176,6 +178,18 @@ class UserRegistration(Registration):
             repoAddUser(repo: $repo, user: $user) { Id }
         }
         """)
+
+    def change_shell(self, user: str, shell: str, playbook: str="set_user_shell.yaml") -> bool:
+        USER_CHANGE_SHELL = f"""
+            mutation userUpdateShell {{
+                userUpdate(user: {{shell: {shell}, username: {user}}}) {{ Id }}
+            }}
+            """
+        self.LOG.info(f"Changing shell for user {user} using {playbook}")
+        runner = self.run_playbook( playbook, user=user, user_login_shell=shell )
+        user_id = self.back_channel.execute( self.USER_CHANGE_SHELL )
+        return True
+
 
     def do(self, req_id, op_type, req_type, approval, req):
 
@@ -250,7 +264,6 @@ class UserRegistration(Registration):
         self.back_channel.execute( self.REPO_ADD_USER_GQL, add_user_req )
 
         return True
-
 
 
 class RepoRegistration(Registration):

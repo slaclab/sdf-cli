@@ -16,3 +16,6 @@ share/
 shell/
 ssl/
 lib64
+
+#ctags
+tags
