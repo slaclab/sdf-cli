@@ -114,11 +114,11 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
     def get_parser(self, prog_name):
         parser = super(Registration, self).get_parser(prog_name)
         parser.add_argument('--verbose', help='verbose output', required=False)
-        parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
-        parser.add_argument('--password-file', help='basic auth password for graphql service', required=True)
+        #parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
+        #parser.add_argument('--password-file', help='basic auth password for graphql service', required=True)
         parser.add_argument('--client-name', help='subscriber queue name to connect to', default=f'sdf-bot-{self.__class__.__name__}')
-        #parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot', required=False)
-        #parser.add_argument('--password-file', help='basic auth password for graphql service', required=False)
+        parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot', required=False)
+        parser.add_argument('--password-file', help='basic auth password for graphql service', required=False)
         return parser
 
     def take_action(self, parsed_args):
