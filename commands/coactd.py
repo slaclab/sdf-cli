@@ -302,6 +302,35 @@ class RepoRegistration(Registration):
         }
         """)
 
+    FACILITY_CURRENT_COMPUTE_CGL = gql("""
+        query facility( $facility: String! ) {
+          facility(filter: {name: $facility}) {
+            name
+            computeallocations {
+              clustername
+            }
+            computepurchases {
+              clustername
+              purchased
+            }
+          }
+        }
+    """)
+
+    REPO_CURRENT_COMPUTE_ALLOCATIONS_CGL = gql("""
+        query repo( $facility: String!, $repo: String! ) {
+          repo(filter: {facility: $facility, name: $repo}) {
+            facility
+            name
+            currentComputeAllocations {
+              clustername
+              end
+              start
+            }
+          }
+        }
+        """)
+
     def do(self, req_id, op_type, req_type, approval, req):
 
         user = req.get('username', None)
@@ -379,26 +408,41 @@ class RepoRegistration(Registration):
 
     def do_repo_membership( self, user: str, repo: str, facility: str, playbook: str="coact/slurm-users-partition.yaml" ) -> bool:
 
-        # determine slurm account name; facility:repo
-        account_name = self.get_account_name( facility, repo )
-
         # fetch for the list of all users for the repo
         runner = self.back_channel.execute( self.REPO_USERS_GQL, { 'repo': {'facility': facility, 'name': repo }} )
         users = runner['repo']['users']
 
         users_str = ','.join(users)
-        self.LOG.info(f"setting account {account_name} with users {users_str}")
+        self.LOG.info(f"setting account {facility}:{repo} with users {users_str}")
 
         # run playbook to add this user and existsing repo users to the slurm account
-        if facility.lower() in ( 'rubin', 'cryoem' ):
-            runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, users=users_str, account=account_name, defaultqos="normal", qos="normal,preemptable" )
-        else:
-            runner = self.run_playbook( playbook, user=user, users=users_str, account=account_name, partition='milano', defaultqos="normal", qos="normal,preemptable" )
-            runner = self.run_playbook( playbook, user=user, users=users_str, account=account_name, partition='roma', defaultqos="normal", qos="normal,preemptable" )
-            runner = self.run_playbook( playbook, user=user, users=users_str, account=account_name, partition='ampere', defaultqos="normal", qos="normal,preemptable" )
-            self.LOG.info(f"{playbook} output: {runner}")
+        # rubin submits jobs to multiple partitions, so we need to treat that differently for now due to 
+        # the lack of support in slurm of this with multiple partitions
+        if facility.lower() in ( 'rubin' ):
+            self.LOG.warn("Exceptional code branch for rubin facility and multi partition usage!")
+            runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, users=users_str, facility=facility, repo=repo, defaultqos="normal", qos="normal,preemptable" )
 
-        # TODO: deal with qoses and partitions for slurm account
+        else:
+
+            # if its the default repo, do not allow normal qos jobs
+            qos = 'normal,preemptable'
+            default_qos = 'normal'
+
+            if repo == 'default':
+              # however, we need to transition so have an exclusion for now
+              if not facility in ( 'fermi', 'neutrino' ):
+                qos = 'preemptable'
+                default_qos = 'preemptable'
+
+            # determine which clusters are defined
+            runner = self.back_channel.execute( self.FACILITY_CURRENT_COMPUTE_CGL, { 'facility': facility } )
+            assert runner['facility']['name'] == facility
+            clusters = runner['facility']['computepurchases']
+            for cluster in clusters:
+              partition = cluster['clustername']
+              purchased = cluster['purchased']
+              runner = self.run_playbook( playbook, user=user, users=users_str, facility=facility, repo=repo, partition=partition, defaultqos=default_qos, qos=qos )
+              #self.LOG.info(f"{playbook} output: {runner}")
 
         # add user into repo back in coact
         add_user_req = {
