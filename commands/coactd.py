@@ -420,7 +420,7 @@ class RepoRegistration(Registration):
         # the lack of support in slurm of this with multiple partitions
         if facility.lower() in ( 'rubin' ):
             self.LOG.warn("Exceptional code branch for rubin facility and multi partition usage!")
-            runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, users=users_str, facility=facility, repo=repo, defaultqos="normal", qos="normal,preemptable" )
+            runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, users=users_str, account=f'{facility.lower()}:{repo.lower()}', defaultqos="normal", qos="normal,preemptable" )
 
         else:
 
