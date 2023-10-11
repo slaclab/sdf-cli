@@ -105,6 +105,7 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
                     actedby
                     requestedby
                     timeofrequest
+                    shell
                 }
                 operationType
             }
@@ -153,7 +154,7 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
 
 class UserRegistration(Registration):
     'workflow for user creation'
-    request_types = [ 'UserAccount', ]
+    request_types = [ 'UserAccount', 'UserChangeShell', ]
 
     USER_UPSERT_GQL = gql("""
         mutation userUpsert($user: UserInput!) {
@@ -177,15 +178,33 @@ class UserRegistration(Registration):
         }
         """)
 
+    USER_CHANGE_SHELL_GQL = gql("""
+        mutation userUpdate($user: UserInput!) {
+            userUpdate(user: $user) { Id }
+        }
+        """)
+
+    def change_shell(self, user: str, shell: str, playbook: str="set_user_shell.yaml") -> bool:
+        self.LOG.info(f"Changing shell for user {user} using {playbook}")
+        runner = self.run_playbook( playbook, user=user, user_login_shell=shell )
+        user_id = self.back_channel.execute( self.USER_CHANGE_SHELL_GQL, {"username":user, "shell":shell} )
+
     def do(self, req_id, op_type, req_type, approval, req):
 
         user = req.get('preferredUserName', None)
         facility = req.get('facilityname', None)
-        eppn = req.get('eppn', None )
-        assert user and facility and eppn
+        eppn = req.get('eppn', None)
 
         if approval in [ RequestStatus.APPROVED ]:
-            return self.do_new_user( user, eppn, facility )
+
+            if req_type == 'UserAccount':
+                assert user and facility and eppn
+                return self.do_new_user( user, eppn, facility )
+            elif req_type == 'UserChangeShell':
+                user = req.get('username', None)
+                shell = req.get('shell', None)
+                assert user and shell 
+                return self.change_shell(user, shell)
 
         else:
             self.LOG.info(f"Ingoring {approval} state request")
