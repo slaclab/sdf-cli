@@ -208,7 +208,7 @@ class UserRegistration(Registration):
     def do_change_shell(self, user: str, shell: str, playbook: str="set_user_shell.yaml") -> bool:
         self.LOG.info(f"Changing shell for user {user} using {playbook}")
         runner = self.run_playbook( playbook, user=user, user_login_shell=shell )
-        user_id = self.back_channel.execute( self.USER_CHANGE_SHELL_GQL, {"username":user, "shell":shell} )
+        user_id = self.back_channel.execute( self.USER_CHANGE_SHELL_GQL, {'user':{"username": user, "shell": shell}} )
 
         return True
 
