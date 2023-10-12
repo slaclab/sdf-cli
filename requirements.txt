@@ -1,7 +1,7 @@
-cliff
+cliff==3.10.1
 #yarl
 #multidict
-gql[all]
-bonsai
+gql[all]==3.4.0
+bonsai==1.5.1
 ansible-runner==2.3.1
-Jinja2
+Jinja2==3.0.3
