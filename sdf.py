@@ -12,6 +12,7 @@ from commands.repo import Repo
 from commands.user import User
 #from commands.ldap import Ldap
 from commands.coactd import Coactd
+from commands.coact import Coact
 
 import inspect
 
@@ -180,7 +181,7 @@ class MultiApp(App):
 def main(argv=sys.argv[1:]):
     app = MultiApp( description="S3DF Command Line Tools", version=1.0,
          #command_managers=[ User, Repo, Ldap, Menu, Coactd ])
-         command_managers=[ User, Repo, Menu, Coactd ])
+         command_managers=[ User, Repo, Menu, Coactd, Coact ])
     return app.run(argv)
 
 
