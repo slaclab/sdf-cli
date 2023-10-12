@@ -106,6 +106,7 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
                     requestedby
                     timeofrequest
                     shell
+                    computerequirement
                 }
                 operationType
             }
@@ -315,10 +316,7 @@ class RepoRegistration(Registration):
             name
             facility
             users
-            currentComputeAllocations {
-              clustername
-              computerequirement
-            }
+            computerequirement
           }
         }
         """)
@@ -348,6 +346,20 @@ class RepoRegistration(Registration):
               end
               start
             }
+          }
+        }
+        """)
+
+    REPO_SET_COMPUTE_REQUIREMENT_GQL = gql("""
+        mutation computerequirement( $facility: String!, $repo: String!, $computerequirement: String! ) {
+          repoChangeComputeRequirement(
+            repo: {facility: $facility, name: $repo},
+            computerequirement: $computerequirement
+          ) {
+            name
+            facility
+            computerequirement
+            description
           }
         }
         """)
@@ -474,25 +486,23 @@ class RepoRegistration(Registration):
 
         return True
 
-    def do_compute_requirement( self, repo: str, facility: str, requirement: str, playbook: str="coact/repo_change_compute_requirement.yaml" ) -> bool:
+    def do_compute_requirement( self, repo: str, facility: str, requirement: str, playbook: str="coact/slurm-account-qos.yaml" ) -> bool:
+
         # get current compute requirement
-        repo = self.back_channel.execute( self.REPO_CURRENT_COMPUTE_REQUIREMENT_GQL, { 'repo': {'facility': facility, 'name': repo }} )
-        self.LOG.info(f"repo: {repo}")
-        current = repo['repo']['currentComputeAllocations']['computerequirement']
-        users = repo['repo']['users']
-        users_str = ','.join(users)
-        self.LOG.info(f"setting account {account_name} with users {users_str}")
-
-        self.LOG.info(f"change {facility} {repo}'s compute requirement from {current} to {requirement} for users {users_str}")
-
+        info = self.back_channel.execute( self.REPO_CURRENT_COMPUTE_REQUIREMENT_GQL, { 'repo': {'facility': facility, 'name': repo }} )
+        self.LOG.info(f"got {info}")
+        current = 'normal' if info['repo']['computerequirement'] == None else info['repo']['computerequirement'].lower()
+        account_name = self.get_account_name( facility, repo )
 
         self.QOS_ENUMS = {
-            'offshift': 'high',
+            'offshift': 'offline',
             'onshift': 'expedite',
             'normal': 'normal',
             'preemptable': 'preemptable',
         }
         allowed_qos = [ self.QOS_ENUMS['normal'], self.QOS_ENUMS['preemptable'] ]
+        if not requirement in self.QOS_ENUMS:
+            requirement = 'normal'
         default_qos = self.QOS_ENUMS[requirement]
 
         # 1) promote from normal to offshift
@@ -517,14 +527,13 @@ class RepoRegistration(Registration):
         # 6) demote from onshift to normal
         # remove both onshift and offshift qos, set default to normal
 
-
-        raise NotImplementedError()
-
-        account_name = self.get_account_name( facility, repo )
-
         # setup the permissions to the qos
-        runner = self.run_playbook( playbook, users=users_str, account=account_name, partition='milano', defaultqos=default_qos, qos=','.join(allowed_qos) )
+        self.LOG.info(f"change {account_name}'s compute requirement from {current} to {requirement}: default {default_qos} qoses {allowed_qos}")
+        runner = self.run_playbook( playbook, facility=facility, repo=repo, default_qos=default_qos, qos=','.join(allowed_qos) )
 
+        # update state
+        info = self.back_channel.execute( self.REPO_SET_COMPUTE_REQUIREMENT_GQL, { 'facility': facility, 'repo': repo, 'computerequirement': requirement } )
+        self.LOG.info(f"got {info}")
 
         # reconfigure all jobs for this account
         
