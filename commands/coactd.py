@@ -184,11 +184,6 @@ class UserRegistration(Registration):
         }
         """)
 
-    def change_shell(self, user: str, shell: str, playbook: str="set_user_shell.yaml") -> bool:
-        self.LOG.info(f"Changing shell for user {user} using {playbook}")
-        runner = self.run_playbook( playbook, user=user, user_login_shell=shell )
-        user_id = self.back_channel.execute( self.USER_CHANGE_SHELL_GQL, {"username":user, "shell":shell} )
-
     def do(self, req_id, op_type, req_type, approval, req):
 
         user = req.get('preferredUserName', None)
@@ -204,11 +199,18 @@ class UserRegistration(Registration):
                 user = req.get('username', None)
                 shell = req.get('shell', None)
                 assert user and shell 
-                return self.change_shell(user, shell)
+                return self.do_change_shell(user, shell)
 
         else:
             self.LOG.info(f"Ingoring {approval} state request")
             return None
+
+    def do_change_shell(self, user: str, shell: str, playbook: str="set_user_shell.yaml") -> bool:
+        self.LOG.info(f"Changing shell for user {user} using {playbook}")
+        runner = self.run_playbook( playbook, user=user, user_login_shell=shell )
+        user_id = self.back_channel.execute( self.USER_CHANGE_SHELL_GQL, {"username":user, "shell":shell} )
+
+        return True
 
     def do_new_user( self, user: str, eppn: str, facility: str, playbook: str="add_user.yaml" ) -> bool:
 
