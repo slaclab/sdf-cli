@@ -20,6 +20,8 @@ import ansible_runner
 
 import logging
 import datetime
+from dateutil.relativedelta import relativedelta
+
 
 COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
 
@@ -383,7 +385,9 @@ class RepoRegistration(Registration):
         runner = self.run_playbook( playbook, facility=facility, repo=repo )
         self.LOG.warn(f"add_repo.yaml: {runner}")
 
-        # deal with storage
+        # TODO deal with storage
+
+        # TODO: maybe sync wth current users if the repo already exists so we don't overwrite membership list
 
         # write back to coact the repo information
         repo_create_req = {
@@ -399,15 +403,21 @@ class RepoRegistration(Registration):
         res = self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
 
         repo_id = res['repoUpsert']['Id']
-        start = datetime.datetime( 2023, 6, 1).isoformat()
-        end = datetime.datetime( 2024, 7, 1).isoformat()
-        for cluster in [ "milano", ]:
+        start = datetime.datetime.now().replace(second=0, microsecond=0, minute=0)
+        start_str= start.isoformat()
+        end = start + relativedelta(years=1)
+        end_str = end.isoformat()
+
+        # create the slurm things
+        clusters = self.sync_slurm_associations( user=principal, users=principal, repo=repo, facility=facility, add_user=True )
+        for cluster in clusters['facility']['computepurchases']:
+
             # add compute record for repo
             compute_allocation_req = {
                 'repo': { 'Id': repo_id },
                 'repocompute': { 
-                    'repoid': repo_id, 'clustername': cluster, 
-                    'start': start, 'end': end
+                    'repoid': repo_id, 'clustername': cluster['clustername'], 
+                    'start': start_str, 'end': end_str
                 },
                 'qosinputs': [ {
                      'name': 'normal',
@@ -428,7 +438,7 @@ class RepoRegistration(Registration):
             account_name = f'{facility}'.lower()
         return account_name
 
-    def do_slurm_associations( self, user: str, users: str, repo: str, facility: str, add_user: bool=False, playbook: str="coact/slurm-users-partition.yaml" ) -> bool:
+    def sync_slurm_associations( self, user: str, users: str, repo: str, facility: str, add_user: bool=False, playbook: str="coact/slurm-users-partition.yaml" ) -> bool:
         # nasty: users is a comma separated string of list users; best to use an List[str]?
 
         # determine which clusters are defined
@@ -465,7 +475,7 @@ class RepoRegistration(Registration):
           #self.LOG.info(f"{playbook} output: {runner}")
           # TODO purge removed clusters
 
-          return True
+          return clusters
 
 
     def do_repo_membership( self, user: str, repo: str, facility: str, add_user: bool=False, playbook: str="coact/slurm-users-partition.yaml" ) -> bool:
@@ -487,7 +497,7 @@ class RepoRegistration(Registration):
         else:
 
             # run
-            self.do_slurm_associations( user=user, users=users_str, repo=repo, facility=facility, add_user=add_user )
+            clusters = self.sync_slurm_associations( user=user, users=users_str, repo=repo, facility=facility, add_user=add_user )
 
 
         # add user into repo back in coact
