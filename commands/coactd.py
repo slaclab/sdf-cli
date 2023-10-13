@@ -446,30 +446,36 @@ class RepoRegistration(Registration):
 
         else:
 
-            # if its the default repo, do not allow normal qos jobs
-            qos = 'normal,preemptable'
-            default_qos = 'normal'
-
-            if repo == 'default':
-              # however, we need to transition so have an exclusion for now
-              if not facility in ( 'fermi', 'neutrino' ):
-                qos = 'preemptable'
-                default_qos = 'preemptable'
-
             # determine which clusters are defined
             runner = self.back_channel.execute( self.FACILITY_CURRENT_COMPUTE_CGL, { 'facility': facility } )
             assert runner['facility']['name'] == facility
+
             clusters = runner['facility']['computepurchases']
             for cluster in clusters:
+
+              # if its the default repo, do not allow normal qos jobs
+              qos = 'preemptable'
+              default_qos = 'preemptable'
+
               partition = cluster['clustername']
+              purchased = int(cluster['purchased'])
+              if purchased > 0:
+                qos = 'normal,preemptable'
+                default_qos = 'normal'
+
               # set the slurm shares equal to teh number of cores
               # TODO: for gpus perhaps set to the number of gpus
-              shares = int(cluster['purchased'])
+              shares = purchased
               # min 1 share
               if shares < 1:
                 shares = 1
+
+              # run
               runner = self.run_playbook( playbook, user=user, users=users_str, facility=facility, repo=repo, partition=partition, defaultqos=default_qos, qos=qos, add_user=add_user, shares=shares )
               #self.LOG.info(f"{playbook} output: {runner}")
+
+
+            # TODO purge removed clusters
 
         # add user into repo back in coact
         add_user_req = {
