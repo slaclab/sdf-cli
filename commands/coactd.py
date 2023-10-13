@@ -451,6 +451,17 @@ class RepoRegistration(Registration):
             assert runner['facility']['name'] == facility
 
             clusters = runner['facility']['computepurchases']
+             # determine total shares for facility
+            facility_shares = 1
+            for c in clusters:
+              # set the slurm shares equal to teh number of cores
+              # TODO: for gpus perhaps set to the number of gpus
+              facility_shares += int(c['purchased'])
+            # configure
+            runner = self.run_playbook( 'coact/slurm-account.yaml', facility=facility, repo=repo, shares=facility_shares )
+            #self.LOG.info(f"{playbook} output: {runner}")
+
+            # set permissions and partitions
             for cluster in clusters:
 
               # if its the default repo, do not allow normal qos jobs
@@ -463,15 +474,8 @@ class RepoRegistration(Registration):
                 qos = 'normal,preemptable'
                 default_qos = 'normal'
 
-              # set the slurm shares equal to teh number of cores
-              # TODO: for gpus perhaps set to the number of gpus
-              shares = purchased
-              # min 1 share
-              if shares < 1:
-                shares = 1
-
               # run
-              runner = self.run_playbook( playbook, user=user, users=users_str, facility=facility, repo=repo, partition=partition, defaultqos=default_qos, qos=qos, add_user=add_user, shares=shares )
+              runner = self.run_playbook( playbook, user=user, users=users_str, facility=facility, repo=repo, partition=partition, defaultqos=default_qos, qos=qos, add_user=add_user )
               #self.LOG.info(f"{playbook} output: {runner}")
 
 
