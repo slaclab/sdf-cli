@@ -276,7 +276,7 @@ class UserRegistration(Registration):
 
 class RepoRegistration(Registration):
     'workflow for repo maintenance'
-    request_types = [ 'NewRepo', 'RepoMembership', 'RepoChangeComputeRequirement' ]
+    request_types = [ 'NewRepo', 'RepoMembership', 'RepoRemoveUser', 'RepoChangeComputeRequirement' ]
 
     REPO_USERS_GQL = gql("""
       query getRepoUsers ( $repo: RepoInput! ) {
@@ -366,9 +366,10 @@ class RepoRegistration(Registration):
                 assert repo and facility and principal
                 return self.do_new_repo( repo, facility, principal )
 
-            elif req_type == 'RepoMembership':
+            elif req_type in ('RepoMembership','RepoRemoveUser'):
+                add_user = True if req_type == 'RepoMembership' else False
                 assert user and repo and facility
-                return self.do_repo_membership( user, repo, facility )
+                return self.do_repo_membership( user, repo, facility, add_user )
 
             elif req_type == 'RepoChangeComputeRequirement':
                 assert repo and facility and requirement
@@ -427,7 +428,7 @@ class RepoRegistration(Registration):
             account_name = f'{facility}'.lower()
         return account_name
 
-    def do_repo_membership( self, user: str, repo: str, facility: str, playbook: str="coact/slurm-users-partition.yaml" ) -> bool:
+    def do_repo_membership( self, user: str, repo: str, facility: str, add_user: bool=False, playbook: str="coact/slurm-users-partition.yaml" ) -> bool:
 
         # fetch for the list of all users for the repo
         runner = self.back_channel.execute( self.REPO_USERS_GQL, { 'repo': {'facility': facility, 'name': repo }} )
@@ -445,25 +446,40 @@ class RepoRegistration(Registration):
 
         else:
 
-            # if its the default repo, do not allow normal qos jobs
-            qos = 'normal,preemptable'
-            default_qos = 'normal'
-
-            if repo == 'default':
-              # however, we need to transition so have an exclusion for now
-              if not facility in ( 'fermi', 'neutrino' ):
-                qos = 'preemptable'
-                default_qos = 'preemptable'
-
             # determine which clusters are defined
             runner = self.back_channel.execute( self.FACILITY_CURRENT_COMPUTE_CGL, { 'facility': facility } )
             assert runner['facility']['name'] == facility
+
             clusters = runner['facility']['computepurchases']
+             # determine total shares for facility
+            facility_shares = 1
+            for c in clusters:
+              # set the slurm shares equal to teh number of cores
+              # TODO: for gpus perhaps set to the number of gpus
+              facility_shares += int(c['purchased'])
+            # configure
+            runner = self.run_playbook( 'coact/slurm-account.yaml', facility=facility, repo=repo, shares=facility_shares )
+            #self.LOG.info(f"{playbook} output: {runner}")
+
+            # set permissions and partitions
             for cluster in clusters:
+
+              # if its the default repo, do not allow normal qos jobs
+              qos = 'preemptable'
+              default_qos = 'preemptable'
+
               partition = cluster['clustername']
-              purchased = cluster['purchased']
-              runner = self.run_playbook( playbook, user=user, users=users_str, facility=facility, repo=repo, partition=partition, defaultqos=default_qos, qos=qos )
+              purchased = int(cluster['purchased'])
+              if purchased > 0:
+                qos = 'normal,preemptable'
+                default_qos = 'normal'
+
+              # run
+              runner = self.run_playbook( playbook, user=user, users=users_str, facility=facility, repo=repo, partition=partition, defaultqos=default_qos, qos=qos, add_user=add_user )
               #self.LOG.info(f"{playbook} output: {runner}")
+
+
+            # TODO purge removed clusters
 
         # add user into repo back in coact
         add_user_req = {
