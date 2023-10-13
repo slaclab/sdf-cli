@@ -462,8 +462,13 @@ class RepoRegistration(Registration):
             clusters = runner['facility']['computepurchases']
             for cluster in clusters:
               partition = cluster['clustername']
-              purchased = cluster['purchased']
-              runner = self.run_playbook( playbook, user=user, users=users_str, facility=facility, repo=repo, partition=partition, defaultqos=default_qos, qos=qos, add_user=add_user )
+              # set the slurm shares equal to teh number of cores
+              # TODO: for gpus perhaps set to the number of gpus
+              shares = int(cluster['purchased'])
+              # min 1 share
+              if shares < 1:
+                shares = 1
+              runner = self.run_playbook( playbook, user=user, users=users_str, facility=facility, repo=repo, partition=partition, defaultqos=default_qos, qos=qos, add_user=add_user, shares=shares )
               #self.LOG.info(f"{playbook} output: {runner}")
 
         # add user into repo back in coact
