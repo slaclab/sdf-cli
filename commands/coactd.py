@@ -410,24 +410,27 @@ class RepoRegistration(Registration):
 
         # create the slurm things
         clusters = self.sync_slurm_associations( user=principal, users=principal, repo=repo, facility=facility, add_user=True )
+        self.LOG.info(f"{clusters}")
         for cluster in clusters:
 
-            # add compute record for repo
-            compute_allocation_req = {
-                'repo': { 'Id': repo_id },
-                'repocompute': { 
-                    'repoid': repo_id, 'clustername': cluster['clustername'], 
-                    'start': start_str, 'end': end_str
-                },
-                'qosinputs': [ {
-                     'name': 'normal',
-                     'slachours': 1,
-                     'chargefactor': 1.0
-                } ]
-            }
-            self.LOG.info(f"creating compute allocation for {facility}:{repo} {compute_allocation_req}")
-            res = self.back_channel.execute( self.COMPUTE_ALLOCATION_UPSERT_GQL, compute_allocation_req )
-            self.LOG.info(f"compute allocation creation: {res}")
+            if 'clustername' in cluster:
+
+                # add compute record for repo
+                compute_allocation_req = {
+                    'repo': { 'Id': repo_id },
+                    'repocompute': { 
+                        'repoid': repo_id, 'clustername': cluster['clustername'], 
+                        'start': start_str, 'end': end_str
+                    },
+                    'qosinputs': [ {
+                         'name': 'normal',
+                         'slachours': 1,
+                         'chargefactor': 1.0
+                    } ]
+                }
+                self.LOG.info(f"creating compute allocation for {facility}:{repo} {compute_allocation_req}")
+                res = self.back_channel.execute( self.COMPUTE_ALLOCATION_UPSERT_GQL, compute_allocation_req )
+                self.LOG.info(f"compute allocation creation: {res}")
 
         return True
 
@@ -475,7 +478,7 @@ class RepoRegistration(Registration):
           #self.LOG.info(f"{playbook} output: {runner}")
           # TODO purge removed clusters
 
-          return clusters
+        return clusters
 
 
     def do_repo_membership( self, user: str, repo: str, facility: str, add_user: bool=False, playbook: str="coact/slurm-users-partition.yaml" ) -> bool:
