@@ -49,6 +49,10 @@ class SlurmImport(Command,GraphQlClient):
         p.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
         p.add_argument('--password-file', help='basic auth password for graphql service', required=True)
         p.add_argument('--batch', help='batch upload size', default=1000)
+        p.add_argument('--date', help='import jobs from this date', default='20231018')
+        p.add_argument('--starttime', help='start time of job imports', default='00:00:00')
+        p.add_argument('--endtime', help='end time of job imports', default='23:59:59')
+
         return p
 
     def take_action(self, parsed_args):
@@ -67,7 +71,7 @@ class SlurmImport(Command,GraphQlClient):
         job_count = 0
         total_secs = 0
 
-        for line in self.run_sacct( time_end="01:00:00"):
+        for line in self.run_sacct( date=parsed_args.date, start_time=parsed_args.starttime, end_time=parsed_args.endtime ):
             self.LOG.info(f"{line}")
 
             if line:
@@ -158,7 +162,7 @@ class SlurmImport(Command,GraphQlClient):
                 if time > t[0] and time < t[1]:
                     self.LOG.info(f'    found match, returning alloc id {_id}')
                     return self._allocid[key]
-        raise Exception(f'could not determine alloc id for {facility}:{repo} at {repo} at timestamp {time}')
+        raise Exception(f'could not determine alloc id for {facility}:{repo} at {cluster} at timestamp {time}')
 
     def upload_jobs(self, jobs):
 
@@ -185,10 +189,10 @@ class SlurmImport(Command,GraphQlClient):
 
 
 
-    def run_sacct(self, sacct_bin_path='sacct', daystr='20231012', time_start='00:00:00', time_end='23:59:59' ):
-        day = datetime.datetime(int(daystr[0:4]), int(daystr[4:6]), int(daystr[6:8]))
+    def run_sacct(self, sacct_bin_path='sacct', date='20231012', start_time='00:00:00', end_time='23:59:59' ):
+        day = datetime.datetime(int(date[0:4]), int(date[4:6]), int(date[6:8]))
         start = day.strftime("%Y-%m-%d")
-        commandstr = f"""SLURM_TIME_FORMAT=%s {sacct_bin_path} --allusers --duplicates --allclusters --allocations --starttime="{start}T{time_start}" --endtime="{start}T{time_end}" --truncate --parsable2 --format=JobID,User,UID,Account,Partition,QOS,Submit,Start,End,Elapsed,NCPUS,AllocNodes,AllocTRES,CPUTimeRAW,NodeList,Reservation,ReservationId,State"""
+        commandstr = f"""SLURM_TIME_FORMAT=%s {sacct_bin_path} --allusers --duplicates --allclusters --allocations --starttime="{start}T{start_time}" --endtime="{start}T{end_time}" --truncate --parsable2 --format=JobID,User,UID,Account,Partition,QOS,Submit,Start,End,Elapsed,NCPUS,AllocNodes,AllocTRES,CPUTimeRAW,NodeList,Reservation,ReservationId,State"""
         index = 0
         c = 0
         s = 0
@@ -197,7 +201,7 @@ class SlurmImport(Command,GraphQlClient):
 
         for line in iter(process.stdout.readline, b''):
             fields = line.decode("utf-8").split("|")
-            if index == 0 or ( len(fields) >= 10 and line.find(b"PENDING") == -1 and int(fields[7]) < int(fields[8]) and fields[9] != f"{time_start}" ):
+            if index == 0 or ( len(fields) >= 10 and line.find(b"PENDING") == -1 and int(fields[7]) < int(fields[8]) and fields[9] != f"{start_time}" ):
                 yield line.decode("utf-8").strip()
                 if index > 0:
                     c += 1
