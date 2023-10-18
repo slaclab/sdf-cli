@@ -410,7 +410,7 @@ class RepoRegistration(Registration):
 
         # create the slurm things
         clusters = self.sync_slurm_associations( user=principal, users=principal, repo=repo, facility=facility, add_user=True )
-        for cluster in clusters['facility']['computepurchases']:
+        for cluster in clusters:
 
             # add compute record for repo
             compute_allocation_req = {
