@@ -2,7 +2,8 @@ import os
 import sys
 import inspect
 from enum import Enum
-from typing import Any
+from typing import Any, List, Optional
+import math
 
 from cliff.command import Command
 from cliff.commandmanager import CommandManager
@@ -86,7 +87,7 @@ class SlurmImport(Command,GraphQlClient):
 
         return True
 
-    def get_metadata(self):
+    def get_metadata(self) -> bool:
         REPOS_GQL = gql("""
         query{
             repos(filter:{}){
@@ -105,21 +106,23 @@ class SlurmImport(Command,GraphQlClient):
             }
             clusters(filter:{}){
                 name
-                chargefactor
-                members
                 memberprefixes
+                cpu: nodecpucount
+                gpu: nodegpucount
+                mem: nodememgb
+                gpumem: nodegpumemgb
             }
         }
         """)
         resp = self.back_channel.execute( REPOS_GQL )
-        #self.LOG.info(f"{resp}")
+        self.LOG.info(f"{resp}")
         repos = { x['facility'].lower() + ':' + x["name"].lower() : x for x in resp["repos"] }
 
         # create a lookup table to determine a the relevant allocationId for the job to count against
         self._allocid = {}
         for repo in resp['repos']:
             for alloc in repo.get("currentComputeAllocations", []):
-                self.LOG.info(f'looking at {alloc}')
+                #self.LOG.info(f'looking at {alloc}')
                 key = ( repo['facility'].lower(), repo['name'].lower(), alloc["clustername"].lower())
                 if not key in self._allocid:
                     self._allocid[key] = {}
@@ -131,9 +134,20 @@ class SlurmImport(Command,GraphQlClient):
                     self.LOG.info(f'  {time_range}')
                 else:
                     self.LOG.warning(f'{key} has no allocations')
+        self.LOG.info(f'found repo compute allocations {self._allocid}')
 
-        self.LOG.info(f'found {self._allocid}')
-        return repos
+        # populate the core, mem and gpu counts
+        self._clusters = {}
+        for cluster in resp['clusters']:
+            name = cluster['name']
+            self._clusters[name] = {}
+            for k,v in cluster.items():
+                if k in ( 'mem', ):
+                    v = v * 1073741824
+                self._clusters[name][k] = v
+        self.LOG.info(f'found clusters {self._clusters}')
+
+        return True
 
     def get_alloc_id( self, facility: str, repo: str, cluster: str, time: pdl.DateTime ) -> str:
         key = ( facility, repo, cluster )
@@ -177,7 +191,7 @@ class SlurmImport(Command,GraphQlClient):
                 
         yield f"--- count={c}"
 
-    def convert( self, index, parts, default_facility='shared', default_repo='default' ):
+    def convert( self, index, parts, default_facility='shared', default_repo='default' ) -> dict:
 
         def conv(s, fx, default=None):
             try:
@@ -185,7 +199,7 @@ class SlurmImport(Command,GraphQlClient):
             except:
                 return default
 
-        def kilos_to_int(s):
+        def kilos_to_int(s: str) -> int:
             m = re.match(r"(^[0-9.]+)([KMG])?", s.upper())
             if m:
                 mul = 1
@@ -200,7 +214,7 @@ class SlurmImport(Command,GraphQlClient):
             else:
                 raise Exception("Can't parse %s" % s)
 
-        def calc_compute_time(startTs, endTs, submitTs, alloc_nodes, ncpus, tres):
+        def calc_compute_time(startTs: pdl.DateTime, endTs: pdl.DateTime, submitTs: pdl.DateTime, tres: str, cluster: dict, alloc_nodes: Optional[int], ncpus: Optional[int]) -> float:
             # calculate elapsed time as UTC so we don't get bitten by DST
             elapsed_secs = (endTs - startTs).total_seconds()
             #wait_time = (startTs - submitTs).total_seconds() 
@@ -210,11 +224,31 @@ class SlurmImport(Command,GraphQlClient):
                 elapsed_secs = 1.
 
             # TODO: determine maximal amounts
+            # if a single node, then divide all metrics by the number of nodes
+            used = {}
+            for x in tres.split(','):
+                k,v = x.split('=')
+                if 'gpu' in k:
+                    k = 'gpu'
+                used[k] = kilos_to_int(v) * 1. / alloc_nodes
+            #self.LOG.info(f'  cluster: {cluster}: {tres} -> {used}')
+            
             # if node is exclusive
             # max % of cpu, mem or gpu's for servers
+            ratios = {}
+            max_ratio = 0
+            for resource in ( 'cpu', 'gpu', 'mem' ):
+                if resource in used:
+                    ratios[resource] = used[resource] / cluster[resource]
+                    if ratios[resource] > max_ratio:
+                        max_ratio = ratios[resource]
+                    self.LOG.info(f'    {resource}: used {used[resource]} / {cluster[resource]}\t -> {ratios[resource]:.5}')
+
             compute_time = elapsed_secs * ncpus / 3600.0 # TODO: this isn't right...
-            self.LOG.info(f'  calc {elapsed_secs}s -> {compute_time}')
-            return compute_time
+
+            resource_time = elapsed_secs * alloc_nodes * max_ratio * cluster['cpu'] / 3600. 
+            self.LOG.info(f'  calc time: {elapsed_secs}s\t compute_hours: {resource_time:.5}\t core_hours: {compute_time:.5}')
+            return resource_time
 
         d = { field: parts[idx] for field, idx in index.items() }
         facility = default_facility
@@ -234,8 +268,9 @@ class SlurmImport(Command,GraphQlClient):
         # compute some values
         alloc_nodes = kilos_to_int(d['AllocNodes'])
         ncpus = conv(d['NCPUS'], int, 0)
-        compute_time = calc_compute_time( startTs, endTs, submitTs,
-                alloc_nodes, ncpus, d["AllocTRES"])
+        compute_time = calc_compute_time( startTs=startTs, endTs=endTs,
+                tres=d["AllocTRES"], submitTs=submitTs,
+                alloc_nodes=alloc_nodes, ncpus=ncpus, cluster=self._clusters[d['Partition']])
 
         # determine appropriate allocation to charge against
         # use submitTs instead of startTs?
