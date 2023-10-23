@@ -272,6 +272,9 @@ class SlurmImport(Command,GraphQlClient):
                 tres=d["AllocTRES"], submitTs=submitTs,
                 alloc_nodes=alloc_nodes, ncpus=ncpus, cluster=self._clusters[d['Partition']])
 
+        # charge factor of job
+        cf = 1.0
+
         # determine appropriate allocation to charge against
         # use submitTs instead of startTs?
         allocId = self.get_alloc_id( facility, repo, d['Partition'], startTs )
@@ -286,7 +289,8 @@ class SlurmImport(Command,GraphQlClient):
             #'accountName': d['Account'],
             #'partitionName': d['Partition'],
             'allocationId': allocId,
-            'qos': d['QOS'],
+            #'qos': d['QOS'],
+            'chargeFactor': cf,
             #'submitTs': submitTs,
             #'startTs': startTs,
             #'endTs': endTs,
