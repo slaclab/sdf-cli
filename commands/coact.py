@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any, List, Optional
 import math
 
+import argparse
 from cliff.command import Command
 from cliff.commandmanager import CommandManager
 
@@ -35,6 +36,50 @@ def parse_datetime( value: Any, timezone=local_tz, force_tz=False) -> pdl.DateTi
         #logging.warning(f'  -> {dt}')
     return dt
 
+class SlurmDump(Command):
+    'Dumps data from slurm into flat files for later ingestion'
+    LOG = logging.getLogger(__name__)
+
+    def get_parser(self, prog_name):
+        p = super(SlurmDump, self).get_parser(prog_name)
+        p.add_argument('--verbose', help='verbose output', required=False)
+        p.add_argument('--date', help='import jobs from this date', default='2023-10-18')
+        p.add_argument('--starttime', help='start time of job imports', default='00:00:00')
+        p.add_argument('--endtime', help='end time of job imports', default='23:59:59')
+        return p
+
+    def take_action(self, parsed_args):
+        self.verbose = parsed_args.verbose
+        first = True
+        index = {}
+        buffer = []
+        for line in self.run_sacct( date=parsed_args.date, start_time=parsed_args.starttime, end_time=parsed_args.endtime ):
+            print(f"{line}")
+
+    def run_sacct(self, sacct_bin_path: str='sacct', date: str='2023-10-12', start_time: str='00:00:00', end_time: str='23:59:59' ):
+        commandstr = f"""SLURM_TIME_FORMAT=%s {sacct_bin_path} --allusers --duplicates --allclusters --allocations --starttime="{date}T{start_time}" --endtime="{date}T{end_time}" --truncate --parsable2 --format=JobID,User,UID,Account,Partition,QOS,Submit,Start,End,Elapsed,NCPUS,AllocNodes,AllocTRES,CPUTimeRAW,NodeList,Reservation,ReservationId,State"""
+        if self.verbose:
+            self.LOG.info(f"cmd: {commandstr}")
+        index = 0
+        c = 0
+        s = 0
+
+        process = subprocess.Popen(commandstr, shell=True, stdout=subprocess.PIPE)
+        for line in iter(process.stdout.readline, b''):
+            fields = line.decode("utf-8").split("|")
+            if index == 0 or ( len(fields) >= 10 and line.find(b"PENDING") == -1 and line.find(b"shared:default") == -1 ): # and int(fields[7]) <= int(fields[8]) ): # and fields[9] != f"{start_time}" ):
+                yield line.decode("utf-8").strip()
+                if index > 0:
+                    c += 1
+                index += 1
+            else:
+                self.LOG.warning(f"skipping ({len(fields)}, {int(fields[7])} < {int(fields[8])}) {line}")
+                
+        #yield f"--- count={c}"
+
+
+
+
 class SlurmImport(Command,GraphQlClient):
     'Reads sacctmgr info from slurm and translates it to coact accounting stats'
     LOG = logging.getLogger(__name__)
@@ -43,15 +88,15 @@ class SlurmImport(Command,GraphQlClient):
         p = super(SlurmImport, self).get_parser(prog_name)
         p.add_argument('--verbose', help='verbose output', required=False)
         p.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
-        p.add_argument('--password-file', help='basic auth password for graphql service', required=True)
         p.add_argument('--batch', help='batch upload size', default=1000)
-        p.add_argument('--date', help='import jobs from this date', default='2023-10-18')
-        p.add_argument('--starttime', help='start time of job imports', default='00:00:00')
-        p.add_argument('--endtime', help='end time of job imports', default='23:59:59')
+        p.add_argument('--data', help='data to read from', type=argparse.FileType(), default=sys.stdin)
+        p.add_argument('--password-file', help='basic auth password for graphql service', required=True)
 
         return p
 
     def take_action(self, parsed_args):
+        self.verbose = parsed_args.verbose
+
         # connect
         self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
 
@@ -62,7 +107,7 @@ class SlurmImport(Command,GraphQlClient):
         first = True
         index = {}
         buffer = []
-        for line in self.run_sacct( date=parsed_args.date, start_time=parsed_args.starttime, end_time=parsed_args.endtime ):
+        for line in parsed_args.data.readlines():
             self.LOG.info(f"{line}")
 
             if line:
@@ -72,9 +117,6 @@ class SlurmImport(Command,GraphQlClient):
                     index = { s: idx for idx, s in enumerate(parts) }
                     first = False
                 else:
-                    if line.startswith("--- "):
-                        break
-
                     # keep a buffer for bulk use
                     # and convert the string into a json desc
                     buffer.append(self.convert(index, parts))
@@ -115,7 +157,8 @@ class SlurmImport(Command,GraphQlClient):
         }
         """)
         resp = self.back_channel.execute( REPOS_GQL )
-        self.LOG.info(f"{resp}")
+        if self.verbose:
+            self.LOG.info(f"{resp}")
         repos = { x['facility'].lower() + ':' + x["name"].lower() : x for x in resp["repos"] }
 
         # create a lookup table to determine a the relevant allocationId for the job to count against
@@ -131,10 +174,11 @@ class SlurmImport(Command,GraphQlClient):
                 if 'start' in alloc and 'end' in alloc:
                     time_range = (parse_datetime(alloc['start'], force_tz=True), parse_datetime(alloc['end'], force_tz=True) )
                     self._allocid[key][time_range] = alloc["Id"]
-                    self.LOG.info(f'  {time_range}')
+                    #self.LOG.info(f'  {time_range}')
                 else:
                     self.LOG.warning(f'{key} has no allocations')
-        self.LOG.info(f'found repo compute allocations {self._allocid}')
+        if self.verbose:
+            self.LOG.info(f'found repo compute allocations {self._allocid}')
 
         # populate the core, mem and gpu counts
         self._clusters = {}
@@ -169,28 +213,6 @@ class SlurmImport(Command,GraphQlClient):
         #self.back_channel.execute( JOB_GQL, values )
 
 
-
-    def run_sacct(self, sacct_bin_path: str='sacct', date: str='2023-10-12', start_time: str='00:00:00', end_time: str='23:59:59' ):
-        commandstr = f"""SLURM_TIME_FORMAT=%s {sacct_bin_path} --allusers --duplicates --allclusters --allocations --starttime="{date}T{start_time}" --endtime="{date}T{end_time}" --truncate --parsable2 --format=JobID,User,UID,Account,Partition,QOS,Submit,Start,End,Elapsed,NCPUS,AllocNodes,AllocTRES,CPUTimeRAW,NodeList,Reservation,ReservationId,State"""
-        self.LOG.info(f"cmd: {commandstr}")
-        index = 0
-        c = 0
-        s = 0
-
-        process = subprocess.Popen(commandstr, shell=True, stdout=subprocess.PIPE)
-
-        for line in iter(process.stdout.readline, b''):
-            fields = line.decode("utf-8").split("|")
-            if index == 0 or ( len(fields) >= 10 and line.find(b"PENDING") == -1 and line.find(b"shared:default") == -1 ): # and int(fields[7]) <= int(fields[8]) ): # and fields[9] != f"{start_time}" ):
-                yield line.decode("utf-8").strip()
-                if index > 0:
-                    c += 1
-                index += 1
-            else:
-                self.LOG.warning(f"skipping ({len(fields)}, {int(fields[7])} < {int(fields[8])}) {line}")
-                
-        yield f"--- count={c}"
-
     def convert( self, index, parts, default_facility='shared', default_repo='default' ) -> dict:
 
         def conv(s, fx, default=None):
@@ -213,6 +235,7 @@ class SlurmImport(Command,GraphQlClient):
                 return int(float(m.group(1)) * mul)
             else:
                 raise Exception("Can't parse %s" % s)
+
 
         def calc_compute_time(startTs: pdl.DateTime, endTs: pdl.DateTime, submitTs: pdl.DateTime, tres: str, cluster: dict, alloc_nodes: Optional[int], ncpus: Optional[int]) -> float:
             # calculate elapsed time as UTC so we don't get bitten by DST
@@ -256,7 +279,7 @@ class SlurmImport(Command,GraphQlClient):
         try:
             facility, repo = d["Account"].split(':')
         except Exception as e:
-            self.LOG.warn(f"could not determine facility and repo from {d['Acount']}")
+            self.LOG.warn(f"could not determine facility and repo from {d['Account']}")
 
         nodelist = d["NodeList"]
 
@@ -313,7 +336,7 @@ class Coact(CommandManager):
 
     def __init__(self, namespace, convert_underscores=True):
         super(Coact,self).__init__(namespace, convert_underscores=convert_underscores)
-        for cmd in [ SlurmImport, ]:
+        for cmd in [ SlurmDump, SlurmImport, ]:
             self.add_command( cmd.__name__.lower(), cmd )
 
 
