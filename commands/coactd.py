@@ -20,8 +20,9 @@ import ansible_runner
 
 import logging
 import datetime
-from dateutil.relativedelta import relativedelta
 
+from dateutil import parser
+from dateutil.relativedelta import relativedelta
 
 COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
 
@@ -108,6 +109,9 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
                     requestedby
                     timeofrequest
                     shell
+                    clustername
+                    start
+                    end
                 }
                 operationType
             }
@@ -278,7 +282,7 @@ class UserRegistration(Registration):
 
 class RepoRegistration(Registration):
     'workflow for repo maintenance'
-    request_types = [ 'NewRepo', 'RepoMembership', 'RepoRemoveUser', 'RepoChangeComputeRequirement' ]
+    request_types = [ 'NewRepo', 'RepoMembership', 'RepoRemoveUser', 'RepoChangeComputeRequirement', 'RepoComputeAllocation' ]
 
     REPO_USERS_GQL = gql("""
       query getRepoUsers ( $repo: RepoInput! ) {
@@ -314,12 +318,17 @@ class RepoRegistration(Registration):
     REPO_CURRENT_COMPUTE_REQUIREMENT_GQL = gql("""
         query repo( $repo: RepoInput! ) {
           repo(filter: $repo) {
+            Id
             name
             facility
             users
+            computerequirement
             currentComputeAllocations {
+              Id
               clustername
-              computerequirement
+              start
+              end
+              percentOfFacility
             }
           }
         }
@@ -354,13 +363,26 @@ class RepoRegistration(Registration):
         }
         """)
 
+    REPO_COMPUTE_ALLOCATION_UPSERT_GQL = gql("""
+        mutation repo( $repo: RepoInput!, $repocompute: RepoComputeAllocationInput! ) {
+          repoComputeAllocationUpsert( repo: $repo, repocompute: $repocompute ){
+            Id 
+            currentComputeAllocations {
+              Id
+              clustername
+              end
+              start
+            }
+          }
+        }
+    """)
+
     def do(self, req_id, op_type, req_type, approval, req):
 
         user = req.get('username', None)
         repo = req.get('reponame', None)
         facility = req.get('facilityname', None)
         principal = req.get('principal', None )
-        requirement = req.get('computerequirement', None)
 
         if approval in [ RequestStatus.APPROVED ]:
 
@@ -373,21 +395,26 @@ class RepoRegistration(Registration):
                 assert user and repo and facility
                 return self.do_repo_membership( user, repo, facility, add_user )
 
+            elif req_type == 'RepoComputeAllocation':
+                clustername = req.get('clustername', None)
+                #assert facility and repo and clustername and percent
+                percent = req.get('percentOfFacility', 10.)
+                start = req.get('start', None)
+                end = req.get('end', None)
+                return self.do_repo_compute_allocation( repo, facility, clustername, percent, start, end )
+
             elif req_type == 'RepoChangeComputeRequirement':
+                requirement = req.get('computerequirement', None)
                 assert repo and facility and requirement
                 return self.do_compute_requirement( repo, facility, requirement )
 
         return None
 
-    def do_new_repo( self, repo: str, facility: str, principal: str, playbook: str="coact/add_repo.yaml" ) -> bool:
+    def do_new_repo( self, repo: str, facility: str, principal: str, playbook: str="coact/add_repo.yaml", default_repo_allocation_percent=100. ) -> bool:
 
         # add facility specific Repos
         runner = self.run_playbook( playbook, facility=facility, repo=repo )
         self.LOG.warn(f"add_repo.yaml: {runner}")
-
-        # TODO deal with storage
-
-        # TODO: maybe sync wth current users if the repo already exists so we don't overwrite membership list
 
         # write back to coact the repo information
         repo_create_req = {
@@ -400,40 +427,65 @@ class RepoRegistration(Registration):
             }
         }
         self.LOG.info(f"upserting repo record {repo_create_req}")
-        res = self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
+        repo_upserted = self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
+        repo_id = repo_upserted['repoUpsert']['Id']
 
-        repo_id = res['repoUpsert']['Id']
-        start = datetime.datetime.now().replace(second=0, microsecond=0, minute=0)
-        start_str= start.isoformat()
-        end = start + relativedelta(years=1)
-        end_str = end.isoformat()
+        # for each facilities' clusters, create a compute allocation record
+        # could/shoudl probably merge this into single call with above gql mutation
+        fac_res = self.back_channel.execute( self.FACILITY_CURRENT_COMPUTE_CGL, { 'facility': facility } )
+        assert fac_res['facility']['name'] == facility
+        start = datetime.datetime( 2023, 6, 1).isoformat()
+        end = datetime.datetime( 2024, 7, 1).isoformat()
 
-        # create the slurm things
-        clusters = self.sync_slurm_associations( user=principal, users=principal, repo=repo, facility=facility, add_user=True )
-        self.LOG.info(f"{clusters}")
+        clusters = fac_res['facility']['computepurchases']
+        #self.LOG.info(f'clusters: {clusters}')
         for cluster in clusters:
+            #self.LOG.info(f'cluster {cluster}')
+            partition = cluster['clustername']
+            # determine absolute resource count
+            purchased = float(cluster['purchased'])
+            resource = purchased * default_repo_allocation_percent / 100.
+            self.upsert_repo_compute_allocation( repo_id, partition, default_repo_allocation_percent, start, end )
 
-            if 'clustername' in cluster:
 
-                # add compute record for repo
-                compute_allocation_req = {
-                    'repo': { 'Id': repo_id },
-                    'repocompute': { 
-                        'repoid': repo_id, 'clustername': cluster['clustername'], 
-                        'start': start_str, 'end': end_str
-                    },
-                    'qosinputs': [ {
-                         'name': 'normal',
-                         'slachours': 1,
-                         'chargefactor': 1.0
-                    } ]
-                }
-                self.LOG.info(f"creating compute allocation for {facility}:{repo} {compute_allocation_req}")
-                res = self.back_channel.execute( self.COMPUTE_ALLOCATION_UPSERT_GQL, compute_allocation_req )
-                self.LOG.info(f"compute allocation creation: {res}")
+        # TODO: deal with storage
 
         return True
 
+    def upsert_repo_compute_allocation( self, repo_id: str, cluster: str, percent: float, start: str, end: str, default_end_delta=relativedelta(years=3) ):
+        # TODO search for existing cluster
+
+        # must have an end
+        if not end or end == '':
+            end = parser.parse(start) + default_end_delta
+            end = end.isoformat()
+
+        compute_allocation_req = {
+            'repo': { 'Id': repo_id },
+            'repocompute': {
+                'repoid': repo_id, 'clustername': cluster,
+                'percentOfFacility': percent,
+                'start': start, 'end': end
+            },
+        }
+        self.LOG.info(f'upserting {compute_allocation_req}')
+        resp = self.back_channel.execute( self.REPO_COMPUTE_ALLOCATION_UPSERT_GQL, compute_allocation_req )
+        self.LOG.info(f'modified {resp}')
+        return resp
+
+    def do_repo_compute_allocation( self, repo: str, facility: str, cluster: str, percent: float, start: str, end: str ):
+        
+        self.LOG.info(f"set repo compute allocation {facility}:{repo} at {cluster} to {percent} between {start} - {end}")
+        repo_req = { 'repo': { 'facility': facility, 'name': repo } }
+        resp = self.back_channel.execute( self.REPO_CURRENT_COMPUTE_REQUIREMENT_GQL, repo_req )
+        self.LOG.info(f'got {resp}')
+        repo_obj = resp['repo']
+        assert facility == repo_obj['facility'] and repo == repo_obj['name'] 
+        self.LOG.info(f"found repo {repo_obj}")
+
+        resp = self.upsert_repo_compute_allocation( repo_obj['Id'], cluster, percent, start, end )
+
+        return True
 
     def get_account_name( self, facility: str, repo: str ) -> str:
         account_name = f'{facility}:{repo}'.lower()
@@ -516,7 +568,7 @@ class RepoRegistration(Registration):
         # get current compute requirement
         repo = self.back_channel.execute( self.REPO_CURRENT_COMPUTE_REQUIREMENT_GQL, { 'repo': {'facility': facility, 'name': repo }} )
         self.LOG.info(f"repo: {repo}")
-        current = repo['repo']['currentComputeAllocations']['computerequirement']
+        current = repo['repo']['computerequirement']
         users = repo['repo']['users']
         users_str = ','.join(users)
         self.LOG.info(f"setting account {account_name} with users {users_str}")
