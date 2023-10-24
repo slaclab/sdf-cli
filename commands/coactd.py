@@ -112,6 +112,8 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
                     clustername
                     start
                     end
+                    percentOfFacility
+                    allocated
                 }
                 operationType
             }
@@ -398,10 +400,11 @@ class RepoRegistration(Registration):
             elif req_type == 'RepoComputeAllocation':
                 clustername = req.get('clustername', None)
                 #assert facility and repo and clustername and percent
-                percent = req.get('percentOfFacility', 10.)
+                percent = req.get('percentOfFacility', 100.)
+                allocated = req.get('allocated', None)
                 start = req.get('start', None)
                 end = req.get('end', None)
-                return self.do_repo_compute_allocation( repo, facility, clustername, percent, start, end )
+                return self.do_repo_compute_allocation( repo, facility, clustername, percent, allocated, start, end )
 
             elif req_type == 'RepoChangeComputeRequirement':
                 requirement = req.get('computerequirement', None)
@@ -410,7 +413,7 @@ class RepoRegistration(Registration):
 
         return None
 
-    def do_new_repo( self, repo: str, facility: str, principal: str, playbook: str="coact/add_repo.yaml", default_repo_allocation_percent=100. ) -> bool:
+    def do_new_repo( self, repo: str, facility: str, principal: str, playbook: str="coact/add_repo.yaml", default_repo_allocation_percent=100 ) -> bool:
 
         # add facility specific Repos
         runner = self.run_playbook( playbook, facility=facility, repo=repo )
@@ -445,14 +448,14 @@ class RepoRegistration(Registration):
             # determine absolute resource count
             purchased = float(cluster['purchased'])
             resource = purchased * default_repo_allocation_percent / 100.
-            self.upsert_repo_compute_allocation( repo_id, partition, default_repo_allocation_percent, start, end )
+            self.upsert_repo_compute_allocation( repo_id, partition, default_repo_allocation_percent, resource, start, end )
 
 
         # TODO: deal with storage
 
         return True
 
-    def upsert_repo_compute_allocation( self, repo_id: str, cluster: str, percent: float, start: str, end: str, default_end_delta=relativedelta(years=3) ):
+    def upsert_repo_compute_allocation( self, repo_id: str, cluster: str, percent: int, allocated_resource: float, start: str, end: str, default_end_delta=relativedelta(years=3) ):
         # TODO search for existing cluster
 
         # must have an end
@@ -460,12 +463,19 @@ class RepoRegistration(Registration):
             end = parser.parse(start) + default_end_delta
             end = end.isoformat()
 
+        def format_datetime( iso, round_off=None ):
+            iso = iso.replace('+00:00', 'Z')
+            if not '.' in iso:
+                iso = iso.replace('Z', '.000000Z')
+            return iso
+
         compute_allocation_req = {
             'repo': { 'Id': repo_id },
             'repocompute': {
                 'repoid': repo_id, 'clustername': cluster,
                 'percentOfFacility': percent,
-                'start': start, 'end': end
+                'allocated': allocated_resource,
+                'start': format_datetime(start), 'end': format_datetime(end)
             },
         }
         self.LOG.info(f'upserting {compute_allocation_req}')
@@ -473,9 +483,9 @@ class RepoRegistration(Registration):
         self.LOG.info(f'modified {resp}')
         return resp
 
-    def do_repo_compute_allocation( self, repo: str, facility: str, cluster: str, percent: float, start: str, end: str ):
+    def do_repo_compute_allocation( self, repo: str, facility: str, cluster: str, percent: int, allocated_resource: float, start: str, end: str ):
         
-        self.LOG.info(f"set repo compute allocation {facility}:{repo} at {cluster} to {percent} between {start} - {end}")
+        self.LOG.info(f"set repo compute allocation {facility}:{repo} at {cluster} to {percent} ({allocated_resource}) between {start} - {end}")
         repo_req = { 'repo': { 'facility': facility, 'name': repo } }
         resp = self.back_channel.execute( self.REPO_CURRENT_COMPUTE_REQUIREMENT_GQL, repo_req )
         self.LOG.info(f'got {resp}')
@@ -483,7 +493,7 @@ class RepoRegistration(Registration):
         assert facility == repo_obj['facility'] and repo == repo_obj['name'] 
         self.LOG.info(f"found repo {repo_obj}")
 
-        resp = self.upsert_repo_compute_allocation( repo_obj['Id'], cluster, percent, start, end )
+        resp = self.upsert_repo_compute_allocation( repo_obj['Id'], cluster, percent, allocated_resource, start, end )
 
         return True
 
