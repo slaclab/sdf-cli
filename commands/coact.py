@@ -86,7 +86,7 @@ class SlurmImport(Command,GraphQlClient):
 
     def get_parser(self, prog_name):
         p = super(SlurmImport, self).get_parser(prog_name)
-        p.add_argument('--verbose', help='verbose output', required=False)
+        p.add_argument('--verbose', help='verbose output', required=False, action='store_true')
         p.add_argument('--debug', help='debug output', required=False, default=False, action='store_true')
         p.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
         p.add_argument('--batch', help='batch upload size', default=1000)
@@ -98,29 +98,27 @@ class SlurmImport(Command,GraphQlClient):
 
     def take_action(self, parsed_args):
         self.verbose = parsed_args.verbose
-        self.debug = parsed_args.debug
         self.exit_on_error = parsed_args.exit_on_error
 
-        if self.debug:
-            for handler in self.LOG.handlers:
-                if isinstance(handler, type(logging.StreamHandler())):
-                    handler.setLevel(logging.DEBUG)
+        level = logging.WARNING
+        if parsed_args.verbose:
+            level = logging.INFO
+        if parsed_args.debug:
+            level = logging.DEBUG
+        for handler in self.LOG.handlers:
+            if isinstance(handler, type(logging.StreamHandler())):
+                handler.setLevel(level)
 
         # connect
         self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
-
-        if self.verbose:
-            self.LOG.info("gathering metadata...")
         self.get_metadata()
 
-        if self.verbose:
-            self.LOG.info("gathering slurm job info...")
         first = True
         index = {}
         buffer = []
         for line in parsed_args.data.readlines():
             if self.verbose:
-                self.LOG.info(f"\n{line.strip()}")
+                print(f"\n{line.strip()}")
             if line:
                 parts = line.split("|")
                 if first:
@@ -170,8 +168,7 @@ class SlurmImport(Command,GraphQlClient):
         }
         """)
         resp = self.back_channel.execute( REPOS_GQL )
-        if self.verbose:
-            self.LOG.info(f"{resp}")
+        #self.LOG.info(f"{resp}")
         repos = { x['facility'].lower() + ':' + x["name"].lower() : x for x in resp["repos"] }
 
         # create a lookup table to determine a the relevant allocationId for the job to count against
@@ -185,14 +182,13 @@ class SlurmImport(Command,GraphQlClient):
 
                 # sort?
                 if 'start' in alloc and 'end' in alloc:
-                    time_range = (parse_datetime(alloc['start'], force_tz=True), parse_datetime(alloc['end'], force_tz=True) )
+                    time_range = (parse_datetime(alloc['start']), parse_datetime(alloc['end']) )
                     self._allocid[key][time_range] = alloc["Id"]
                     if self.verbose:
-                        self.LOG.info(f'found alloc: {key}: {time_range}')
+                        print(f'found alloc: {key}: {time_range}')
                 else:
                     self.LOG.warning(f'{key} has no allocations')
-        if self.verbose:
-            self.LOG.info(f'found repo compute allocations {self._allocid}')
+        #self.LOG.info(f'found repo compute allocations {self._allocid}')
 
         # populate the core, mem and gpu counts
         self._clusters = {}
@@ -204,8 +200,7 @@ class SlurmImport(Command,GraphQlClient):
                     v = v * 1073741824
                 self._clusters[name][k] = v
 
-        if self.verbose:
-            self.LOG.info(f'found clusters {self._clusters}')
+        #self.LOG.info(f'found clusters {self._clusters}')
 
         return True
 
@@ -342,7 +337,7 @@ class SlurmImport(Command,GraphQlClient):
 
             resource_time = elapsed_secs * alloc_nodes * max_ratio * cluster['cpu'] / 3600. 
             if self.verbose:
-                self.LOG.info(f'  calc time: {elapsed_secs}s\t compute_hours: {resource_time:.5}\t core_hours: {compute_time:.5}')
+                print(f'  calc time: {elapsed_secs}s\t compute_hours: {resource_time:.5}\t core_hours: {compute_time:.5}')
             return resource_time
 
         d = { field: parts[idx] for field, idx in index.items() }
