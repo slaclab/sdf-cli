@@ -84,24 +84,25 @@ class SlurmImport(Command,GraphQlClient):
     'Reads sacctmgr info from slurm and translates it to coact accounting stats'
     LOG = logging.getLogger(__name__)
 
+    verbose = False
+
     def get_parser(self, prog_name):
         p = super(SlurmImport, self).get_parser(prog_name)
-        p.add_argument('--verbose', help='verbose output', required=False, action='store_true')
+        p.add_argument('--print', help='verbose output', action='store_true')
         p.add_argument('--debug', help='debug output', required=False, default=False, action='store_true')
         p.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
         p.add_argument('--batch', help='batch upload size', default=1000)
         p.add_argument('--data', help='data to read from', type=argparse.FileType(), default=sys.stdin)
         p.add_argument('--password-file', help='basic auth password for graphql service', required=True)
-        p.add_argument('--exit-on-error', help='terminate if cannot parse data', required=True, default=False, action='store_true')
-
+        p.add_argument('--exit-on-error', help='terminate if cannot parse data', required=False, default=False, action='store_true')
         return p
 
     def take_action(self, parsed_args):
-        self.verbose = parsed_args.verbose
+        self.verbose = parsed_args.print
         self.exit_on_error = parsed_args.exit_on_error
 
         level = logging.WARNING
-        if parsed_args.verbose:
+        if self.verbose:
             level = logging.INFO
         if parsed_args.debug:
             level = logging.DEBUG
@@ -228,15 +229,15 @@ class SlurmImport(Command,GraphQlClient):
     def remap_job( self, d ):
         """ deal with old jobs with wrong account info """
         #self.LOG.info(f"in: {d}") 
-        if d['User'] in ( 'lsstsvc1' ) and d['Account'] in ( 'shared', '' ):
+        if d['User'] in ( 'lsstsvc1' ) and d['Account'] in ( 'rubin', 'shared', '' ):
             d['Account'] = 'rubin:production'
-        elif d['Account'] in ( 'shared', 'shared:default' ) or d['User'] in ( 'jonl', 'vanilla', 'yemi', 'yangw', 'pav', 'root', 'reranna', 'ppascual'):
+        elif d['Account'] in ( 'shared', 'shared:default' ) or d['User'] in ( 'jonl', 'vanilla', 'yemi', 'yangw', 'pav', 'root', 'reranna', 'ppascual', 'renata'):
             return None
-        elif d['User'] in ('csaunder','elhoward','bos', 'erykoff', 'mccarthy','yesw','abrought', 'shuang92', 'aconnoll', 'daues', 'aheinze','zhaoyu','dagoret', 'kannawad', 'kherner', 'cslater', "sierrav", 'jmeyers3', 'lskelvin', 'jchiang', 'yanny', 'ktl', 'jneveu', 'hchiang2', 'snyder18', 'fred3m', 'brycek', 'eiger', 'esteves', 'mxk', 'yusra', 'mrabus', 'ryczano', 'mgower', 'yoachim', 'scichris', ) and d['Account'] in ('', 'milano', 'roma'):
+        elif d['User'] in ('csaunder','elhoward', 'smau', 'bos', 'erykoff', 'ebellm', 'mccarthy','yesw','abrought', 'shuang92', 'aconnoll', 'daues', 'aheinze','zhaoyu','dagoret', 'kannawad', 'kherner', 'eske', 'cslater', "sierrav", 'jmeyers3', 'lskelvin', 'jchiang', 'yanny', 'ktl', 'jneveu', 'hchiang2', 'snyder18', 'fred3m', 'brycek', 'eiger', 'esteves', 'mxk', 'yusra', 'mrabus', 'ryczano', 'mgower', 'yoachim', 'scichris', ) and d['Account'] in ('', 'milano', 'roma'):
             d['Account'] = 'rubin:developers'
             if d['Partition'] == 'ampere':
                 d['Partition'] = 'milano'
-        elif d['User'] == 'kocevski' or ( d['User'] in  ('mdimauro','laviron','tyrelj', 'echarles', 'bruel') and d['Account'] in ('','latba','ligo','repository') ):
+        elif d['User'] == 'kocevski' or ( d['User'] in  ('mdimauro','burnett','laviron','omodei','tyrelj', 'echarles', 'bruel') and d['Account'] in ('','latba','ligo','repository') ):
             d['Account'] = 'fermi:users'
         elif d['User'] in ('glastraw',):
             d['Account'] = 'fermi:l1'
@@ -247,12 +248,12 @@ class SlurmImport(Command,GraphQlClient):
         elif d['User'] in ( 'kterao', 'kvtsang', 'anoronyo', 'bkroul', 'zhulcher', 'koh0207', 'drielsma', 'lkashur', 'dcarber', 'amogan', 'cyifan', 'yjwa', 'aj14' , 'jdyer', 'sindhuk', 'justinjm', 'mrmooney', 'bearc', 'fuhaoji', 'sfogarty', 'carsmith', 'yuntse'): #and d['Account'] in ( '', 'ampere', 'ml', 'roma', ):
             d['Account'] = 'neutrino:default'
             d['Partition'] = 'ampere'
-        elif d['User'] == 'dougl215': # and d['Account'] in ('ampere:default',):
+        elif d['User'] in ('dougl215','zhezhang'): # and d['Account'] in ('ampere:default',):
             #self.LOG.error("HERE")
             d['Account'] = 'mli:default'
         elif d['User'] in ('jfkern',  'taisgork', 'valmar', 'tgrant', 'arijit01', 'mmdoyle', 'fpoitevi', 'ashojaei', 'monarin', 'claussen', 'batyuk', 'kevinkgu', 'tfujit27', 'haoyuan', 'aliang', 'jshenoy', 'dorlhiac', 'xjql',  ): # and d['Account'] in ('','milano', 'roma'):
             d['Account'] = 'lcls:default'
-        elif d['User'] in ( 'espov', 'thorsten', 'wilko', 'snelson') and d['Account'] in ( 'lcls:xpp', 'lcls:psmfx', 'lcls:data'):
+        elif d['User'] in ( 'psdatmgr', 'xiangli', 'sachsm', 'hekstra', 'cwang31', 'espov', 'thorsten', 'wilko', 'snelson') and d['Account'] in ( '', 'lcls:xpp', 'lcls:psmfx', 'lcls:data', 'ampere'):
             d['Account'] = 'lcls:default'
         elif d['User'] in ( 'lsstccs', 'rubinmgr' ):
             d['Account'] = 'rubin:commissioning'
@@ -262,7 +263,7 @@ class SlurmImport(Command,GraphQlClient):
             d['Account'] = 'epptheory:default'
         elif d['User'] in ('tabel',):
             d['Account'] = 'kipac:kipac'
-        elif d['User'] in ('melwan',):
+        elif d['User'] in ('melwan', 'zatschls', 'yanliu',):
             d['Account'] = 'supercdms:default'
 
         if d['Account'] == '':
