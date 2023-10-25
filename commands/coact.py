@@ -67,7 +67,7 @@ class SlurmDump(Command):
         process = subprocess.Popen(commandstr, shell=True, stdout=subprocess.PIPE)
         for line in iter(process.stdout.readline, b''):
             fields = line.decode("utf-8").split("|")
-            if index == 0 or ( len(fields) >= 10 and line.find(b"PENDING") == -1 and line.find(b"shared:default") == -1 ): # and int(fields[7]) <= int(fields[8]) ): # and fields[9] != f"{start_time}" ):
+            if index == 0 or  len(fields) >= 10: # and line.find(b"PENDING") == -1 ): 
                 yield line.decode("utf-8").strip()
                 if index > 0:
                     c += 1
@@ -87,42 +87,55 @@ class SlurmImport(Command,GraphQlClient):
     def get_parser(self, prog_name):
         p = super(SlurmImport, self).get_parser(prog_name)
         p.add_argument('--verbose', help='verbose output', required=False)
+        p.add_argument('--debug', help='debug output', required=False, default=False, action='store_true')
         p.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
         p.add_argument('--batch', help='batch upload size', default=1000)
         p.add_argument('--data', help='data to read from', type=argparse.FileType(), default=sys.stdin)
         p.add_argument('--password-file', help='basic auth password for graphql service', required=True)
+        p.add_argument('--exit-on-error', help='terminate if cannot parse data', required=True, default=False, action='store_true')
 
         return p
 
     def take_action(self, parsed_args):
         self.verbose = parsed_args.verbose
+        self.debug = parsed_args.debug
+        self.exit_on_error = parsed_args.exit_on_error
+
+        if self.debug:
+            for handler in self.LOG.handlers:
+                if isinstance(handler, type(logging.StreamHandler())):
+                    handler.setLevel(logging.DEBUG)
 
         # connect
         self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
 
-        self.LOG.info("gathering metadata...")
+        if self.verbose:
+            self.LOG.info("gathering metadata...")
         self.get_metadata()
 
-        self.LOG.info("gathering slurm job info...")
+        if self.verbose:
+            self.LOG.info("gathering slurm job info...")
         first = True
         index = {}
         buffer = []
         for line in parsed_args.data.readlines():
-            self.LOG.info(f"{line}")
-
+            if self.verbose:
+                self.LOG.info(f"\n{line.strip()}")
             if line:
                 parts = line.split("|")
-                #self.LOG.debug(f"{parts}")
                 if first:
                     index = { s: idx for idx, s in enumerate(parts) }
                     first = False
                 else:
                     # keep a buffer for bulk use
                     # and convert the string into a json desc
-                    buffer.append(self.convert(index, parts))
-                    if len(buffer) >= int(parsed_args.batch):
-                        self.upload_jobs(buffer)
-                        buffer = []
+                    job = self.convert(index, parts)
+                    #self.LOG.info(f'job: {job}')
+                    if job:
+                        buffer.append(job)
+                        if len(buffer) >= int(parsed_args.batch):
+                            self.upload_jobs(buffer)
+                            buffer = []
 
         if len(buffer) > 0:
             self.upload_jobs(buffer)
@@ -174,7 +187,8 @@ class SlurmImport(Command,GraphQlClient):
                 if 'start' in alloc and 'end' in alloc:
                     time_range = (parse_datetime(alloc['start'], force_tz=True), parse_datetime(alloc['end'], force_tz=True) )
                     self._allocid[key][time_range] = alloc["Id"]
-                    #self.LOG.info(f'  {time_range}')
+                    if self.verbose:
+                        self.LOG.info(f'found alloc: {key}: {time_range}')
                 else:
                     self.LOG.warning(f'{key} has no allocations')
         if self.verbose:
@@ -189,29 +203,85 @@ class SlurmImport(Command,GraphQlClient):
                 if k in ( 'mem', ):
                     v = v * 1073741824
                 self._clusters[name][k] = v
-        self.LOG.info(f'found clusters {self._clusters}')
+
+        if self.verbose:
+            self.LOG.info(f'found clusters {self._clusters}')
 
         return True
 
     def get_alloc_id( self, facility: str, repo: str, cluster: str, time: pdl.DateTime ) -> str:
         key = ( facility, repo, cluster )
+        #self.LOG.info(f'looking for key {key} from {self._allocid}')
         if key in self._allocid:
-            self.LOG.info(f'  find alloc for {key}')
+            self.LOG.debug(f'  find alloc for {key}')
             # go through time ranges to determine actual Id
             time_ranges = self._allocid[key]
             for t, _id in time_ranges.items():
-                self.LOG.info(f'    matching {t[0].isoformat()} <= {time.in_timezone(local_tz).isoformat()} < {t[1].isoformat()}?')
+                self.LOG.debug(f'    matching {t[0].isoformat()} <= {time.in_timezone(local_tz).isoformat()} < {t[1].isoformat()}?')
                 if time >= t[0] and time < t[1]:
-                    self.LOG.info(f'      found match, returning alloc id {_id}')
+                    self.LOG.debug(f'      found match, returning alloc id {_id}')
                     return _id
-        raise Exception(f'could not determine alloc id for {facility}:{repo} at {cluster} at timestamp {time}')
+        raise Exception(f'could not determine alloc_id for {facility}:{repo} at {cluster} at timestamp {time}')
 
     def upload_jobs(self, jobs):
 
-        self.LOG.info(f"upload ({len(jobs)}) {jobs}")
+        self.LOG.debug(f"upload ({len(jobs)}) {jobs}")
 
         #self.back_channel.execute( JOB_GQL, values )
 
+
+    def remap_job( self, d ):
+        """ deal with old jobs with wrong account info """
+        #self.LOG.info(f"in: {d}") 
+        if d['User'] in ( 'lsstsvc1' ) and d['Account'] in ( 'shared', '' ):
+            d['Account'] = 'rubin:production'
+        elif d['Account'] in ( 'shared', 'shared:default' ) or d['User'] in ( 'jonl', 'vanilla', 'yemi', 'yangw', 'pav', 'root', 'reranna', 'ppascual'):
+            return None
+        elif d['User'] in ('csaunder','elhoward','bos', 'erykoff', 'mccarthy','yesw','abrought', 'shuang92', 'aconnoll', 'daues', 'aheinze','zhaoyu','dagoret', 'kannawad', 'kherner', 'cslater', "sierrav", 'jmeyers3', 'lskelvin', 'jchiang', 'yanny', 'ktl', 'jneveu', 'hchiang2', 'snyder18', 'fred3m', 'brycek', 'eiger', 'esteves', 'mxk', 'yusra', 'mrabus', 'ryczano', 'mgower', 'yoachim', 'scichris', ) and d['Account'] in ('', 'milano', 'roma'):
+            d['Account'] = 'rubin:developers'
+            if d['Partition'] == 'ampere':
+                d['Partition'] = 'milano'
+        elif d['User'] == 'kocevski' or ( d['User'] in  ('mdimauro','laviron','tyrelj', 'echarles', 'bruel') and d['Account'] in ('','latba','ligo','repository') ):
+            d['Account'] = 'fermi:users'
+        elif d['User'] in ('glastraw',):
+            d['Account'] = 'fermi:l1'
+        elif d['User'] in ('vossj',):
+            d['Partition'] = 'roma'
+        elif d['User'] in ( 'dcesar', 'jytang', 'rafimah', ):
+            d['Account'] = 'ad:beamphysics'
+        elif d['User'] in ( 'kterao', 'kvtsang', 'anoronyo', 'bkroul', 'zhulcher', 'koh0207', 'drielsma', 'lkashur', 'dcarber', 'amogan', 'cyifan', 'yjwa', 'aj14' , 'jdyer', 'sindhuk', 'justinjm', 'mrmooney', 'bearc', 'fuhaoji', 'sfogarty', 'carsmith', 'yuntse'): #and d['Account'] in ( '', 'ampere', 'ml', 'roma', ):
+            d['Account'] = 'neutrino:default'
+            d['Partition'] = 'ampere'
+        elif d['User'] == 'dougl215': # and d['Account'] in ('ampere:default',):
+            #self.LOG.error("HERE")
+            d['Account'] = 'mli:default'
+        elif d['User'] in ('jfkern',  'taisgork', 'valmar', 'tgrant', 'arijit01', 'mmdoyle', 'fpoitevi', 'ashojaei', 'monarin', 'claussen', 'batyuk', 'kevinkgu', 'tfujit27', 'haoyuan', 'aliang', 'jshenoy', 'dorlhiac', 'xjql',  ): # and d['Account'] in ('','milano', 'roma'):
+            d['Account'] = 'lcls:default'
+        elif d['User'] in ( 'espov', 'thorsten', 'wilko', 'snelson') and d['Account'] in ( 'lcls:xpp', 'lcls:psmfx', 'lcls:data'):
+            d['Account'] = 'lcls:default'
+        elif d['User'] in ( 'lsstccs', 'rubinmgr' ):
+            d['Account'] = 'rubin:commissioning'
+        elif d['User'] in ( 'majernik', 'knetsch', ):
+            d['Account'] = 'facet:default'
+        elif d['User'] in ('jberger', ):
+            d['Account'] = 'epptheory:default'
+        elif d['User'] in ('tabel',):
+            d['Account'] = 'kipac:kipac'
+        elif d['User'] in ('melwan',):
+            d['Account'] = 'supercdms:default'
+
+        if d['Account'] == '':
+            raise Exception(f"could not determine account for {d}")
+
+        if ',' in d['Partition']:
+            a = d['Partition'].split(',')[0]
+            d['Partition'] = a
+
+        if not ':' in d['Account']:
+            d['Account'] = d["Account"] + ':default'
+
+        #self.LOG.info(f"out: {d}") 
+        return d
 
     def convert( self, index, parts, default_facility='shared', default_repo='default' ) -> dict:
 
@@ -249,11 +319,12 @@ class SlurmImport(Command,GraphQlClient):
             # TODO: determine maximal amounts
             # if a single node, then divide all metrics by the number of nodes
             used = {}
-            for x in tres.split(','):
-                k,v = x.split('=')
-                if 'gpu' in k:
-                    k = 'gpu'
-                used[k] = kilos_to_int(v) * 1. / alloc_nodes
+            if not tres == '':
+                for x in tres.split(','):
+                    k,v = x.split('=')
+                    if 'gpu' in k:
+                        k = 'gpu'
+                    used[k] = kilos_to_int(v) * 1. / alloc_nodes
             #self.LOG.info(f'  cluster: {cluster}: {tres} -> {used}')
             
             # if node is exclusive
@@ -265,15 +336,22 @@ class SlurmImport(Command,GraphQlClient):
                     ratios[resource] = used[resource] / cluster[resource]
                     if ratios[resource] > max_ratio:
                         max_ratio = ratios[resource]
-                    self.LOG.info(f'    {resource}: used {used[resource]} / {cluster[resource]}\t -> {ratios[resource]:.5}')
+                    self.LOG.debug(f'    {resource}: used {used[resource]} / {cluster[resource]}\t -> {ratios[resource]:.5}')
 
             compute_time = elapsed_secs * ncpus / 3600.0 # TODO: this isn't right...
 
             resource_time = elapsed_secs * alloc_nodes * max_ratio * cluster['cpu'] / 3600. 
-            self.LOG.info(f'  calc time: {elapsed_secs}s\t compute_hours: {resource_time:.5}\t core_hours: {compute_time:.5}')
+            if self.verbose:
+                self.LOG.info(f'  calc time: {elapsed_secs}s\t compute_hours: {resource_time:.5}\t core_hours: {compute_time:.5}')
             return resource_time
 
         d = { field: parts[idx] for field, idx in index.items() }
+
+        # map jobs to specific params if necessary
+        d = self.remap_job( d )
+        if not d:
+            return None
+
         facility = default_facility
         repo = default_repo
         try:
@@ -300,14 +378,21 @@ class SlurmImport(Command,GraphQlClient):
 
         # determine appropriate allocation to charge against
         # use submitTs instead of startTs?
-        allocId = self.get_alloc_id( facility, repo, d['Partition'], startTs )
+        allocId = None
+        try:
+            allocId = self.get_alloc_id( facility, repo, d['Partition'], startTs )
+        except Exception as e:
+            self.LOG.warning(f'{e}: {d}')
+            if self.exit_on_error:
+                sys.exit(1)
+            return None
 
         return {
             #'facility': facility,
             #'repo': repo,
             #'repoid': repoid,
             'jobId': conv(d['JobID'], int, 0),
-            #'username': d['User'],
+            'username': d['User'],
             #'uid': conv(d['UID'], int, 0),
             #'accountName': d['Account'],
             #'partitionName': d['Partition'],
@@ -315,7 +400,7 @@ class SlurmImport(Command,GraphQlClient):
             #'qos': d['QOS'],
             'chargeFactor': cf,
             #'submitTs': submitTs,
-            #'startTs': startTs,
+            'startTs': startTs,
             #'endTs': endTs,
             #'clustername': d['Partition'],
             #'ncpus': ncpus,
@@ -328,6 +413,16 @@ class SlurmImport(Command,GraphQlClient):
             #'submitter': None,
             #'officialImport': True
         }
+
+#        return {
+#            'jobId': conv(d['JobID'], int, 0),
+#            'username': d['User'],
+#            'allocationId': allocId,
+#            'chargeFactor': cf,
+#            'date': startTs, #TODO yield multiple
+#            'resourceHours': compute_time,
+#            'chargeFactor': cf,
+#        }
 
 
 class Coact(CommandManager):
