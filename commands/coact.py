@@ -78,6 +78,97 @@ class SlurmDump(Command):
         #yield f"--- count={c}"
 
 
+class SlurmRemap(Command):
+    'Remaps/patches the slurm job data to prepare for import'
+    LOG = logging.getLogger(__name__)
+
+    def get_parser(self, prog_name):
+        p = super(SlurmRemap, self).get_parser(prog_name)
+        p.add_argument('--verbose', help='verbose output', required=False)
+        p.add_argument('--data', help='data to read from', type=argparse.FileType(), default=sys.stdin)
+        return p
+
+    def take_action(self, parsed_args):
+        self.verbose = parsed_args.verbose
+        first = True
+        index = {}
+        order = []
+        for line in parsed_args.data.readlines():
+            #print(f"in : {line.strip()}")
+            if line:
+                parts = line.split("|")
+                if first:
+                    index = { s: idx for idx, s in enumerate(parts) }
+                    order = parts
+                    first = False
+                    print(f'{line}')
+                else:
+                    out = self.convert( index, parts, order )
+                    if out:
+                        print(f'{out}')
+
+    def convert( self, index, parts, order ) -> dict:
+        d = { field: parts[idx] for field, idx in index.items() }
+        d = self.remap_job( d )
+        if d:
+            out = []
+            for i in order:
+                out.append(d[i])
+            return '|'.join(out).strip()
+
+
+    def remap_job( self, d ):
+        """ deal with old jobs with wrong account info """
+        #self.LOG.info(f"in: {d}") 
+        if d['User'] in ( 'lsstsvc1' ) and d['Account'] in ( 'rubin', 'shared', '' ):
+            d['Account'] = 'rubin:production'
+        elif d['Account'] in ( 'shared', 'shared:default' ) or d['User'] in ( 'jonl', 'vanilla', 'yemi', 'yangw', 'pav', 'root', 'reranna', 'ppascual', 'renata'):
+            return None
+        elif d['User'] in ('csaunder','elhoward', 'laurenma','smau', 'bos', 'erykoff', 'ebellm', 'mccarthy','yesw','abrought', 'shuang92', 'aconnoll', 'daues', 'aheinze','zhaoyu','dagoret', 'kannawad', 'kherner', 'eske', 'cslater', "sierrav", 'jmeyers3', 'lskelvin', 'jchiang', 'yanny', 'ktl', 'jneveu', 'hchiang2', 'snyder18', 'fred3m', 'brycek', 'eiger', 'esteves', 'mxk', 'yusra', 'mrabus', 'ryczano', 'mgower', 'yoachim', 'scichris', ) and d['Account'] in ('', 'milano', 'roma'):
+            d['Account'] = 'rubin:developers'
+            if d['Partition'] == 'ampere':
+                d['Partition'] = 'milano'
+        elif d['User'] == 'kocevski' or ( d['User'] in  ('horner','mdimauro','burnett','laviron','omodei','tyrelj', 'echarles', 'bruel') and d['Account'] in ('','latba','ligo','repository') ):
+            d['Account'] = 'fermi:users'
+        elif d['User'] in ('glastraw',):
+            d['Account'] = 'fermi:l1'
+        elif d['User'] in ('vossj',):
+            d['Partition'] = 'roma'
+        elif d['User'] in ( 'dcesar', 'jytang', 'rafimah', ):
+            d['Account'] = 'ad:beamphysics'
+        elif d['User'] in ( 'kterao', 'kvtsang', 'anoronyo', 'bkroul', 'zhulcher', 'koh0207', 'drielsma', 'lkashur', 'dcarber', 'amogan', 'cyifan', 'yjwa', 'aj14' , 'jdyer', 'sindhuk', 'justinjm', 'mrmooney', 'bearc', 'fuhaoji', 'sfogarty', 'carsmith', 'yuntse'): #and d['Account'] in ( '', 'ampere', 'ml', 'roma', ):
+            d['Account'] = 'neutrino:default'
+            d['Partition'] = 'ampere'
+        elif d['User'] in ('dougl215','zhezhang'): # and d['Account'] in ('ampere:default',):
+            #self.LOG.error("HERE")
+            d['Account'] = 'mli:default'
+        elif d['User'] in ('jfkern',  'taisgork', 'valmar', 'tgrant', 'arijit01', 'mmdoyle', 'fpoitevi', 'ashojaei', 'monarin', 'claussen', 'batyuk', 'kevinkgu', 'tfujit27', 'haoyuan', 'aliang', 'jshenoy', 'dorlhiac', 'xjql',  ): # and d['Account'] in ('','milano', 'roma'):
+            d['Account'] = 'lcls:default'
+        elif d['User'] in ( 'psdatmgr', 'xiangli', 'sachsm', 'hekstra', 'cwang31', 'espov', 'thorsten', 'wilko', 'snelson') and d['Account'] in ( '', 'lcls:xpp', 'lcls:psmfx', 'lcls:data', 'ampere'):
+            d['Account'] = 'lcls:default'
+        elif d['User'] in ( 'lsstccs', 'rubinmgr' ):
+            d['Account'] = 'rubin:commissioning'
+        elif d['User'] in ( 'majernik', 'knetsch', ):
+            d['Account'] = 'facet:default'
+        elif d['User'] in ('jberger', ):
+            d['Account'] = 'epptheory:default'
+        elif d['User'] in ('tabel',):
+            d['Account'] = 'kipac:kipac'
+        elif d['User'] in ('melwan', 'zatschls', 'yanliu', 'aditi',):
+            d['Account'] = 'supercdms:default'
+
+        if d['Account'] == '':
+            raise Exception(f"could not determine account for {d}")
+
+        if ',' in d['Partition']:
+            a = d['Partition'].split(',')[0]
+            d['Partition'] = a
+
+        if not ':' in d['Account']:
+            d['Account'] = d["Account"] + ':default'
+
+        #self.LOG.info(f"out: {d}") 
+        return d
 
 
 class SlurmImport(Command,GraphQlClient):
@@ -226,59 +317,6 @@ class SlurmImport(Command,GraphQlClient):
         #self.back_channel.execute( JOB_GQL, values )
 
 
-    def remap_job( self, d ):
-        """ deal with old jobs with wrong account info """
-        #self.LOG.info(f"in: {d}") 
-        if d['User'] in ( 'lsstsvc1' ) and d['Account'] in ( 'rubin', 'shared', '' ):
-            d['Account'] = 'rubin:production'
-        elif d['Account'] in ( 'shared', 'shared:default' ) or d['User'] in ( 'jonl', 'vanilla', 'yemi', 'yangw', 'pav', 'root', 'reranna', 'ppascual', 'renata'):
-            return None
-        elif d['User'] in ('csaunder','elhoward', 'laurenma','smau', 'bos', 'erykoff', 'ebellm', 'mccarthy','yesw','abrought', 'shuang92', 'aconnoll', 'daues', 'aheinze','zhaoyu','dagoret', 'kannawad', 'kherner', 'eske', 'cslater', "sierrav", 'jmeyers3', 'lskelvin', 'jchiang', 'yanny', 'ktl', 'jneveu', 'hchiang2', 'snyder18', 'fred3m', 'brycek', 'eiger', 'esteves', 'mxk', 'yusra', 'mrabus', 'ryczano', 'mgower', 'yoachim', 'scichris', ) and d['Account'] in ('', 'milano', 'roma'):
-            d['Account'] = 'rubin:developers'
-            if d['Partition'] == 'ampere':
-                d['Partition'] = 'milano'
-        elif d['User'] == 'kocevski' or ( d['User'] in  ('horner','mdimauro','burnett','laviron','omodei','tyrelj', 'echarles', 'bruel') and d['Account'] in ('','latba','ligo','repository') ):
-            d['Account'] = 'fermi:users'
-        elif d['User'] in ('glastraw',):
-            d['Account'] = 'fermi:l1'
-        elif d['User'] in ('vossj',):
-            d['Partition'] = 'roma'
-        elif d['User'] in ( 'dcesar', 'jytang', 'rafimah', ):
-            d['Account'] = 'ad:beamphysics'
-        elif d['User'] in ( 'kterao', 'kvtsang', 'anoronyo', 'bkroul', 'zhulcher', 'koh0207', 'drielsma', 'lkashur', 'dcarber', 'amogan', 'cyifan', 'yjwa', 'aj14' , 'jdyer', 'sindhuk', 'justinjm', 'mrmooney', 'bearc', 'fuhaoji', 'sfogarty', 'carsmith', 'yuntse'): #and d['Account'] in ( '', 'ampere', 'ml', 'roma', ):
-            d['Account'] = 'neutrino:default'
-            d['Partition'] = 'ampere'
-        elif d['User'] in ('dougl215','zhezhang'): # and d['Account'] in ('ampere:default',):
-            #self.LOG.error("HERE")
-            d['Account'] = 'mli:default'
-        elif d['User'] in ('jfkern',  'taisgork', 'valmar', 'tgrant', 'arijit01', 'mmdoyle', 'fpoitevi', 'ashojaei', 'monarin', 'claussen', 'batyuk', 'kevinkgu', 'tfujit27', 'haoyuan', 'aliang', 'jshenoy', 'dorlhiac', 'xjql',  ): # and d['Account'] in ('','milano', 'roma'):
-            d['Account'] = 'lcls:default'
-        elif d['User'] in ( 'psdatmgr', 'xiangli', 'sachsm', 'hekstra', 'cwang31', 'espov', 'thorsten', 'wilko', 'snelson') and d['Account'] in ( '', 'lcls:xpp', 'lcls:psmfx', 'lcls:data', 'ampere'):
-            d['Account'] = 'lcls:default'
-        elif d['User'] in ( 'lsstccs', 'rubinmgr' ):
-            d['Account'] = 'rubin:commissioning'
-        elif d['User'] in ( 'majernik', 'knetsch', ):
-            d['Account'] = 'facet:default'
-        elif d['User'] in ('jberger', ):
-            d['Account'] = 'epptheory:default'
-        elif d['User'] in ('tabel',):
-            d['Account'] = 'kipac:kipac'
-        elif d['User'] in ('melwan', 'zatschls', 'yanliu', 'aditi',):
-            d['Account'] = 'supercdms:default'
-
-        if d['Account'] == '':
-            raise Exception(f"could not determine account for {d}")
-
-        if ',' in d['Partition']:
-            a = d['Partition'].split(',')[0]
-            d['Partition'] = a
-
-        if not ':' in d['Account']:
-            d['Account'] = d["Account"] + ':default'
-
-        #self.LOG.info(f"out: {d}") 
-        return d
-
     def convert( self, index, parts, default_facility='shared', default_repo='default' ) -> dict:
 
         def conv(s, fx, default=None):
@@ -343,11 +381,6 @@ class SlurmImport(Command,GraphQlClient):
 
         d = { field: parts[idx] for field, idx in index.items() }
 
-        # map jobs to specific params if necessary
-        d = self.remap_job( d )
-        if not d:
-            return None
-
         facility = default_facility
         repo = default_repo
         try:
@@ -355,7 +388,7 @@ class SlurmImport(Command,GraphQlClient):
         except Exception as e:
             self.LOG.warn(f"could not determine facility and repo from {d['Account']}")
 
-        nodelist = d["NodeList"]
+        #nodelist = d["NodeList"]
 
         # convert to datetime
         startTs = parse_datetime(int(d['Start']), force_tz=False)
@@ -427,7 +460,7 @@ class Coact(CommandManager):
 
     def __init__(self, namespace, convert_underscores=True):
         super(Coact,self).__init__(namespace, convert_underscores=convert_underscores)
-        for cmd in [ SlurmDump, SlurmImport, ]:
+        for cmd in [ SlurmDump, SlurmRemap, SlurmImport, ]:
             self.add_command( cmd.__name__.lower(), cmd )
 
 
