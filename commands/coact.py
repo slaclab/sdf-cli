@@ -233,11 +233,11 @@ class SlurmImport(Command,GraphQlClient):
             d['Account'] = 'rubin:production'
         elif d['Account'] in ( 'shared', 'shared:default' ) or d['User'] in ( 'jonl', 'vanilla', 'yemi', 'yangw', 'pav', 'root', 'reranna', 'ppascual', 'renata'):
             return None
-        elif d['User'] in ('csaunder','elhoward', 'smau', 'bos', 'erykoff', 'ebellm', 'mccarthy','yesw','abrought', 'shuang92', 'aconnoll', 'daues', 'aheinze','zhaoyu','dagoret', 'kannawad', 'kherner', 'eske', 'cslater', "sierrav", 'jmeyers3', 'lskelvin', 'jchiang', 'yanny', 'ktl', 'jneveu', 'hchiang2', 'snyder18', 'fred3m', 'brycek', 'eiger', 'esteves', 'mxk', 'yusra', 'mrabus', 'ryczano', 'mgower', 'yoachim', 'scichris', ) and d['Account'] in ('', 'milano', 'roma'):
+        elif d['User'] in ('csaunder','elhoward', 'laurenma','smau', 'bos', 'erykoff', 'ebellm', 'mccarthy','yesw','abrought', 'shuang92', 'aconnoll', 'daues', 'aheinze','zhaoyu','dagoret', 'kannawad', 'kherner', 'eske', 'cslater', "sierrav", 'jmeyers3', 'lskelvin', 'jchiang', 'yanny', 'ktl', 'jneveu', 'hchiang2', 'snyder18', 'fred3m', 'brycek', 'eiger', 'esteves', 'mxk', 'yusra', 'mrabus', 'ryczano', 'mgower', 'yoachim', 'scichris', ) and d['Account'] in ('', 'milano', 'roma'):
             d['Account'] = 'rubin:developers'
             if d['Partition'] == 'ampere':
                 d['Partition'] = 'milano'
-        elif d['User'] == 'kocevski' or ( d['User'] in  ('mdimauro','burnett','laviron','omodei','tyrelj', 'echarles', 'bruel') and d['Account'] in ('','latba','ligo','repository') ):
+        elif d['User'] == 'kocevski' or ( d['User'] in  ('horner','mdimauro','burnett','laviron','omodei','tyrelj', 'echarles', 'bruel') and d['Account'] in ('','latba','ligo','repository') ):
             d['Account'] = 'fermi:users'
         elif d['User'] in ('glastraw',):
             d['Account'] = 'fermi:l1'
@@ -263,7 +263,7 @@ class SlurmImport(Command,GraphQlClient):
             d['Account'] = 'epptheory:default'
         elif d['User'] in ('tabel',):
             d['Account'] = 'kipac:kipac'
-        elif d['User'] in ('melwan', 'zatschls', 'yanliu',):
+        elif d['User'] in ('melwan', 'zatschls', 'yanliu', 'aditi',):
             d['Account'] = 'supercdms:default'
 
         if d['Account'] == '':
