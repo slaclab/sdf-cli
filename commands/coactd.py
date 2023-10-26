@@ -2,7 +2,7 @@ import os
 import sys
 import inspect
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 from cliff.command import Command
 from cliff.commandmanager import CommandManager
@@ -20,6 +20,7 @@ import ansible_runner
 
 import logging
 import datetime
+import pendulum as pdl
 
 from dateutil import parser
 from dateutil.relativedelta import relativedelta
@@ -152,7 +153,7 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
 
             except Exception as e:
                 self.markIncompleteRequest( req, f'Request {self.ident} did not complete: {e}' )
-                self.LOG.error(f"Error processing {req_id}: {e}")
+                self.LOG.exception(f"Error processing {req_id}: {e}")
         
 
     def do(self, req_id: str, op_type: Any, req_type: Any, approval: str, req: dict) -> bool:
@@ -402,8 +403,8 @@ class RepoRegistration(Registration):
                 #assert facility and repo and clustername and percent
                 percent = req.get('percentOfFacility', 100.)
                 allocated = req.get('allocated', None)
-                start = req.get('start', None)
-                end = req.get('end', None)
+                start = pdl.parse( req.get('start', None), timezone='UTC')
+                end = pdl.parse( req.get('end', None), timezone='UTC' )
                 return self.do_repo_compute_allocation( repo, facility, clustername, percent, allocated, start, end )
 
             elif req_type == 'RepoChangeComputeRequirement':
@@ -413,11 +414,15 @@ class RepoRegistration(Registration):
 
         return None
 
-    def do_new_repo( self, repo: str, facility: str, principal: str, playbook: str="coact/add_repo.yaml", default_repo_allocation_percent=100 ) -> bool:
+    def do_new_repo( self, repo: str, facility: str, principal: str, playbook: str="coact/add_repo.yaml", default_repo_allocation_percent=100, repo_allocation_start=pdl.today().in_tz('UTC'), repo_allocation_end_delta=pdl.duration(years=5) ) -> bool:
 
         # add facility specific Repos
         runner = self.run_playbook( playbook, facility=facility, repo=repo )
         self.LOG.warn(f"add_repo.yaml: {runner}")
+
+        # TODO: how to ensure we don't overwrite the principal, leaders and users if the repo already exists? do query first?
+        leaders = [ principal, ]
+        users = [ principal, ]
 
         # write back to coact the repo information
         repo_create_req = {
@@ -425,8 +430,8 @@ class RepoRegistration(Registration):
                 'name': repo,
                 'facility': facility,
                 'principal': principal,
-                'leaders': [ principal, ],
-                'users': [ principal, ],
+                'leaders': leaders,
+                'users': users,
             }
         }
         self.LOG.info(f"upserting repo record {repo_create_req}")
@@ -437,8 +442,8 @@ class RepoRegistration(Registration):
         # could/shoudl probably merge this into single call with above gql mutation
         fac_res = self.back_channel.execute( self.FACILITY_CURRENT_COMPUTE_CGL, { 'facility': facility } )
         assert fac_res['facility']['name'] == facility
-        start = datetime.datetime( 2023, 6, 1).isoformat()
-        end = datetime.datetime( 2024, 7, 1).isoformat()
+        start = repo_allocation_start
+        end = repo_allocation_start + repo_allocation_end_delta
 
         clusters = fac_res['facility']['computepurchases']
         #self.LOG.info(f'clusters: {clusters}')
@@ -449,13 +454,14 @@ class RepoRegistration(Registration):
             purchased = float(cluster['purchased'])
             resource = purchased * default_repo_allocation_percent / 100.
             self.upsert_repo_compute_allocation( repo_id, partition, default_repo_allocation_percent, resource, start, end )
-
+            # sync slurm
+            resp = self.sync_slurm_associations( users=','.join(users), repo=repo, facility=facility )
 
         # TODO: deal with storage
 
         return True
 
-    def upsert_repo_compute_allocation( self, repo_id: str, cluster: str, percent: int, allocated_resource: float, start: str, end: str, default_end_delta=relativedelta(years=3) ):
+    def upsert_repo_compute_allocation( self, repo_id: str, cluster: str, percent: int, allocated_resource: float, start: str, end: str, default_end_delta=relativedelta(years=5) ):
         # TODO search for existing cluster
 
         # must have an end
@@ -464,7 +470,7 @@ class RepoRegistration(Registration):
             end = end.isoformat()
 
         def format_datetime( iso, round_off=None ):
-            iso = iso.replace('+00:00', 'Z')
+            iso = str(iso).replace('+00:00', 'Z')
             if not '.' in iso:
                 iso = iso.replace('Z', '.000000Z')
             return iso
@@ -485,15 +491,20 @@ class RepoRegistration(Registration):
 
     def do_repo_compute_allocation( self, repo: str, facility: str, cluster: str, percent: int, allocated_resource: float, start: str, end: str ):
         
+        # determine information required to upsert the repo_compute_allocation record
         self.LOG.info(f"set repo compute allocation {facility}:{repo} at {cluster} to {percent} ({allocated_resource}) between {start} - {end}")
         repo_req = { 'repo': { 'facility': facility, 'name': repo } }
         resp = self.back_channel.execute( self.REPO_CURRENT_COMPUTE_REQUIREMENT_GQL, repo_req )
-        self.LOG.info(f'got {resp}')
+        self.LOG.info(f'  got {resp}')
         repo_obj = resp['repo']
         assert facility == repo_obj['facility'] and repo == repo_obj['name'] 
-        self.LOG.info(f"found repo {repo_obj}")
+        self.LOG.info(f"  found repo {repo_obj}")
 
+        # upsert the record
         resp = self.upsert_repo_compute_allocation( repo_obj['Id'], cluster, percent, allocated_resource, start, end )
+
+        # enact it through slurm
+        resp = self.sync_slurm_associations( users=','.join(repo_obj['users']), repo=repo, facility=facility )
 
         return True
 
@@ -503,7 +514,7 @@ class RepoRegistration(Registration):
             account_name = f'{facility}'.lower()
         return account_name
 
-    def sync_slurm_associations( self, user: str, users: str, repo: str, facility: str, add_user: bool=False, playbook: str="coact/slurm-users-partition.yaml" ) -> bool:
+    def sync_slurm_associations( self, users: str, repo: str, facility: str, user: Optional[str]=None, add_user: bool=None, playbook: str="coact/slurm-users-partition.yaml" ) -> bool:
         # nasty: users is a comma separated string of list users; best to use an List[str]?
 
         # determine which clusters are defined
@@ -556,13 +567,14 @@ class RepoRegistration(Registration):
         # rubin submits jobs to multiple partitions, so we need to treat that differently for now due to 
         # the lack of support in slurm of this with multiple partitions
         if facility.lower() in ( 'rubin' ):
+
             self.LOG.warn("Exceptional code branch for rubin facility and multi partition usage!")
             runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, users=users_str, account=f'{facility.lower()}:{repo.lower()}', defaultqos="normal", qos="normal,preemptable" )
 
         else:
 
             # run
-            clusters = self.sync_slurm_associations( user=user, users=users_str, repo=repo, facility=facility, add_user=add_user )
+            clusters = self.sync_slurm_associations( users=users_str, repo=repo, facility=facility, user=user, add_user=add_user )
 
 
         # add user into repo back in coact
