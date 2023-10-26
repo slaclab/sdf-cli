@@ -12,29 +12,39 @@ from cliff.commandmanager import CommandManager
 from .utils.graphql import GraphQlClient
 
 from gql import gql
+import json
 
 import logging
 
 from typing import Any
 import pendulum as pdl
-from tzlocal import get_localzone
-local_tz = get_localzone()
+from datetime import timedelta
 
 import subprocess
 import re
 
+# get local timezone
+_now = pdl.now()
 
-def parse_datetime( value: Any, timezone=local_tz, force_tz=False) -> pdl.DateTime:
+def parse_datetime( value: Any, timezone=_now.timezone, force_tz=False) -> pdl.DateTime:
+    #logging.warning(f"in: {value}")
     dt = None
-    if isinstance( value, int ):
-        dt = pdl.from_timestamp(value)
-    else:
-        dt = pdl.parse(value, tz=local_tz)
-    #logging.warning(f'parse datetime ({type(value)}) {value} -> {dt} ({force_tz})')
+    kwargs = {}
     if force_tz:
-        dt = dt.replace(tzinfo=timezone)
-        #logging.warning(f'  -> {dt}')
+        kwargs['tz'] = timezone
+    if isinstance( value, int ):
+        dt = pdl.from_timestamp(value, **kwargs)
+    else:
+        dt = pdl.parse(value, **kwargs)
+    #logging.warning(f'parse datetime ({type(value)}) {value} -> {dt} ({force_tz})')
+    #if force_tz:
+    #    dt = dt.set(tz=timezone)
     return dt
+
+def datetime_converter(o):
+ if isinstance(o, pdl.DateTime):
+    return str(o.in_tz('UTC')).replace('+00:00','Z')
+
 
 class SlurmDump(Command):
     'Dumps data from slurm into flat files for later ingestion'
@@ -101,7 +111,7 @@ class SlurmRemap(Command):
                     index = { s: idx for idx, s in enumerate(parts) }
                     order = parts
                     first = False
-                    print(f'{line}')
+                    print(f'{line.strip()}')
                 else:
                     out = self.convert( index, parts, order )
                     if out:
@@ -180,10 +190,11 @@ class SlurmImport(Command,GraphQlClient):
     def get_parser(self, prog_name):
         p = super(SlurmImport, self).get_parser(prog_name)
         p.add_argument('--print', help='verbose output', action='store_true')
-        p.add_argument('--debug', help='debug output', required=False, default=False, action='store_true')
+        p.add_argument('--debug', help='debug output', action='store_true')
         p.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
         p.add_argument('--batch', help='batch upload size', default=1000)
         p.add_argument('--data', help='data to read from', type=argparse.FileType(), default=sys.stdin)
+        p.add_argument('--output', help='output format', choices=[ 'json', 'upload' ], default='json' ) 
         p.add_argument('--password-file', help='basic auth password for graphql service', required=True)
         p.add_argument('--exit-on-error', help='terminate if cannot parse data', required=False, default=False, action='store_true')
         return p
@@ -192,14 +203,8 @@ class SlurmImport(Command,GraphQlClient):
         self.verbose = parsed_args.print
         self.exit_on_error = parsed_args.exit_on_error
 
-        level = logging.WARNING
-        if self.verbose:
-            level = logging.INFO
         if parsed_args.debug:
-            level = logging.DEBUG
-        for handler in self.LOG.handlers:
-            if isinstance(handler, type(logging.StreamHandler())):
-                handler.setLevel(level)
+            self.LOG.setLevel( logging.DEBUG )
 
         # connect
         self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
@@ -224,11 +229,11 @@ class SlurmImport(Command,GraphQlClient):
                     if job:
                         buffer.append(job)
                         if len(buffer) >= int(parsed_args.batch):
-                            self.upload_jobs(buffer)
+                            self.generate_output(buffer)
                             buffer = []
 
         if len(buffer) > 0:
-            self.upload_jobs(buffer)
+            self.generate_output(buffer)
 
         return True
 
@@ -304,18 +309,21 @@ class SlurmImport(Command,GraphQlClient):
             # go through time ranges to determine actual Id
             time_ranges = self._allocid[key]
             for t, _id in time_ranges.items():
-                self.LOG.debug(f'    matching {t[0].isoformat()} <= {time.in_timezone(local_tz).isoformat()} < {t[1].isoformat()}?')
+                self.LOG.debug(f'    matching {t[0].isoformat()} <= {time.in_timezone(_now.timezone).isoformat()} < {t[1].isoformat()}?')
                 if time >= t[0] and time < t[1]:
                     self.LOG.debug(f'      found match, returning alloc id {_id}')
                     return _id
         raise Exception(f'could not determine alloc_id for {facility}:{repo} at {cluster} at timestamp {time}')
 
+    def generate_output(self, jobs, **kwargs):
+        return self.output_json( jobs, **kwargs )
+
     def upload_jobs(self, jobs):
-
         self.LOG.debug(f"upload ({len(jobs)}) {jobs}")
-
         #self.back_channel.execute( JOB_GQL, values )
 
+    def output_json(self, jobs, indent=2):
+        print( json.dumps( jobs,  indent=indent, default=datetime_converter ) )
 
     def convert( self, index, parts, default_facility='shared', default_repo='default' ) -> dict:
 
@@ -341,16 +349,15 @@ class SlurmImport(Command,GraphQlClient):
                 raise Exception("Can't parse %s" % s)
 
 
-        def calc_compute_time(startTs: pdl.DateTime, endTs: pdl.DateTime, submitTs: pdl.DateTime, tres: str, cluster: dict, alloc_nodes: Optional[int], ncpus: Optional[int]) -> float:
+        def calc_resource_hours(startTs: pdl.DateTime, endTs: pdl.DateTime, tres: str, cluster: dict, alloc_nodes: Optional[int], ncpus: Optional[int]) -> float:
             # calculate elapsed time as UTC so we don't get bitten by DST
             elapsed_secs = (endTs - startTs).total_seconds()
-            #wait_time = (startTs - submitTs).total_seconds() 
 
             # min time
             if elapsed_secs <= 0:
                 elapsed_secs = 1.
 
-            # TODO: determine maximal amounts
+            # determine maximal amounts
             # if a single node, then divide all metrics by the number of nodes
             used = {}
             if not tres == '':
@@ -372,12 +379,13 @@ class SlurmImport(Command,GraphQlClient):
                         max_ratio = ratios[resource]
                     self.LOG.debug(f'    {resource}: used {used[resource]} / {cluster[resource]}\t -> {ratios[resource]:.5}')
 
-            compute_time = elapsed_secs * ncpus / 3600.0 # TODO: this isn't right...
+            compute_time = elapsed_secs * ncpus / 3600.0 # this woudl be the normal calc
 
             resource_time = elapsed_secs * alloc_nodes * max_ratio * cluster['cpu'] / 3600. 
             if self.verbose:
                 print(f'  calc time: {elapsed_secs}s\t compute_hours: {resource_time:.5}\t core_hours: {compute_time:.5}')
-            return resource_time
+            return resource_time, elapsed_secs
+
 
         d = { field: parts[idx] for field, idx in index.items() }
 
@@ -388,22 +396,16 @@ class SlurmImport(Command,GraphQlClient):
         except Exception as e:
             self.LOG.warn(f"could not determine facility and repo from {d['Account']}")
 
-        #nodelist = d["NodeList"]
-
         # convert to datetime
-        startTs = parse_datetime(int(d['Start']), force_tz=False)
-        endTs = parse_datetime(int(d['End']), force_tz=False)
-        submitTs = parse_datetime(int(d['Submit']), force_tz=False)
+        startTs = parse_datetime(int(d['Start']), force_tz=True)
+        endTs = parse_datetime(int(d['End']), force_tz=True)
 
         # compute some values
         alloc_nodes = kilos_to_int(d['AllocNodes'])
         ncpus = conv(d['NCPUS'], int, 0)
-        compute_time = calc_compute_time( startTs=startTs, endTs=endTs,
-                tres=d["AllocTRES"], submitTs=submitTs,
+        resource_hours, elapsed_secs = calc_resource_hours( startTs=startTs, endTs=endTs,
+                tres=d["AllocTRES"],
                 alloc_nodes=alloc_nodes, ncpus=ncpus, cluster=self._clusters[d['Partition']])
-
-        # charge factor of job
-        cf = 1.0
 
         # determine appropriate allocation to charge against
         # use submitTs instead of startTs?
@@ -417,41 +419,13 @@ class SlurmImport(Command,GraphQlClient):
             return None
 
         return {
-            #'facility': facility,
-            #'repo': repo,
-            #'repoid': repoid,
             'jobId': conv(d['JobID'], int, 0),
             'username': d['User'],
-            #'uid': conv(d['UID'], int, 0),
-            #'accountName': d['Account'],
-            #'partitionName': d['Partition'],
             'allocationId': allocId,
-            #'qos': d['QOS'],
-            'chargeFactor': cf,
-            #'submitTs': submitTs,
+            'qos': d['QOS'],
             'startTs': startTs,
-            #'endTs': endTs,
-            #'clustername': d['Partition'],
-            #'ncpus': ncpus,
-            #'allocNodes': alloc_nodes,
-            #'allocTres': d['AllocTRES'],
-            #'nodelist': nodelist,
-            #'reservation': None if d['Reservation'] == '' else d['Reservation'],
-            #'reservationId': None if d['ReservationId'] == '' else d['ReservationId'],
-            'resourceHours': compute_time,
-            #'submitter': None,
-            #'officialImport': True
+            'resourceHours': resource_hours,
         }
-
-#        return {
-#            'jobId': conv(d['JobID'], int, 0),
-#            'username': d['User'],
-#            'allocationId': allocId,
-#            'chargeFactor': cf,
-#            'date': startTs, #TODO yield multiple
-#            'resourceHours': compute_time,
-#            'chargeFactor': cf,
-#        }
 
 
 class Coact(CommandManager):
