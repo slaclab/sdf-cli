@@ -569,7 +569,24 @@ class RepoRegistration(Registration):
         if facility.lower() in ( 'rubin' ):
 
             self.LOG.warn("Exceptional code branch for rubin facility and multi partition usage!")
-            runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, users=users_str, account=f'{facility.lower()}:{repo.lower()}', defaultqos="normal", qos="normal,preemptable" )
+
+            # FIXME: DRY much?
+            # determine which clusters are defined to setup the shares
+            runner = self.back_channel.execute( self.FACILITY_CURRENT_COMPUTE_CGL, { 'facility': facility } )
+            assert runner['facility']['name'] == facility
+            clusters = runner['facility']['computepurchases']
+            # determine total shares for facility
+            facility_shares = 1
+            for c in clusters:
+              # set the slurm shares equal to teh number of cores
+              # TODO: for gpus perhaps set to the number of gpus
+              facility_shares += int(c['purchased'])
+            # configure
+            runner = self.run_playbook( 'coact/slurm-account.yaml', facility=facility, repo=repo, shares=facility_shares )
+            #self.LOG.info(f"{playbook} output: {runner}")
+
+            # allow (rubin) users to submit to all partitions (by not defining it) because they submit jobs to partition=roma,milano which breaks slurm
+            runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, add_user=add_user, users=users_str, facility=facility, repo=repo, defaultqos="normal", qos="normal,preemptable" )
 
         else:
 
