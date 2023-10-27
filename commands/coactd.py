@@ -542,7 +542,7 @@ class RepoRegistration(Registration):
 
           partition = cluster['clustername']
           purchased = int(cluster['purchased'])
-          if purchased > 0:
+          if not repo == 'default' and purchased > 0:
             qos = 'normal,preemptable'
             default_qos = 'normal'
 
