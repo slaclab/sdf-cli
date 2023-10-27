@@ -46,6 +46,7 @@ class AnsibleRunner():
             playbook=playbook, 
             tags=tags, 
             extravars=kwargs,
+            suppress_env_files=True, # do not write out arguments to disk
             ident=f'{self.ident}_{tags}',
             cancel_callback=lambda: None
         )
