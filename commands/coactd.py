@@ -23,7 +23,6 @@ import datetime
 import pendulum as pdl
 
 from dateutil import parser
-from dateutil.relativedelta import relativedelta
 
 COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
 
@@ -405,7 +404,9 @@ class RepoRegistration(Registration):
                 percent = req.get('percentOfFacility', 100.)
                 allocated = req.get('allocated', None)
                 start = pdl.parse( req.get('start', None), timezone='UTC')
-                end = pdl.parse( req.get('end', None), timezone='UTC' )
+                end = req.get('end', None)
+                if not end == None:
+                    end = pdl.parse( end, timezone='UTC' )
                 return self.do_repo_compute_allocation( repo, facility, clustername, percent, allocated, start, end )
 
             elif req_type == 'RepoChangeComputeRequirement':
@@ -462,12 +463,12 @@ class RepoRegistration(Registration):
 
         return True
 
-    def upsert_repo_compute_allocation( self, repo_id: str, cluster: str, percent: int, allocated_resource: float, start: str, end: str, default_end_delta=relativedelta(years=5) ):
+    def upsert_repo_compute_allocation( self, repo_id: str, cluster: str, percent: int, allocated_resource: float, start: pdl.DateTime, end: Optional[str], default_end_delta=pdl.duration(years=5) ):
         # TODO search for existing cluster
 
         # must have an end
         if not end or end == '':
-            end = parser.parse(start) + default_end_delta
+            end = start + default_end_delta
             end = end.isoformat()
 
         def format_datetime( iso, round_off=None ):
@@ -490,7 +491,7 @@ class RepoRegistration(Registration):
         self.LOG.info(f'modified {resp}')
         return resp
 
-    def do_repo_compute_allocation( self, repo: str, facility: str, cluster: str, percent: int, allocated_resource: float, start: str, end: str ):
+    def do_repo_compute_allocation( self, repo: str, facility: str, cluster: str, percent: int, allocated_resource: float, start: pdl.DateTime, end: Optional[str] ):
         
         # determine information required to upsert the repo_compute_allocation record
         self.LOG.info(f"set repo compute allocation {facility}:{repo} at {cluster} to {percent} ({allocated_resource}) between {start} - {end}")
