@@ -23,7 +23,6 @@ import datetime
 import pendulum as pdl
 
 from dateutil import parser
-from dateutil.relativedelta import relativedelta
 
 COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
 
@@ -46,6 +45,7 @@ class AnsibleRunner():
             playbook=playbook, 
             tags=tags, 
             extravars=kwargs,
+            suppress_env_files=True, # do not write out arguments to disk
             ident=f'{self.ident}_{tags}',
             cancel_callback=lambda: None
         )
@@ -404,7 +404,9 @@ class RepoRegistration(Registration):
                 percent = req.get('percentOfFacility', 100.)
                 allocated = req.get('allocated', None)
                 start = pdl.parse( req.get('start', None), timezone='UTC')
-                end = pdl.parse( req.get('end', None), timezone='UTC' )
+                end = req.get('end', None)
+                if not end == None:
+                    end = pdl.parse( end, timezone='UTC' )
                 return self.do_repo_compute_allocation( repo, facility, clustername, percent, allocated, start, end )
 
             elif req_type == 'RepoChangeComputeRequirement':
@@ -461,12 +463,12 @@ class RepoRegistration(Registration):
 
         return True
 
-    def upsert_repo_compute_allocation( self, repo_id: str, cluster: str, percent: int, allocated_resource: float, start: str, end: str, default_end_delta=relativedelta(years=5) ):
+    def upsert_repo_compute_allocation( self, repo_id: str, cluster: str, percent: int, allocated_resource: float, start: pdl.DateTime, end: Optional[str], default_end_delta=pdl.duration(years=5) ):
         # TODO search for existing cluster
 
         # must have an end
         if not end or end == '':
-            end = parser.parse(start) + default_end_delta
+            end = start + default_end_delta
             end = end.isoformat()
 
         def format_datetime( iso, round_off=None ):
@@ -489,7 +491,7 @@ class RepoRegistration(Registration):
         self.LOG.info(f'modified {resp}')
         return resp
 
-    def do_repo_compute_allocation( self, repo: str, facility: str, cluster: str, percent: int, allocated_resource: float, start: str, end: str ):
+    def do_repo_compute_allocation( self, repo: str, facility: str, cluster: str, percent: int, allocated_resource: float, start: pdl.DateTime, end: Optional[str] ):
         
         # determine information required to upsert the repo_compute_allocation record
         self.LOG.info(f"set repo compute allocation {facility}:{repo} at {cluster} to {percent} ({allocated_resource}) between {start} - {end}")
@@ -542,7 +544,7 @@ class RepoRegistration(Registration):
 
           partition = cluster['clustername']
           purchased = int(cluster['purchased'])
-          if purchased > 0:
+          if not repo == 'default' and purchased > 0:
             qos = 'normal,preemptable'
             default_qos = 'normal'
 
@@ -569,7 +571,24 @@ class RepoRegistration(Registration):
         if facility.lower() in ( 'rubin' ):
 
             self.LOG.warn("Exceptional code branch for rubin facility and multi partition usage!")
-            runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, users=users_str, account=f'{facility.lower()}:{repo.lower()}', defaultqos="normal", qos="normal,preemptable" )
+
+            # FIXME: DRY much?
+            # determine which clusters are defined to setup the shares
+            runner = self.back_channel.execute( self.FACILITY_CURRENT_COMPUTE_CGL, { 'facility': facility } )
+            assert runner['facility']['name'] == facility
+            clusters = runner['facility']['computepurchases']
+            # determine total shares for facility
+            facility_shares = 1
+            for c in clusters:
+              # set the slurm shares equal to teh number of cores
+              # TODO: for gpus perhaps set to the number of gpus
+              facility_shares += int(c['purchased'])
+            # configure
+            runner = self.run_playbook( 'coact/slurm-account.yaml', facility=facility, repo=repo, shares=facility_shares )
+            #self.LOG.info(f"{playbook} output: {runner}")
+
+            # allow (rubin) users to submit to all partitions (by not defining it) because they submit jobs to partition=roma,milano which breaks slurm
+            runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, add_user=add_user, users=users_str, facility=facility, repo=repo, defaultqos="normal", qos="normal,preemptable" )
 
         else:
 
