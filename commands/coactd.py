@@ -492,6 +492,7 @@ class RepoRegistration(Registration):
         return resp
 
     def do_repo_compute_allocation( self, repo: str, facility: str, cluster: str, percent: int, allocated_resource: float, start: pdl.DateTime, end: Optional[str] ):
+        """Does all the necessary tasks to setup a new or existing Repo. Tasks include configuring slurm."""
         
         # determine information required to upsert the repo_compute_allocation record
         self.LOG.info(f"set repo compute allocation {facility}:{repo} at {cluster} to {percent} ({allocated_resource}) between {start} - {end}")
@@ -516,47 +517,126 @@ class RepoRegistration(Registration):
             account_name = f'{facility}'.lower()
         return account_name
 
-    def sync_slurm_associations( self, users: str, repo: str, facility: str, user: Optional[str]=None, add_user: bool=None, playbook: str="coact/slurm-users-partition.yaml" ) -> bool:
+    def sync_slurm_associations( self, users: str, repo: str, facility: str, user: Optional[str]=None, add_user: bool=None ) -> bool:
+        """Configure slurm with all the appropriate qos, accounts etc."""
         # nasty: users is a comma separated string of list users; best to use an List[str]?
 
         # determine which clusters are defined
-        runner = self.back_channel.execute( self.FACILITY_CURRENT_COMPUTE_CGL, { 'facility': facility } )
-        assert runner['facility']['name'] == facility
+        _query_gql = gql(""" 
+            query facility( $facility: String!, $repo: String! ) {
+              clusters {
+                name
+                nodecpucount
+                nodecpucountdivisor
+                nodecpusmt
+                nodememgb
+              }
+              facility(filter: {name: $facility}) {
+                name
+                computeallocations {
+                  clustername
+                }
+                computepurchases {
+                  clustername
+                  purchased
+                }
+              }
+              repo(filter: { facility: $facility, name: $repo}) {
+                name
+                facility
+                computerequirement
+                currentComputeAllocations {
+                  clustername
+                  start
+                  end
+                  percentOfFacility
+                }
+              }
+            }
+        """)
+        query = self.back_channel.execute( _query_gql, { 'facility': facility, 'repo': repo } )
+        assert query['facility']['name'] == facility
 
-        clusters = runner['facility']['computepurchases']
+        clusters = query['facility']['computepurchases']
     
         # determine total shares for facility
         facility_shares = 1
+        data = {} # keep repo info here
         for c in clusters:
+
+          partition = c['clustername']
+          
+          def _get_recent( array: list, return_field: str, partition: str, clustername_field: str='clustername', start_field: str='start', end_field: str='end' ) -> int:
+            """ returns the most recent item in the array of dicts. assumes we have fields of datestamps """
+            a = [ d for d in array if d[clustername_field] == partition ]
+            if not len( a ) == 1:
+                raise NotImplementedError("Unsupported multiple allocations logic for qos configuration")
+            assert return_field in a[0]
+            return a[0][return_field]
+
+          # work out the cpus and mem for this repo
+          this_allocation_percent = _get_recent( query['repo']['currentComputeAllocations'], 'percentOfFacility', partition )
+          this_purchased = _get_recent( clusters, 'purchased', partition )
           # set the slurm shares equal to teh number of cores
           # TODO: for gpus perhaps set to the number of gpus
-          facility_shares += int(c['purchased'])
-        # configure
-        runner = self.run_playbook( 'coact/slurm-account.yaml', facility=facility, repo=repo, shares=facility_shares )
-        #self.LOG.info(f"{playbook} output: {runner}")
+          facility_shares += int(this_purchased)
+          this_node_cpu = _get_recent( query['clusters'], 'nodecpucount', partition, clustername_field='name' )
+          this_node_mem = _get_recent( query['clusters'], 'nodememgb', partition, clustername_field='name' )
 
-        # set permissions and partitions
-        for cluster in clusters:
+          # determine allocated cores and mem
+          # TODO: include gpus and nodes?
+          this_cpus = this_node_cpu * this_purchased * this_allocation_percent / 100.
+          this_mem = this_node_mem * this_purchased * this_allocation_percent / 100. * 1024
 
           # if its the default repo, do not allow normal qos jobs
           qos = 'preemptable'
           default_qos = 'preemptable'
 
-          partition = cluster['clustername']
-          purchased = int(cluster['purchased'])
-          if not repo == 'default' and purchased > 0:
-            qos = 'normal,preemptable'
-            default_qos = 'normal'
+          # determin 'normal' qos name
+          normal_qos = f"{facility}:{repo}^normal@{partition}"
+          # fake out for rubin
+          if facility == 'rubin':
+            normal_qos = f"{facility}:{repo}^normal"
 
-          # run
-          runner = self.run_playbook( playbook, user=user, users=users, facility=facility, repo=repo, partition=partition, defaultqos=default_qos, qos=qos, add_user=add_user )
+          if not repo == 'default' and this_purchased > 0:
+            qos = f'{normal_qos},preemptable'
+            default_qos = f'{normal_qos}'
+
+          data[partition] = {
+            'alloc_percent': this_allocation_percent,
+            'purchased': this_purchased,
+            'node_cpu': this_node_cpu,
+            'node_mem': this_node_mem,
+            'cpus': int(this_cpus),
+            'mem': this_mem,
+            'qos': qos,
+            'normal_qos': normal_qos,
+            'default_qos': default_qos,
+          }
+
+
+        # configure the slurm account
+        runner = self.run_playbook( 'coact/slurm-account.yaml', facility=facility, repo=repo, shares=facility_shares )
+        #self.LOG.info(f"{playbook} output: {runner}")
+
+        # set permissions, limits and partitions in slurm for this repo
+        for partition, d in data.items():
+
+          self.LOG.info(f"processing {partition} wth {d}")
+          # commit qos to slurm
+          qos_runner = self.run_playbook( 'coact/slurm-qos.yaml', qos=d['normal_qos'], cpus=d['cpus'], memory=d['mem'] )
+
+          # setup slurm accounts
+          accounts_runner = self.run_playbook( 'coact/slurm-users-partition.yaml', user=user, users=users, facility=facility, repo=repo, partition=partition, defaultqos=d['default_qos'], qos=d['qos'], add_user=add_user )
           #self.LOG.info(f"{playbook} output: {runner}")
+
           # TODO purge removed clusters
 
         return clusters
 
 
     def do_repo_membership( self, user: str, repo: str, facility: str, add_user: bool=False, playbook: str="coact/slurm-users-partition.yaml" ) -> bool:
+        """Update the list of members for this Repo"""
 
         # fetch for the list of all users for the repo
         runner = self.back_channel.execute( self.REPO_USERS_GQL, { 'repo': {'facility': facility, 'name': repo }} )
