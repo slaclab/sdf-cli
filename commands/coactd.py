@@ -557,6 +557,8 @@ class RepoRegistration(Registration):
         query = self.back_channel.execute( _query_gql, { 'facility': facility, 'repo': repo } )
         assert query['facility']['name'] == facility
 
+        # may want to iterate over all clusters rather than what clusters a facility has purchased into
+        # so that say preemptable jobs are allowed
         clusters = query['facility']['computepurchases']
     
         # determine total shares for facility
@@ -593,10 +595,7 @@ class RepoRegistration(Registration):
           default_qos = 'preemptable'
 
           # determin 'normal' qos name
-          normal_qos = f"{facility}:{repo}^normal@{partition}"
-          # fake out for rubin
-          if facility == 'rubin':
-            normal_qos = f"{facility}:{repo}^normal"
+          normal_qos = f"{facility.lower()}:{repo.lower()}^normal@{partition.lower()}"
 
           if not repo == 'default' and this_purchased > 0:
             qos = f'{normal_qos},preemptable'
@@ -613,24 +612,39 @@ class RepoRegistration(Registration):
             'normal_qos': normal_qos,
             'default_qos': default_qos,
           }
-
+        # end loop
 
         # configure the slurm account
         runner = self.run_playbook( 'coact/slurm-account.yaml', facility=facility, repo=repo, shares=facility_shares )
         #self.LOG.info(f"{playbook} output: {runner}")
 
-        # set permissions, limits and partitions in slurm for this repo
-        for partition, d in data.items():
+        # treat rubin differently due to multipartitions requirement (for now)
+        if facility.lower() in ('rubin',):
+          # just sum up resources for now
+          this_data = {'cpus': 0, 'mem': 0}
+          for partition, d in data.items():
+            normal_qos = f"{facility.lower()}:{repo.lower()}^normal"
+            this_data['cpus'] += d['cpus']
+            this_data['mem'] += d['mem']
+            this_data['qos'] = f"{normal_qos},preemptable" if not repo.lower() == 'default' else 'preemptable'
+            this_data['normal_qos'] = normal_qos
+            this_data['default_qos'] = normal_qos if not repo.lower() == 'default' else 'preemptable'
+          qos_runner = self.run_playbook( 'coact/slurm-qos.yaml', qos=this_data['normal_qos'], cpus=this_data['cpus'], memory=this_data['mem'] ) 
+          accounts_runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, users=users, facility=facility, repo=repo, defaultqos=this_data['default_qos'], qos=this_data['qos'], add_user=add_user )
 
-          self.LOG.info(f"processing {partition} wth {d}")
-          # commit qos to slurm
-          qos_runner = self.run_playbook( 'coact/slurm-qos.yaml', qos=d['normal_qos'], cpus=d['cpus'], memory=d['mem'] )
+        else:
+          # set permissions, limits and partitions in slurm for this repo
+          for partition, d in data.items():
 
-          # setup slurm accounts
-          accounts_runner = self.run_playbook( 'coact/slurm-users-partition.yaml', user=user, users=users, facility=facility, repo=repo, partition=partition, defaultqos=d['default_qos'], qos=d['qos'], add_user=add_user )
-          #self.LOG.info(f"{playbook} output: {runner}")
+            self.LOG.info(f"processing {partition} wth {d}")
+            # commit qos to slurm
+            qos_runner = self.run_playbook( 'coact/slurm-qos.yaml', qos=d['normal_qos'], cpus=d['cpus'], memory=d['mem'] )
 
-          # TODO purge removed clusters
+            # setup slurm accounts
+            accounts_runner = self.run_playbook( 'coact/slurm-users-partition.yaml', user=user, users=users, facility=facility, repo=repo, partition=partition, defaultqos=d['default_qos'], qos=d['qos'], add_user=add_user )
+            #self.LOG.info(f"{playbook} output: {runner}")
+
+        # TODO purge removed clusters
 
         return clusters
 
@@ -645,36 +659,8 @@ class RepoRegistration(Registration):
         users_str = ','.join(users)
         self.LOG.info(f"setting account {facility}:{repo} with users {users_str}")
 
-        # run playbook to add this user and existsing repo users to the slurm account
-        # rubin submits jobs to multiple partitions, so we need to treat that differently for now due to 
-        # the lack of support in slurm of this with multiple partitions
-        if facility.lower() in ( 'rubin' ):
-
-            self.LOG.warn("Exceptional code branch for rubin facility and multi partition usage!")
-
-            # FIXME: DRY much?
-            # determine which clusters are defined to setup the shares
-            runner = self.back_channel.execute( self.FACILITY_CURRENT_COMPUTE_CGL, { 'facility': facility } )
-            assert runner['facility']['name'] == facility
-            clusters = runner['facility']['computepurchases']
-            # determine total shares for facility
-            facility_shares = 1
-            for c in clusters:
-              # set the slurm shares equal to teh number of cores
-              # TODO: for gpus perhaps set to the number of gpus
-              facility_shares += int(c['purchased'])
-            # configure
-            runner = self.run_playbook( 'coact/slurm-account.yaml', facility=facility, repo=repo, shares=facility_shares )
-            #self.LOG.info(f"{playbook} output: {runner}")
-
-            # allow (rubin) users to submit to all partitions (by not defining it) because they submit jobs to partition=roma,milano which breaks slurm
-            runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, add_user=add_user, users=users_str, facility=facility, repo=repo, defaultqos="normal", qos="normal,preemptable" )
-
-        else:
-
-            # run
-            clusters = self.sync_slurm_associations( users=users_str, repo=repo, facility=facility, user=user, add_user=add_user )
-
+        # setup slurm
+        clusters = self.sync_slurm_associations( users=users_str, repo=repo, facility=facility, user=user, add_user=add_user )
 
         # add user into repo back in coact
         add_user_req = {
