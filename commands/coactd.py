@@ -567,35 +567,44 @@ class RepoRegistration(Registration):
         for c in clusters:
 
           partition = c['clustername']
-          
+
           def _get_recent( array: list, return_field: str, partition: str, clustername_field: str='clustername', start_field: str='start', end_field: str='end' ) -> int:
             """ returns the most recent item in the array of dicts. assumes we have fields of datestamps """
             a = [ d for d in array if d[clustername_field] == partition ]
             if not len( a ) == 1:
-                raise NotImplementedError("Unsupported multiple allocations logic for qos configuration")
+                raise NotImplementedError(f"Unsupported multiple allocations logic for qos configuration of partition {partition}: {a}")
             assert return_field in a[0]
             return a[0][return_field]
 
-          # work out the cpus and mem for this repo
-          this_allocation_percent = _get_recent( query['repo']['currentComputeAllocations'], 'percentOfFacility', partition )
-          this_purchased = _get_recent( clusters, 'purchased', partition )
-          # set the slurm shares equal to teh number of cores
-          # TODO: for gpus perhaps set to the number of gpus
-          facility_shares += int(this_purchased)
-          this_node_cpu = _get_recent( query['clusters'], 'nodecpucount', partition, clustername_field='name' )
-          this_node_mem = _get_recent( query['clusters'], 'nodememgb', partition, clustername_field='name' )
-
-          # determine allocated cores and mem
-          # TODO: include gpus and nodes?
-          this_cpus = this_node_cpu * this_purchased * this_allocation_percent / 100.
-          this_mem = this_node_mem * this_purchased * this_allocation_percent / 100. * 1024
-
           # if its the default repo, do not allow normal qos jobs
+          this_purchased = 0
+          this_allocation_percent = 0
+          this_cpus = 0
+          this_mem = 0
           qos = 'preemptable'
           default_qos = 'preemptable'
+          normal_qos = None
+          try:
 
-          # determin 'normal' qos name
-          normal_qos = f"{facility.lower()}:{repo.lower()}^normal@{partition.lower()}"
+          # work out the cpus and mem for this repo
+            this_allocation_percent = _get_recent( query['repo']['currentComputeAllocations'], 'percentOfFacility', partition )
+            this_purchased = _get_recent( clusters, 'purchased', partition )
+            # set the slurm shares equal to teh number of cores
+            # TODO: for gpus perhaps set to the number of gpus
+            facility_shares += int(this_purchased)
+            this_node_cpu = _get_recent( query['clusters'], 'nodecpucount', partition, clustername_field='name' )
+            this_node_mem = _get_recent( query['clusters'], 'nodememgb', partition, clustername_field='name' )
+  
+            # determine allocated cores and mem
+            # TODO: include gpus and nodes?
+            this_cpus = this_node_cpu * this_purchased * this_allocation_percent / 100.
+            this_mem = this_node_mem * this_purchased * this_allocation_percent / 100. * 1024
+  
+            # determin 'normal' qos name
+            normal_qos = f"{facility.lower()}:{repo.lower()}^normal@{partition.lower()}"
+
+          except Exception as e:
+            self.LOG.warning(f"Could not determine slurm settings: {e}")
 
           if not repo == 'default' and this_purchased > 0:
             qos = f'{normal_qos},preemptable'
@@ -604,8 +613,8 @@ class RepoRegistration(Registration):
           data[partition] = {
             'alloc_percent': this_allocation_percent,
             'purchased': this_purchased,
-            'node_cpu': this_node_cpu,
-            'node_mem': this_node_mem,
+            #'node_cpu': this_node_cpu,
+            #'node_mem': this_node_mem,
             'cpus': int(this_cpus),
             'mem': this_mem,
             'qos': qos,
