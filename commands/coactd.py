@@ -672,11 +672,12 @@ class RepoRegistration(Registration):
         clusters = self.sync_slurm_associations( users=users_str, repo=repo, facility=facility, user=user, add_user=add_user )
 
         # add user into repo back in coact
-        add_user_req = {
+        if add_user:
+          add_user_req = {
             "repo": { "name": repo, "facility": facility },
             "user": { "username": user }
-        }
-        self.back_channel.execute( self.REPO_APPEND_USER_GQL, add_user_req ) 
+          }
+          self.back_channel.execute( self.REPO_APPEND_USER_GQL, add_user_req ) 
 
         return True
 
