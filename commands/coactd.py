@@ -270,6 +270,9 @@ class UserRegistration(Registration):
         # do any facility specific tasks
         runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='facility' )
 
+        # clear the sssd cache to allow users to log in immediately
+        runner = self.run_playbook( playbook, user=user, user_facility=facility, tags='sssd' )
+
         # always register user with the facility's `default` Repo
         # Id references don't work in mutation for some reason
         add_user_req = {
