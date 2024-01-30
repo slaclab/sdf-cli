@@ -19,6 +19,7 @@ import logging
 from typing import Any
 import pendulum as pdl
 from datetime import timedelta
+from timeit import default_timer as timer
 
 import subprocess
 import re
@@ -134,11 +135,11 @@ class SlurmRemap(Command):
             d['Account'] = 'rubin:production'
         elif d['Account'] in ( 'shared', 'shared:default' ) or d['User'] in ( 'jonl', 'vanilla', 'yemi', 'yangw', 'pav', 'root', 'reranna', 'ppascual', 'renata'):
             return None
-        elif d['User'] in ('csaunder','elhoward', 'mrawls', 'mfl', 'wguan', 'laurenma','smau', 'bos', 'erykoff', 'ebellm', 'mccarthy','yesw','abrought', 'shuang92', 'aconnoll', 'daues', 'aheinze','zhaoyu','dagoret', 'kannawad', 'kherner', 'eske', 'cslater', "sierrav", 'jmeyers3', 'lskelvin', 'jchiang', 'yanny', 'ktl', 'jneveu', 'hchiang2', 'snyder18', 'fred3m', 'brycek', 'eiger', 'esteves', 'mxk', 'yusra', 'mrabus', 'ryczano', 'mgower', 'yoachim', 'scichris', ) and d['Account'] in ('', 'milano', 'roma'):
+        elif d['User'] in ('csaunder','elhoward', 'mrawls', 'brycek', 'mfl', 'digel', 'wguan', 'laurenma','smau', 'bos', 'erykoff', 'ebellm', 'mccarthy','yesw','abrought', 'shuang92', 'aconnoll', 'daues', 'aheinze','zhaoyu','dagoret', 'kannawad', 'kherner', 'eske', 'cslater', "sierrav", 'jmeyers3', 'lskelvin', 'jchiang', 'yanny', 'ktl', 'jneveu', 'hchiang2', 'snyder18', 'fred3m', 'brycek', 'eiger', 'esteves', 'mxk', 'yusra', 'mrabus', 'ryczano', 'mgower', 'yoachim', 'scichris', 'jcheval', 'richard', 'tguillem', ) and d['Account'] in ('', 'milano', 'roma', 'rubin'):
             d['Account'] = 'rubin:developers'
             if d['Partition'] == 'ampere':
                 d['Partition'] = 'milano'
-        elif d['User'] == 'kocevski' or ( d['User'] in  ('horner','mdimauro','burnett','laviron','omodei','tyrelj', 'echarles', 'bruel') and d['Account'] in ('','latba','ligo','repository') ):
+        elif d['User'] == 'kocevski' or ( d['User'] in  ('burnett','horner','mdimauro','burnett','laviron','omodei','tyrelj', 'echarles', 'bruel') and d['Account'] in ('','latba','ligo','repository','burnett') ):
             d['Account'] = 'fermi:users'
         elif d['User'] in ('glastraw',):
             d['Account'] = 'fermi:l1'
@@ -146,7 +147,7 @@ class SlurmRemap(Command):
             d['Partition'] = 'roma'
         elif d['User'] in ( 'dcesar', 'jytang', 'rafimah', ):
             d['Account'] = 'ad:beamphysics'
-        elif d['User'] in ( 'kterao', 'kvtsang', 'anoronyo', 'bkroul', 'zhulcher', 'koh0207', 'drielsma', 'lkashur', 'dcarber', 'amogan', 'cyifan', 'yjwa', 'aj14' , 'jdyer', 'sindhuk', 'justinjm', 'mrmooney', 'bearc', 'fuhaoji', 'sfogarty', 'carsmith', 'yuntse'): #and d['Account'] in ( '', 'ampere', 'ml', 'roma', ):
+        elif d['User'] in ( 'kterao', 'kvtsang', 'anoronyo', 'bkroul', 'zhulcher', 'koh0207', 'drielsma', 'lkashur', 'dcarber', 'amogan', 'cyifan', 'yjwa', 'aj14' , 'jdyer', 'sindhuk', 'justinjm', 'mrmooney', 'bearc', 'fuhaoji', 'sfogarty', 'carsmith', 'yuntse') and not d['Account'] in ( 'neutrino:ml-dev', 'neutrino:icarus-ml', 'neutrino:slacube', 'neutrino:dune-ml' ):
             d['Account'] = 'neutrino:default'
             d['Partition'] = 'ampere'
         elif d['User'] in ('dougl215','zhezhang'): # and d['Account'] in ('ampere:default',):
@@ -154,7 +155,7 @@ class SlurmRemap(Command):
             d['Account'] = 'mli:default'
         elif d['User'] in ('jfkern',  'taisgork', 'valmar', 'tgrant', 'arijit01', 'mmdoyle', 'fpoitevi', 'ashojaei', 'monarin', 'claussen', 'batyuk', 'kevinkgu', 'tfujit27', 'haoyuan', 'aliang', 'jshenoy', 'dorlhiac', 'xjql',  ): # and d['Account'] in ('','milano', 'roma'):
             d['Account'] = 'lcls:default'
-        elif d['User'] in ( 'psdatmgr', 'xiangli', 'sachsm', 'hekstra', 'cwang31', 'espov', 'thorsten', 'wilko', 'snelson') and d['Account'] in ( '', 'lcls:xpp', 'lcls:psmfx', 'lcls:data', 'ampere'):
+        elif d['User'] in ( 'psdatmgr', 'xiangli', 'sachsm', 'hekstra', 'snelson', 'cwang31', 'espov', 'thorsten', 'wilko', 'snelson', 'melchior', 'cpo', 'wilko', 'mshankar' ) and d['Account'] in ( '', 'lcls:xpp', 'lcls:psmfx', 'lcls:data', 'ampere', 'roma', 'rubin', 'lcls-xpp1234', 'lcls:xpptut15', 'lcls:xpptut16', 's3dfadmin' ):
             d['Account'] = 'lcls:default'
         elif d['User'] in ( 'lsstccs', 'rubinmgr' ):
             d['Account'] = 'rubin:commissioning'
@@ -164,7 +165,7 @@ class SlurmRemap(Command):
             d['Account'] = 'epptheory:default'
         elif d['User'] in ('tabel',):
             d['Account'] = 'kipac:kipac'
-        elif d['User'] in ('melwan', 'zatschls', 'yanliu', 'aditi',):
+        elif d['User'] in ('vnovati', 'owwen', 'melwan', 'zatschls', 'yanliu', 'cartaro', 'aditi', 'emichiel', ):
             d['Account'] = 'supercdms:default'
 
         if d['Account'] == '':
@@ -192,7 +193,7 @@ class SlurmImport(Command,GraphQlClient):
         p.add_argument('--print', help='verbose output', action='store_true')
         p.add_argument('--debug', help='debug output', action='store_true')
         p.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
-        p.add_argument('--batch', help='batch upload size', default=1000)
+        p.add_argument('--batch', help='batch upload size', default=225000)
         p.add_argument('--data', help='data to read from', type=argparse.FileType(), default=sys.stdin)
         p.add_argument('--output', help='output format', choices=[ 'json', 'upload' ], default='json' ) 
         p.add_argument('--password-file', help='basic auth password for graphql service', required=True)
@@ -207,12 +208,16 @@ class SlurmImport(Command,GraphQlClient):
             self.LOG.setLevel( logging.DEBUG )
 
         # connect
-        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
+        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file, timeout=300 )
         self.get_metadata()
 
+        dest = parsed_args.output
+
+        batch_size = int(parsed_args.batch)
         first = True
         index = {}
         buffer = []
+        s = timer()
         for line in parsed_args.data.readlines():
             if self.verbose:
                 print(f"\n{line.strip()}")
@@ -228,12 +233,15 @@ class SlurmImport(Command,GraphQlClient):
                     #self.LOG.info(f'job: {job}')
                     if job:
                         buffer.append(job)
-                        if len(buffer) >= int(parsed_args.batch):
-                            self.generate_output(buffer)
+                        if len(buffer) >= batch_size:
+                            self.generate_output(buffer, dest)
                             buffer = []
 
         if len(buffer) > 0:
-            self.generate_output(buffer)
+            self.generate_output(buffer, dest)
+
+        duration = timer() - s
+        self.LOG.info(f"upload completed in {duration:,.02f}")        
 
         return True
 
@@ -315,12 +323,37 @@ class SlurmImport(Command,GraphQlClient):
                     return _id
         raise Exception(f'could not determine alloc_id for {facility}:{repo} at {cluster} at timestamp {time}')
 
-    def generate_output(self, jobs, **kwargs):
-        return self.output_json( jobs, **kwargs )
+    def generate_output(self, jobs, destination ):
+        try:
+            if destination == 'json':
+                return self.output_json( jobs )
+            elif destination == 'upload':
+                return self.upload_jobs( jobs )
+            else:
+                raise NotImplementedError(f'unsupported output {destination}')
+        except Exception as e:
+            self.LOG.exception(f'generation failed: {e}')
+     
 
-    def upload_jobs(self, jobs):
-        self.LOG.debug(f"upload ({len(jobs)}) {jobs}")
-        #self.back_channel.execute( JOB_GQL, values )
+    def upload_jobs(self, jobs, import_gql=gql(
+            """
+            mutation jobsImport($jobs: [Job!]!) {
+                jobsImport(jobs: $jobs) {
+                    insertedCount
+                    upsertedCount
+                    modifiedCount
+                    deletedCount
+                }
+            }
+            """
+        ) ):
+        self.LOG.debug(f"uploading {len(jobs)} jobs...")
+        s = timer()
+        result = self.back_channel.execute( import_gql, { 'jobs': jobs } )['jobsImport']
+        e = timer()
+        duration = e - s
+        self.LOG.info( f"imported jobs Inserted={result['insertedCount']}, Upserted={result['upsertedCount']}, Deleted={result['deletedCount']}, Modified={result['modifiedCount']} in {duration:,.02f}s" ) 
+        return True
 
     def output_json(self, jobs, indent=2):
         print( json.dumps( jobs,  indent=indent, default=datetime_converter ) )
@@ -418,15 +451,49 @@ class SlurmImport(Command,GraphQlClient):
                 sys.exit(1)
             return None
 
-        return {
+        # remap qos
+        qos = d['QOS']
+        try:
+            a = qos.split('^')
+            b = a[1].split('@')
+            qos = b[0]
+        except:
+            pass
+        if not qos in ( 'preemptable', 'normal' ):
+            self.LOG.warning("could not determine appropriate qos from {d['QOS']}")
+
+        out = {
             'jobId': conv(d['JobID'], int, 0),
             'username': d['User'],
             'allocationId': allocId,
-            'qos': d['QOS'],
-            'startTs': startTs,
+            'qos': qos,
+            'startTs': str(startTs.in_tz('UTC')).replace('+00:00','.000Z'),
             'resourceHours': resource_hours,
         }
+        #print( f'{out}' )
+        return out
 
+class SlurmRecalculate(Command, GraphQlClient):
+    'Recalcuate the usage numbers from slurm jobs in Coact'
+    LOG = logging.getLogger(__name__)
+
+    def get_parser(self, prog_name):
+        p = super(SlurmRecalculate, self).get_parser(prog_name)
+        p.add_argument('--verbose', help='verbose output', required=False)
+        p.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
+        p.add_argument('--password-file', help='basic auth password for graphql service', required=True)
+        return p
+
+    def take_action(self, parsed_args):
+        self.verbose = parsed_args.verbose
+        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file, timeout=300 )
+        result = self.back_channel.execute("""
+            mutation Calc() {
+              jobsAggregateAll { status }
+            }
+        """ )
+        return result['Calc']['status']
+        
 
 class Coact(CommandManager):
     "A Manager class to register sub commands"
@@ -434,7 +501,7 @@ class Coact(CommandManager):
 
     def __init__(self, namespace, convert_underscores=True):
         super(Coact,self).__init__(namespace, convert_underscores=convert_underscores)
-        for cmd in [ SlurmDump, SlurmRemap, SlurmImport, ]:
+        for cmd in [ SlurmDump, SlurmRemap, SlurmImport, SlurmRecalculate ]:
             self.add_command( cmd.__name__.lower(), cmd )
 
 

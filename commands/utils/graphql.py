@@ -37,12 +37,12 @@ class GraphQlClient:
           headers = { 'Authorization': f'Basic {base64.b64encode(mux).decode("ascii")}' }
         return headers
 
-    def connect_graph_ql(self, graphql_uri='https://'+SDF_COACT_URI, get_schema=False, username=None, password_file=None, password=None ):
+    def connect_graph_ql(self, graphql_uri='https://'+SDF_COACT_URI, get_schema=False, username=None, password_file=None, password=None , timeout=30):
         self.LOG.info(f"connecting to {graphql_uri}")
         if password_file:
             password = self.get_password( password_file=password_file )
         self.transport = AIOHTTPTransport(url=graphql_uri, headers=self.get_basic_auth_headers( username=username, password=password ))
-        self.client = Client(transport=self.transport, fetch_schema_from_transport=get_schema)
+        self.client = Client(transport=self.transport, fetch_schema_from_transport=get_schema, execute_timeout=timeout)
         # lets reduce the logging from gql
         for name in logging.root.manager.loggerDict:
             if name.startswith('gql'):
