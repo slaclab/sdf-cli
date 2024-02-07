@@ -574,7 +574,9 @@ class RepoRegistration(Registration):
           def _get_recent( array: list, return_field: str, partition: str, clustername_field: str='clustername', start_field: str='start', end_field: str='end' ) -> int:
             """ returns the most recent item in the array of dicts. assumes we have fields of datestamps """
             a = [ d for d in array if d[clustername_field] == partition ]
-            if not len( a ) == 1:
+            if len( a ) == 0:
+                raise Exception(f"No allocation found")
+            elif not len( a ) == 1:
                 raise NotImplementedError(f"Unsupported multiple allocations logic for qos configuration of partition {partition}: {a}")
             assert return_field in a[0]
             return a[0][return_field]
@@ -587,6 +589,8 @@ class RepoRegistration(Registration):
           qos = 'preemptable'
           default_qos = 'preemptable'
           normal_qos = None
+
+          alloc_defined = True
           try:
 
           # work out the cpus and mem for this repo
@@ -607,23 +611,28 @@ class RepoRegistration(Registration):
             normal_qos = f"{facility.lower()}:{repo.lower()}^normal@{partition.lower()}"
 
           except Exception as e:
+            self.LOG.warning(f"ignoring cluster {partition} as no allocation defined for repo {facility}:{repo}")
+            alloc_defined = False
+
+          except NotImplementedError as e:
             self.LOG.warning(f"Could not determine slurm settings: {e}")
 
           if not repo == 'default' and this_purchased > 0:
             qos = f'{normal_qos},preemptable'
             default_qos = f'{normal_qos}'
 
-          data[partition] = {
-            'alloc_percent': this_allocation_percent,
-            'purchased': this_purchased,
-            #'node_cpu': this_node_cpu,
-            #'node_mem': this_node_mem,
-            'cpus': int(this_cpus),
-            'mem': this_mem,
-            'qos': qos,
-            'normal_qos': normal_qos,
-            'default_qos': default_qos,
-          }
+          if alloc_defined:
+              data[partition] = {
+                'alloc_percent': this_allocation_percent,
+                'purchased': this_purchased,
+                #'node_cpu': this_node_cpu,
+                #'node_mem': this_node_mem,
+                'cpus': int(this_cpus),
+                'mem': this_mem,
+                'qos': qos,
+                'normal_qos': normal_qos,
+                'default_qos': default_qos,
+              }
         # end loop
 
         # configure the slurm account
