@@ -530,6 +530,7 @@ class RepoRegistration(Registration):
               clusters {
                 name
                 nodecpucount
+                nodegpucount
                 nodecpucountdivisor
                 nodecpusmt
                 nodememgb
@@ -574,8 +575,9 @@ class RepoRegistration(Registration):
           def _get_recent( array: list, return_field: str, partition: str, clustername_field: str='clustername', start_field: str='start', end_field: str='end' ) -> int:
             """ returns the most recent item in the array of dicts. assumes we have fields of datestamps """
             a = [ d for d in array if d[clustername_field] == partition ]
+            self.LOG.warn(f"found {return_field} for {clustername_field}: {a}")
             if len( a ) == 0:
-                raise Exception(f"No allocation found")
+                raise LookupError(f"No allocation found")
             elif not len( a ) == 1:
                 raise NotImplementedError(f"Unsupported multiple allocations logic for qos configuration of partition {partition}: {a}")
             assert return_field in a[0]
@@ -612,7 +614,7 @@ class RepoRegistration(Registration):
             # determin 'normal' qos name
             normal_qos = f"{facility.lower()}:{repo.lower()}^normal@{partition.lower()}"
 
-          except Exception as e:
+          except LookupError as e:
             self.LOG.warning(f"ignoring cluster {partition} as no allocation defined for repo {facility}:{repo}")
             alloc_defined = False
 
