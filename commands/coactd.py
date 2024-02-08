@@ -600,11 +600,13 @@ class RepoRegistration(Registration):
             # TODO: for gpus perhaps set to the number of gpus
             facility_shares += int(this_purchased)
             this_node_cpu = _get_recent( query['clusters'], 'nodecpucount', partition, clustername_field='name' )
+            this_node_gpu = _get_recent( query['clusters'], 'nodegpucount', partition, clustername_field='name' )
             this_node_mem = _get_recent( query['clusters'], 'nodememgb', partition, clustername_field='name' )
   
             # determine allocated cores and mem
             # TODO: include gpus and nodes?
             this_cpus = this_node_cpu * this_purchased * this_allocation_percent / 100.
+            this_gpus = this_node_gpu * this_purchased * this_allocation_percent / 100.
             this_mem = this_node_mem * this_purchased * this_allocation_percent / 100. * 1024
   
             # determin 'normal' qos name
@@ -628,6 +630,7 @@ class RepoRegistration(Registration):
                 #'node_cpu': this_node_cpu,
                 #'node_mem': this_node_mem,
                 'cpus': int(this_cpus),
+                'gpus': int(this_gpus),
                 'mem': this_mem,
                 'qos': qos,
                 'normal_qos': normal_qos,
@@ -659,7 +662,7 @@ class RepoRegistration(Registration):
 
             self.LOG.info(f"processing {partition} wth {d}")
             # commit qos to slurm
-            qos_runner = self.run_playbook( 'coact/slurm-qos.yaml', qos=d['normal_qos'], cpus=d['cpus'], memory=d['mem'] )
+            qos_runner = self.run_playbook( 'coact/slurm-qos.yaml', qos=d['normal_qos'], cpus=d['cpus'], gpus=d['gpus'], memory=d['mem'] )
 
             # setup slurm accounts
             accounts_runner = self.run_playbook( 'coact/slurm-users-partition.yaml', user=user, users=users, facility=facility, repo=repo, partition=partition, defaultqos=d['default_qos'], qos=d['qos'], add_user=add_user )
