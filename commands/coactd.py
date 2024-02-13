@@ -647,7 +647,7 @@ class RepoRegistration(Registration):
         # treat rubin differently due to multipartitions requirement (for now)
         if facility.lower() in ('rubin',):
           # just sum up resources for now
-          this_data = {'cpus': 0, 'mem': 0}
+          this_data = {'cpus': 0, 'mem': 0, 'gpus': 0}
           for partition, d in data.items():
             normal_qos = f"{facility.lower()}:{repo.lower()}^normal"
             this_data['cpus'] += d['cpus']
@@ -655,7 +655,7 @@ class RepoRegistration(Registration):
             this_data['qos'] = f"{normal_qos},preemptable" if not repo.lower() == 'default' else 'preemptable'
             this_data['normal_qos'] = normal_qos
             this_data['default_qos'] = normal_qos if not repo.lower() == 'default' else 'preemptable'
-          qos_runner = self.run_playbook( 'coact/slurm-qos.yaml', qos=this_data['normal_qos'], cpus=this_data['cpus'], memory=this_data['mem'] ) 
+          qos_runner = self.run_playbook( 'coact/slurm-qos.yaml', qos=this_data['normal_qos'], cpus=this_data['cpus'], gpus=this_data['gpus'], memory=this_data['mem'] ) 
           accounts_runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, users=users, facility=facility, repo=repo, defaultqos=this_data['default_qos'], qos=this_data['qos'], add_user=add_user )
 
         else:
