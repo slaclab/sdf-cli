@@ -463,7 +463,7 @@ class SlurmImport(Command,GraphQlClient):
             self.LOG.warning("could not determine appropriate qos from {d['QOS']}")
 
         out = {
-            'jobId': conv(d['JobID'], int, 0),
+            'jobId': d['JobID'],
             'username': d['User'],
             'allocationId': allocId,
             'qos': qos,
@@ -479,6 +479,7 @@ class SlurmRecalculate(Command, GraphQlClient):
 
     def get_parser(self, prog_name):
         p = super(SlurmRecalculate, self).get_parser(prog_name)
+        p.add_argument('--date', help='recalculate jobs from this date', default='2023-10-18')
         p.add_argument('--verbose', help='verbose output', required=False)
         p.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
         p.add_argument('--password-file', help='basic auth password for graphql service', required=True)
@@ -487,12 +488,13 @@ class SlurmRecalculate(Command, GraphQlClient):
     def take_action(self, parsed_args):
         self.verbose = parsed_args.verbose
         self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file, timeout=300 )
-        result = self.back_channel.execute("""
-            mutation Calc() {
-              jobsAggregateAll { status }
-            }
-        """ )
-        return result['Calc']['status']
+        s = timer()
+        result = self.back_channel.execute( gql( "mutation update { jobsAggregateForDate(thedate: \"" + parsed_args.date + "T08:00:00.0000Z\" ){ status } }" ) )
+        assert result['jobsAggregateForDate']['status'] == True
+        e = timer()
+        duration = e - s
+        self.LOG.info( f"recalculated jobs in {duration:,.02f}s" )
+        return True
         
 
 class Coact(CommandManager):
