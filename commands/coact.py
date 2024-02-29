@@ -180,6 +180,8 @@ class SlurmRemap(Command):
 
         if d['QOS'] in ( 'Unknown', ):
             d['QOS'] = 'preemptable'
+        elif d['QOS'] in ( 'expedite', ):
+            d['QOS'] = 'normal'
 
         #self.LOG.info(f"out: {d}") 
         return d
