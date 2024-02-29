@@ -178,6 +178,9 @@ class SlurmRemap(Command):
         if not ':' in d['Account']:
             d['Account'] = d["Account"] + ':default'
 
+        if d['QOS'] in ( 'Unknown', ):
+            d['QOS'] = 'preemptable'
+
         #self.LOG.info(f"out: {d}") 
         return d
 
@@ -459,8 +462,8 @@ class SlurmImport(Command,GraphQlClient):
             qos = b[0]
         except:
             pass
-        if not qos in ( 'preemptable', 'normal' ):
-            self.LOG.warning("could not determine appropriate qos from {d['QOS']}")
+        if not qos in ( 'scavenger', 'preemptable', 'normal' ):
+            self.LOG.warning(f"could not determine appropriate qos '{d['QOS']}': line {d}")
 
         out = {
             'jobId': d['JobID'],
