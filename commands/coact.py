@@ -198,7 +198,7 @@ class SlurmImport(Command,GraphQlClient):
         p.add_argument('--print', help='verbose output', action='store_true')
         p.add_argument('--debug', help='debug output', action='store_true')
         p.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
-        p.add_argument('--batch', help='batch upload size', default=225000)
+        p.add_argument('--batch', help='batch upload size', default=150000)
         p.add_argument('--data', help='data to read from', type=argparse.FileType(), default=sys.stdin)
         p.add_argument('--output', help='output format', choices=[ 'json', 'upload' ], default='json' ) 
         p.add_argument('--password-file', help='basic auth password for graphql service', required=True)
@@ -445,6 +445,10 @@ class SlurmImport(Command,GraphQlClient):
                 tres=d["AllocTRES"],
                 alloc_nodes=alloc_nodes, ncpus=ncpus, cluster=self._clusters[d['Partition']])
 
+        # dont' bother if no resources used
+        if resource_hours == 0.:
+          return None
+
         # determine appropriate allocation to charge against
         # use submitTs instead of startTs?
         allocId = None
@@ -475,7 +479,8 @@ class SlurmImport(Command,GraphQlClient):
             'startTs': str(startTs.in_tz('UTC')).replace('+00:00','.000Z'),
             'resourceHours': resource_hours,
         }
-        #print( f'{out}' )
+
+        #print( f"JOB {out['jobId']\tout['username']\tout['startTs']\tout['resourceHours']}" )
         return out
 
 class SlurmRecalculate(Command, GraphQlClient):
