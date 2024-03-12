@@ -13,6 +13,7 @@ from gql.transport.websockets import log as websockets_logger
 websockets_logger.setLevel(logging.ERROR)
 
 import base64
+from timeit import default_timer as timer
 
 SDF_COACT_URI=getenv("SDF_COACT_URI", "coact-dev.slac.stanford.edu:443/graphql-service")
 
@@ -38,7 +39,7 @@ class GraphQlClient:
         return headers
 
     def connect_graph_ql(self, graphql_uri='https://'+SDF_COACT_URI, get_schema=False, username=None, password_file=None, password=None , timeout=30):
-        self.LOG.info(f"connecting to {graphql_uri}")
+        self.LOG.debug(f"connecting to {graphql_uri}")
         if password_file:
             password = self.get_password( password_file=password_file )
         self.transport = AIOHTTPTransport(url=graphql_uri, headers=self.get_basic_auth_headers( username=username, password=password ))
@@ -51,7 +52,13 @@ class GraphQlClient:
         return self.client
 
     def query(self, query, var={} ):
-        return self.client.execute( gql(query), variable_values=var )
+        s = timer()
+        self.LOG.debug(f"gql querying: {query}, vars: {var}")
+        res = self.client.execute( gql(query), variable_values=var )
+        e = timer()
+        duration = e - s
+        self.LOG.debug(f"gql query took s = timer()") 
+        return res
     def mutate(self, query, var={} ):
         return self.query( query, var=var )
 
