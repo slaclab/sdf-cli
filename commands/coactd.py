@@ -23,6 +23,7 @@ import datetime
 import pendulum as pdl
 
 from dateutil import parser
+from timeit import default_timer as timer
 
 COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
 
@@ -131,9 +132,10 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
 
     def take_action(self, parsed_args):
         # connect
-        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file )
+        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file, timeout=60 )
         sub = self.connect_subscriber( username=parsed_args.username, password=self.get_password(parsed_args.password_file ) )
         for req_id, op_type, req_type, approval, req in self.subscribe( self.SUBSCRIPTION_STR, var={"clientName": parsed_args.client_name} ):
+            s = timer()
             self.LOG.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
             self.ident = req_id # set the request id for ansible runner
             try:
@@ -144,16 +146,20 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
                     if result:
                         self.LOG.info(f"Marking request {req_id} complete")
                         self.markCompleteRequest( req, f'Request {self.ident} completed' )
-                        self.LOG.info(f"Done processing {req_id}")
+                        e = timer()
+                        duration = e - s
+                        self.LOG.info(f"Done processing {req_id} in {duration:,.02f}s")
                     else:
-                        self.LOG.warning(f"Unknown return for {req_id}")
+                        self.LOG.warning(f"Unknown return for {req_id}, type {op_type}")
                         
                 else:
                     self.LOG.info(f"Ignoring {req_id}")
 
             except Exception as e:
                 self.markIncompleteRequest( req, f'Request {self.ident} did not complete: {e}' )
-                self.LOG.exception(f"Error processing {req_id}: {e}")
+                e = timer()
+                duration = e - s
+                self.LOG.exception(f"Error processing {req_id}: {e} in {duration:,.02f}s")
         
 
     def do(self, req_id: str, op_type: Any, req_type: Any, approval: str, req: dict) -> bool:
