@@ -129,6 +129,22 @@ class SlurmRemap(Command):
 
 
     def remap_job( self, d ):
+        # deal with rubin multi partition
+
+        if d['Account'] in ( 'shared', 'shared:default' ) or d['User'] in ( 'jonl', 'vanilla', 'yemi', 'yangw', 'pav', 'root', 'reranna', 'ppascual', 'renata'):
+            return None
+
+        if ',' in d['Partition']:
+            a = d['Partition'].split(',')[0]
+            d['Partition'] = a
+
+        if d['QOS'] in ( 'Unknown', ):
+            d['QOS'] = 'normal'
+
+        return d
+        
+
+    def remap_job_pre2024( self, d ):
         """ deal with old jobs with wrong account info """
         #self.LOG.info(f"in: {d}") 
         if d['User'] in ( 'lsstsvc1' ) and d['Account'] in ( 'rubin', 'shared', '' ):
@@ -174,6 +190,8 @@ class SlurmRemap(Command):
         if ',' in d['Partition']:
             a = d['Partition'].split(',')[0]
             d['Partition'] = a
+        elif d['Partition'] in ( 'testweka', ):
+            return None
 
         if not ':' in d['Account']:
             d['Account'] = d["Account"] + ':default'
@@ -437,6 +455,7 @@ class SlurmImport(Command,GraphQlClient):
         # convert to datetime
         startTs = parse_datetime(int(d['Start']), force_tz=True)
         endTs = parse_datetime(int(d['End']), force_tz=True)
+        #assert endTs > startTs
 
         # compute some values
         alloc_nodes = kilos_to_int(d['AllocNodes'])
@@ -477,6 +496,7 @@ class SlurmImport(Command,GraphQlClient):
             'allocationId': allocId,
             'qos': qos,
             'startTs': str(startTs.in_tz('UTC')).replace('+00:00','.000Z'),
+            'endTs': str(endTs.in_tz('UTC')).replace('+00:00','.000Z'),
             'resourceHours': resource_hours,
         }
 
