@@ -21,6 +21,7 @@ import ansible_runner
 import logging
 import datetime
 import pendulum as pdl
+from pathlib import Path
 
 from dateutil import parser
 from timeit import default_timer as timer
@@ -41,13 +42,14 @@ class AnsibleRunner():
     LOG = logging.getLogger(__name__) 
     ident = None # use this to create a directory for the ansible run output of the same name (eg the coact request id)
     def run_playbook(self, playbook: str, private_data_dir: str = COACT_ANSIBLE_RUNNER_PATH, tags: str = 'all', **kwargs) -> ansible_runner.runner.Runner:
+        name = Path(playbook).name
         r = ansible_runner.run( 
             private_data_dir=private_data_dir,
             playbook=playbook, 
             tags=tags, 
             extravars=kwargs,
             suppress_env_files=True, # do not write out arguments to disk
-            ident=f'{self.ident}_{tags}',
+            ident=f'{self.ident}_{name}:{tags}',
             cancel_callback=lambda: None
         )
         self.LOG.debug(r.stats)
