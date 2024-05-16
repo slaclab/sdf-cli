@@ -427,7 +427,7 @@ class RepoRegistration(Registration):
 
         return None
 
-    def do_new_repo( self, repo: str, facility: str, principal: str, playbook: str="coact/add_repo.yaml", default_repo_allocation_percent=100, repo_allocation_start=pdl.today().in_tz('UTC'), repo_allocation_end_delta=pdl.duration(years=5) ) -> bool:
+    def do_new_repo( self, repo: str, facility: str, principal: str, playbook: str="coact/add_repo.yaml", default_repo_allocation_percent=0, repo_allocation_start=pdl.today().in_tz('UTC'), repo_allocation_end_delta=pdl.duration(years=5) ) -> bool:
 
         # add facility specific Repos
         runner = self.run_playbook( playbook, facility=facility, repo=repo )
