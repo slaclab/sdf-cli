@@ -23,6 +23,7 @@ from timeit import default_timer as timer
 
 import subprocess
 import re
+from string import Template
 
 # get local timezone
 _now = pdl.now()
@@ -577,24 +578,58 @@ class Overage(Command, GraphQlClient):
         facility = {} # facility -> clustername
         for time, array in result.items():
             for a in array:
-                if not a['facility'] in facility:
-                    facility[ a['facility'] ] = {}
-                if not a['clustername'] in facility[ a['facility'] ]:
-                    facility[ a['facility'] ][ a['clustername'] ] = []
-                facility[ a['facility'] ][ a['clustername'] ].append( a['percentUsed'] )
+                f = a['facility'].lower()
+                if not f in facility:
+                    facility[f] = {}
+                if not a['clustername'] in facility[f]:
+                    facility[f][ a['clustername'] ] = []
+                facility[f][ a['clustername'] ].append( int(a['percentUsed']) )
+
+        # lets get all the current qos settings
+        current = {}
+        cmd = "sacctmgr show qos format=name%35,GrpTRES%50 --noheader"
+        for l in subprocess.check_output(cmd.split()).split(b'\n'): #, capture_output=True, text=True)
+            try:
+                out = str(l).strip().split()
+                qos = out[1]
+                tres = out[2]
+                holding = False
+                if 'node' in tres:
+                    holding = True
+                m = re.match( r"(?P<facility>\S+):(?P<repo>\S+)\^(?P<qos>\S+)@(?P<cluster>\S+)", qos )
+                if m:
+                    d = m.groupdict()
+                    d['facility'] = d['facility'].lower()
+                    self.LOG.debug( f"{qos} {d} \t{tres} {holding}" )
+                    if not d['facility'] in current:
+                        current[d['facility']] = {}
+                    #if not d['cluster'] in current[ d['facility'] ]:
+                    if qos == 'normal':
+                        current[d['facility']][d['cluster']] = holding
+            except:
+                pass
+
+        template = Template("sacctmgr show qos format=name%35 | grep $facility | grep $cluster | grep normal | awk '{print $1}' | xargs -n1 -I%  sacctmgr -i modify qos % set GrpTRES=node=$nodes \t# held=$over change=$change\t$percentages" )
 
         for fac, d in facility.items():
              for clust, percentages in d.items():
-                 self.LOG.debug( f"{fac}:\t{clust}\t{percentages}" )
+                 #self.LOG.debug( f"{fac}:\t{clust}\t{percentages}" )
                  over = False
                  for p in percentages:
                      if p > 100.:
                          over = True
-                 if over:
-                     self.LOG.info(f"{fac} on {clust} over utilisation")
+
+                 # only bother if the desired is not hte same as current
+                 #self.LOG.info(f"looking at {fac} {clust} {over}")
+                 self.LOG.info( template.safe_substitute( facility=fac.lower(), cluster=clust, nodes=0 if over else -1, percentages=percentages, over=over, change=True if clust in current[fac] and not current[fac][clust] == over else False ) )
+                 if clust in current[fac] and not current[fac][clust] == over:
+                     self.LOG.info("CHANGE!")
+                     print( template.safe_substitute( facility=fac.lower(), cluster=clust, nodes=0 if over else -1, percentages=percentages, over=over, change=True ) )
+                     
+
         e = timer()
         duration = e - s
-        self.LOG.info( f"overage determined in {duration:,.02f}s" )
+        self.LOG.debug( f"overage determined in {duration:,.02f}s" )
         return True
         
 
