@@ -526,6 +526,77 @@ class SlurmRecalculate(Command, GraphQlClient):
         self.LOG.info( f"recalculated jobs in {duration:,.02f}s" )
         return True
         
+class Overage(Command, GraphQlClient):
+    'Recalcuate the usage numbers from slurm jobs in Coact'
+    LOG = logging.getLogger(__name__)
+
+    def get_parser(self, prog_name):
+        p = super(Overage, self).get_parser(prog_name)
+        p.add_argument('--date', help='recalculate jobs from this date', default='2023-10-18')
+        p.add_argument('--verbose', help='verbose output', required=False)
+        p.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
+        p.add_argument('--password-file', help='basic auth password for graphql service', required=True)
+        return p
+
+    def take_action(self, parsed_args):
+        self.verbose = parsed_args.verbose
+        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file, timeout=300 )
+        s = timer()
+        result = self.back_channel.execute( 
+            gql("""
+                query usage {
+                  _005: facilityRecentComputeUsage(pastMinutes:5) {
+                    clustername
+                    facility
+                    percentUsed
+                    #resourceHours
+                  }
+                  _015: facilityRecentComputeUsage(pastMinutes:15) {
+                    clustername
+                    facility
+                    percentUsed
+                    #resourceHours
+                  }
+                  _060: facilityRecentComputeUsage(pastMinutes:60) {
+                    clustername
+                    facility
+                    percentUsed
+                    #resourceHours
+                  }
+                  _180: facilityRecentComputeUsage(pastMinutes:180) {
+                    clustername
+                    facility
+                    percentUsed
+                    #resourceHours
+                  }
+                }
+           """ )
+        )
+        #assert result['jobsAggregateForDate']['status'] == True
+        #self.LOG.info( f"OUT: {result}" )
+        facility = {} # facility -> clustername
+        for time, array in result.items():
+            for a in array:
+                if not a['facility'] in facility:
+                    facility[ a['facility'] ] = {}
+                if not a['clustername'] in facility[ a['facility'] ]:
+                    facility[ a['facility'] ][ a['clustername'] ] = []
+                facility[ a['facility'] ][ a['clustername'] ].append( a['percentUsed'] )
+
+        for fac, d in facility.items():
+             for clust, percentages in d.items():
+                 self.LOG.debug( f"{fac}:\t{clust}\t{percentages}" )
+                 over = False
+                 for p in percentages:
+                     if p > 100.:
+                         over = True
+                 if over:
+                     self.LOG.info(f"{fac} on {clust} over utilisation")
+        e = timer()
+        duration = e - s
+        self.LOG.info( f"overage determined in {duration:,.02f}s" )
+        return True
+        
 
 class Coact(CommandManager):
     "A Manager class to register sub commands"
@@ -533,7 +604,7 @@ class Coact(CommandManager):
 
     def __init__(self, namespace, convert_underscores=True):
         super(Coact,self).__init__(namespace, convert_underscores=convert_underscores)
-        for cmd in [ SlurmDump, SlurmRemap, SlurmImport, SlurmRecalculate ]:
+        for cmd in [ SlurmDump, SlurmRemap, SlurmImport, SlurmRecalculate, Overage ]:
             self.add_command( cmd.__name__.lower(), cmd )
 
 
