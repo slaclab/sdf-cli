@@ -459,11 +459,15 @@ class SlurmImport(Command,GraphQlClient):
         #assert endTs > startTs
 
         # compute some values
-        alloc_nodes = kilos_to_int(d['AllocNodes'])
-        ncpus = conv(d['NCPUS'], int, 0)
-        resource_hours, elapsed_secs = calc_resource_hours( startTs=startTs, endTs=endTs,
-                tres=d["AllocTRES"],
-                alloc_nodes=alloc_nodes, ncpus=ncpus, cluster=self._clusters[d['Partition']])
+        if d['Partition'] in self._clusters:
+            alloc_nodes = kilos_to_int(d['AllocNodes'])
+            ncpus = conv(d['NCPUS'], int, 0)
+            resource_hours, elapsed_secs = calc_resource_hours( startTs=startTs, endTs=endTs,
+                    tres=d["AllocTRES"],
+                    alloc_nodes=alloc_nodes, ncpus=ncpus, cluster=self._clusters[d['Partition']])
+        else:  
+            resource_hours = 0.
+            self.LOG.warn( f"partition {d['Partition']} not defined in coact, ignoring job" )
 
         # dont' bother if no resources used
         if resource_hours == 0.:
@@ -574,7 +578,7 @@ class Overage(Command, GraphQlClient):
            """ )
         )
         #assert result['jobsAggregateForDate']['status'] == True
-        #self.LOG.info( f"OUT: {result}" )
+        self.LOG.debug( f"OUT: {result}" )
         facility = {} # facility -> clustername
         for time, array in result.items():
             for a in array:
@@ -584,6 +588,8 @@ class Overage(Command, GraphQlClient):
                 if not a['clustername'] in facility[f]:
                     facility[f][ a['clustername'] ] = []
                 facility[f][ a['clustername'] ].append( int(a['percentUsed']) )
+
+        self.LOG.debug(f"overages: {facility}")
 
         # lets get all the current qos settings
         current = {}
@@ -599,17 +605,18 @@ class Overage(Command, GraphQlClient):
                 m = re.match( r"(?P<facility>\S+):(?P<repo>\S+)\^(?P<qos>\S+)@(?P<cluster>\S+)", qos )
                 if m:
                     d = m.groupdict()
-                    d['facility'] = d['facility'].lower()
+                    f = d['facility'].lower()
                     self.LOG.debug( f"{qos} {d} \t{tres} {holding}" )
-                    if not d['facility'] in current:
-                        current[d['facility']] = {}
+                    if not f in current:
+                        current[f] = {}
                     #if not d['cluster'] in current[ d['facility'] ]:
-                    if qos == 'normal':
-                        current[d['facility']][d['cluster']] = holding
+                    if d['qos'] in ('normal'):
+                        current[f][d['cluster']] = holding
+                        #self.LOG.debug(f" set {f} {d['cluster']} to {holding}")
             except:
                 pass
 
-        template = Template("sacctmgr show qos format=name%35 | grep $facility | grep $cluster | grep normal | awk '{print $1}' | xargs -n1 -I%  sacctmgr -i modify qos % set GrpTRES=node=$nodes \t# held=$over change=$change\t$percentages" )
+        template = Template("sacctmgr show qos format=name%35 | grep $facility | grep $cluster | grep normal | awk '{print $1}' | xargs -n1 -I%  sacctmgr -i modify qos % set GrpTRES=node=$nodes \t# held=$held over=$over change=$change\t$percentages" )
 
         for fac, d in facility.items():
              for clust, percentages in d.items():
@@ -618,13 +625,17 @@ class Overage(Command, GraphQlClient):
                  for p in percentages:
                      if p > 100.:
                          over = True
+                 values = ','.join( [ f"{i:>3}" for i in percentages ])
 
                  # only bother if the desired is not hte same as current
-                 #self.LOG.info(f"looking at {fac} {clust} {over}")
-                 self.LOG.info( template.safe_substitute( facility=fac.lower(), cluster=clust, nodes=0 if over else -1, percentages=percentages, over=over, change=True if clust in current[fac] and not current[fac][clust] == over else False ) )
-                 if clust in current[fac] and not current[fac][clust] == over:
-                     self.LOG.info("CHANGE!")
-                     print( template.safe_substitute( facility=fac.lower(), cluster=clust, nodes=0 if over else -1, percentages=percentages, over=over, change=True ) )
+                 self.LOG.debug(f"looking at {fac} {clust} {over}: {current[fac]} {current[fac][clust]}")
+                 held = current[fac][clust] if fac in current and clust in current[fac] else None
+                 change = not held == over
+                 token = f"{fac}^normal@{clust}"
+                 self.LOG.info( f"{token:28} held={held:1} over={over:1} change={change:1}   {values}" )
+                 if change:
+                     self.LOG.info(f"change hold state of {fac}^normal@{clust} to {over}")
+                     print( template.safe_substitute( facility=fac.lower(), cluster=clust, nodes=0 if over else -1, percentages=percentages, held=held, over=over, change=change ) )
                      
 
         e = timer()
