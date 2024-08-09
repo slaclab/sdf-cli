@@ -535,47 +535,30 @@ class Overage(Command, GraphQlClient):
     'Recalcuate the usage numbers from slurm jobs in Coact'
     LOG = logging.getLogger(__name__)
 
+    per_window_template = Template('''_$key: facilityRecentComputeUsage(pastMinutes:$minutes) { clustername facility percentUsed }''')
+
     def get_parser(self, prog_name):
         p = super(Overage, self).get_parser(prog_name)
         p.add_argument('--date', help='recalculate jobs from this date', default='2023-10-18')
         p.add_argument('--verbose', help='verbose output', required=False)
         p.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
         p.add_argument('--password-file', help='basic auth password for graphql service', required=True)
+        p.add_argument('--windows', help='time windows to collate overage calculations', type=int, nargs='+', required=False, default=[ 15, 60, 10080, 43800 ] )
         return p
 
     def take_action(self, parsed_args):
         self.verbose = parsed_args.verbose
+        self.windows = parsed_args.windows
+        self.LOG.info(f"fetching windows {self.windows}")
+        all_windows = []
+        for w in self.windows:
+            all_windows.append( self.per_window_template.safe_substitute(minutes=w,key=f"{w:0>6}") )
+        self.LOG.debug( f"{all_windows}" )
+
         self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file, timeout=300 )
         s = timer()
         result = self.back_channel.execute( 
-            gql("""
-                query usage {
-                  _005: facilityRecentComputeUsage(pastMinutes:5) {
-                    clustername
-                    facility
-                    percentUsed
-                    #resourceHours
-                  }
-                  _015: facilityRecentComputeUsage(pastMinutes:15) {
-                    clustername
-                    facility
-                    percentUsed
-                    #resourceHours
-                  }
-                  _060: facilityRecentComputeUsage(pastMinutes:60) {
-                    clustername
-                    facility
-                    percentUsed
-                    #resourceHours
-                  }
-                  _180: facilityRecentComputeUsage(pastMinutes:180) {
-                    clustername
-                    facility
-                    percentUsed
-                    #resourceHours
-                  }
-                }
-           """ )
+            gql('query usage {' + '\n'.join(all_windows) + '}')
         )
         #assert result['jobsAggregateForDate']['status'] == True
         self.LOG.debug( f"OUT: {result}" )
