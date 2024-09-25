@@ -2,7 +2,7 @@ import os
 import sys
 import inspect
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, List #, Literal
 
 from cliff.command import Command
 from cliff.commandmanager import CommandManager
@@ -305,27 +305,19 @@ class RepoRegistration(Registration):
         }
       }""")
 
-    REPO_UPSERT_GQL = gql("""
-        mutation repoUpsert($repo: RepoInput! ) {
-            repoUpsert(repo: $repo) {
-                Id
-            }
-        }
-        """)
+    #REPO_UPSERT_GQL = gql("""
+    #    mutation repoUpsert($repo: RepoInput! ) {
+    #        repoUpsert(repo: $repo) {
+    #            Id
+    #        }
+    #    }
+    #    """)
 
     COMPUTE_ALLOCATION_UPSERT_GQL = gql("""
         mutation repoComputeAllocationUpsert($repo: RepoInput!, $repocompute: RepoComputeAllocationInput!, $qosinputs: [QosInput!]!) {
             repoComputeAllocationUpsert(repo: $repo, repocompute: $repocompute, qosinputs: $qosinputs) {
                 Id
             } 
-        }
-        """)
-
-    REPO_APPEND_USER_GQL = gql("""
-        mutation repoAppendMember($repo: RepoInput!, $user: UserInput!) {
-            repoAppendMember(repo: $repo, user: $user) {
-                Id
-            }
         }
         """)
 
@@ -405,9 +397,9 @@ class RepoRegistration(Registration):
                 return self.do_new_repo( repo, facility, principal )
 
             elif req_type in ('RepoMembership','RepoRemoveUser'):
-                add_user = True if req_type == 'RepoMembership' else False
+                action = 'present' if req_type == 'RepoMembership' else 'absent'
                 assert user and repo and facility
-                return self.do_repo_membership( user, repo, facility, add_user )
+                return self.do_repo_membership( user=user, repo=repo, facility=facility, action=action )
 
             elif req_type == 'RepoComputeAllocation':
                 clustername = req.get('clustername', None)
@@ -427,13 +419,20 @@ class RepoRegistration(Registration):
 
         return None
 
-    def do_new_repo( self, repo: str, facility: str, principal: str, playbook: str="coact/add_repo.yaml", default_repo_allocation_percent=0, repo_allocation_start=pdl.today().in_tz('UTC'), repo_allocation_end_delta=pdl.duration(years=5) ) -> bool:
+    def do_new_repo( self, repo: str, facility: str, principal: str, default_repo_allocation_percent=0, repo_allocation_start=pdl.today().in_tz('UTC'), repo_allocation_end_delta=pdl.duration(years=5) ) -> bool:
+
+        REPO_UPSERT_GQL = gql("""
+            mutation repoUpsert($repo: RepoInput! ) {
+                repoUpsert(repo: $repo) {
+                    Id
+                }
+            }
+            """)
 
         # add facility specific Repos
-        runner = self.run_playbook( playbook, facility=facility, repo=repo )
-        self.LOG.warn(f"add_repo.yaml: {runner}")
+        #runner = self.run_playbook( 'coact/slurm/ensure_repo.yaml', facility=facility, repo=repo )
+        #self.LOG.warn(f"ensure_repo.yaml: {runner}")
 
-        # TODO: how to ensure we don't overwrite the principal, leaders and users if the repo already exists? do query first?
         leaders = [ principal, ]
         users = [ principal, ]
 
@@ -448,7 +447,7 @@ class RepoRegistration(Registration):
             }
         }
         self.LOG.info(f"upserting repo record {repo_create_req}")
-        repo_upserted = self.back_channel.execute( self.REPO_UPSERT_GQL, repo_create_req )
+        repo_upserted = self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
         repo_id = repo_upserted['repoUpsert']['Id']
 
         # for each facilities' clusters, create a compute allocation record
@@ -468,7 +467,7 @@ class RepoRegistration(Registration):
             resource = purchased * default_repo_allocation_percent / 100.
             self.upsert_repo_compute_allocation( repo_id, partition, default_repo_allocation_percent, resource, start, end )
             # sync slurm
-            resp = self.sync_slurm_associations( users=','.join(users), repo=repo, facility=facility )
+        resp = self.sync_slurm_associations( users=users, repo=repo, facility=facility, action='present' )
 
         # TODO: deal with storage
 
@@ -518,7 +517,7 @@ class RepoRegistration(Registration):
         resp = self.upsert_repo_compute_allocation( repo_obj['Id'], cluster, percent, allocated_resource, start, end )
 
         # enact it through slurm
-        resp = self.sync_slurm_associations( users=','.join(repo_obj['users']), repo=repo, facility=facility )
+        resp = self.sync_slurm_associations( users=repo_obj['users'], repo=repo, facility=facility, action='exact' )
 
         return True
 
@@ -528,9 +527,8 @@ class RepoRegistration(Registration):
             account_name = f'{facility}'.lower()
         return account_name
 
-    def sync_slurm_associations( self, users: str, repo: str, facility: str, user: Optional[str]=None, add_user: bool=None ) -> bool:
+    def sync_slurm_associations( self, users: Optional[List[str]], repo: str, facility: str, action: str, partition: Optional[str] ) -> bool:
         """Configure slurm with all the appropriate qos, accounts etc."""
-        # nasty: users is a comma separated string of list users; best to use an List[str]?
 
         # determine which clusters are defined
         _query_gql = gql(""" 
@@ -570,7 +568,7 @@ class RepoRegistration(Registration):
         assert query['facility']['name'] == facility
 
         # may want to iterate over all clusters rather than what clusters a facility has purchased into
-        # so that say preemptable jobs are allowed
+        # so that preemptable jobs are allowed
         clusters = query['facility']['computepurchases']
     
         # determine total shares for facility
@@ -596,14 +594,11 @@ class RepoRegistration(Registration):
           this_allocation_percent = 0
           this_cpus = 0
           this_mem = 0
-          qos = 'preemptable'
-          default_qos = 'preemptable'
-          normal_qos = None
 
           alloc_defined = True
           try:
 
-          # work out the cpus and mem for this repo
+            # work out the cpus and mem for this repo
             this_allocation_percent = _get_recent( query['repo']['currentComputeAllocations'], 'percentOfFacility', partition )
             this_purchased = _get_recent( clusters, 'purchased', partition )
             # set the slurm shares equal to teh number of cores
@@ -619,19 +614,12 @@ class RepoRegistration(Registration):
             this_gpus = this_node_gpu * this_purchased * this_allocation_percent / 100.
             this_mem = this_node_mem * this_purchased * this_allocation_percent / 100. * 1024
   
-            # determin 'normal' qos name
-            normal_qos = f"{facility.lower()}:{repo.lower()}^normal@{partition.lower()}"
-
           except LookupError as e:
             self.LOG.warning(f"ignoring cluster {partition} as no allocation defined for repo {facility}:{repo}")
             alloc_defined = False
 
           except NotImplementedError as e:
             self.LOG.warning(f"Could not determine slurm settings: {e}")
-
-          if not repo == 'default' and this_purchased > 0:
-            qos = f'{normal_qos},preemptable'
-            default_qos = f'{normal_qos}'
 
           if alloc_defined:
               data[partition] = {
@@ -642,67 +630,83 @@ class RepoRegistration(Registration):
                 'cpus': int(this_cpus),
                 'gpus': int(this_gpus),
                 'mem': this_mem,
-                'qos': qos,
-                'normal_qos': normal_qos,
-                'default_qos': default_qos,
               }
         # end loop
 
         # configure the slurm account
-        runner = self.run_playbook( 'coact/slurm-account.yaml', facility=facility, repo=repo, shares=facility_shares )
-        #self.LOG.info(f"{playbook} output: {runner}")
+        #runner = self.run_playbook( 'coact/slurm/ensure-repo.yaml', facility=facility, repo=repo, partitions=data.keys(), shares=facility_shares )
+        #self.LOG.info(f"coact/slurm/ensure-repo.yaml: {runner}")
 
-        # treat rubin differently due to multipartitions requirement (for now)
-        if facility.lower() in ('rubin',):
-          # just sum up resources for now
-          this_data = {'cpus': 0, 'mem': 0, 'gpus': 0}
-          for partition, d in data.items():
-            normal_qos = f"{facility.lower()}:{repo.lower()}^normal"
-            this_data['cpus'] += d['cpus']
-            this_data['mem'] += d['mem']
-            this_data['qos'] = f"{normal_qos},preemptable" if not repo.lower() == 'default' else 'preemptable'
-            this_data['normal_qos'] = normal_qos
-            this_data['default_qos'] = normal_qos if not repo.lower() == 'default' else 'preemptable'
-          qos_runner = self.run_playbook( 'coact/slurm-qos.yaml', qos=this_data['normal_qos'], cpus=this_data['cpus'], gpus=this_data['gpus'], memory=this_data['mem'] ) 
-          accounts_runner = self.run_playbook( 'coact/slurm-users.yaml', user=user, users=users, facility=facility, repo=repo, defaultqos=this_data['default_qos'], qos=this_data['qos'], add_user=add_user )
+        # set permissions, limits and partitions in slurm for this repo
+        for cluster, d in data.items():
 
-        else:
-          # set permissions, limits and partitions in slurm for this repo
-          for partition, d in data.items():
+          # skip cluster if we only care about partition
+          if partition and not partition == cluster:
+              continue
 
-            self.LOG.info(f"processing {partition} wth {d}")
-            # commit qos to slurm
-            qos_runner = self.run_playbook( 'coact/slurm-qos.yaml', qos=d['normal_qos'], cpus=d['cpus'], gpus=d['gpus'], memory=d['mem'] )
+          self.LOG.info(f"processing {cluster} wth {d}")
+          # commit qos to slur
+          cluster_runner = self.run_playbook( 'coact/slurm/ensure-repo.yaml', partition=cluster, cpus=d['cpus'], gpus=d['gpus'], memory=d['mem'], nodes=d['purchased'] )
 
-            # setup slurm accounts
-            accounts_runner = self.run_playbook( 'coact/slurm-users-partition.yaml', user=user, users=users, facility=facility, repo=repo, partition=partition, defaultqos=d['default_qos'], qos=d['qos'], add_user=add_user )
-            #self.LOG.info(f"{playbook} output: {runner}")
+        # setup users
+        if users and len(users) > 0:
+          accounts_runner = self.run_playbook( 'coact/slurm/ensure-users.yaml', users=users, facility=facility, repo=repo, partitionss=data.keys(), action=action )
+          self.LOG.info(f"{playbook} output: {runner}")
 
         # TODO purge removed clusters
 
         return clusters
 
 
-    def do_repo_membership( self, user: str, repo: str, facility: str, add_user: bool=False, playbook: str="coact/slurm-users-partition.yaml" ) -> bool:
+    def do_repo_membership( self, user: str, repo: str, facility: str, action: str ) -> bool:
         """Update the list of members for this Repo"""
 
-        # fetch for the list of all users for the repo
-        runner = self.back_channel.execute( self.REPO_USERS_GQL, { 'repo': {'facility': facility, 'name': repo }} )
-        users = runner['repo']['users']
+        # fetch list of current clusters/partitions for repo
+        REPO_CURRENT_CLUSTERS_CGL = gql("""
+            query repo( $facility: String!, $repo: String! ) {
+              repo(filter: {facility: $facility, name: $repo}) {
+                clusters: currentComputeAllocations {
+                  name: clustername
+                }
+              }
+            }
+            """)
+        runner = self.back_channel.execute( REPO_CURRENT_CLUSTERS_CGL, { 'facility': facility, 'repo': repo } )
+        #self.LOG.info(f"cluster: {runner}")
+        partitions = [ cluster['name'] for cluster in runner['repo']['clusters'] ]
 
-        users_str = ','.join(users)
-        self.LOG.info(f"setting account {facility}:{repo} with users {users_str}")
+        self.LOG.info(f"{action} on user {user} account {facility}:{repo} on partitions {partitions}")
 
-        # setup slurm
-        clusters = self.sync_slurm_associations( users=users_str, repo=repo, facility=facility, user=user, add_user=add_user )
+        # better to do full sync?
+
+        assert action in [ 'present', 'absent' ]
 
         # add user into repo back in coact
-        if add_user:
-          add_user_req = {
-            "repo": { "name": repo, "facility": facility },
-            "user": { "username": user }
-          }
-          self.back_channel.execute( self.REPO_APPEND_USER_GQL, add_user_req ) 
+        user_req = {
+          "repo": { "name": repo, "facility": facility },
+          "user": { "username": user }
+        }
+
+        runner = self.run_playbook( 'coact/slurm/ensure-users.yaml', users=user, facility=facility, repo=repo, partitions=','.join(partitions), state=action )
+        #self.LOG.info(f"=> {runner}")
+        # TODO: check runner status? or just except?
+
+        if action == 'present':
+          REPO_APPEND_USER_GQL = gql("""
+            mutation repoAppendMember($repo: RepoInput!, $user: UserInput!) {
+              repoAppendMember(repo: $repo, user: $user) {
+                  Id
+              }
+            }""")
+          self.back_channel.execute( REPO_APPEND_USER_GQL, user_req ) 
+        elif action == 'absent':
+          REPO_REMOVE_USER_GQL = gql("""
+            mutation repoRemoveMember($repo: RepoInput!, $user: UserInput!) {
+              repoRemoveMember(repo: $repo, user: $user) {
+                  Id
+              }
+            }""")
+          self.back_channel.execute( REPO_REMOVE_USER_GQL, user_req ) 
 
         return True
 
