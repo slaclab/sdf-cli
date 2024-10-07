@@ -413,6 +413,9 @@ class RepoRegistration(Registration):
 
     def do_new_repo( self, repo: str, facility: str, principal: str, default_repo_allocation_percent=0, repo_allocation_start=pdl.today().in_tz('UTC'), repo_allocation_end_delta=pdl.duration(years=5) ) -> bool:
 
+        # run the facility tasks for this repo
+        runner = self.run_playbook( "coact/add_repo.yaml", facility=facility, repo=repo )
+
         leaders = [ principal, ]
         users = [ principal, ]
 
@@ -508,7 +511,9 @@ class RepoRegistration(Registration):
         r = resources.pop(0)
 
         # enact it through slurm
-        resp = self.run_playbook( 'coact/slurm/ensure-repo.yaml', facility=facility, repo=repo, partition=cluster, cpus=int(r['cpus']), memory=int(r['memory'])*1024, nodes=int(ceil(r['nodes'])), gpus=int(r['gpus']), state='present' )
+        ensure_repos = self.run_playbook( 'coact/slurm/ensure-repo.yaml', facility=facility, repo=repo, partition=cluster, cpus=int(r['cpus']), memory=int(r['memory'])*1024, nodes=int(ceil(r['nodes'])), gpus=int(r['gpus']), state='present' )
+        # sync users
+        ensure_users = self.run_playbook( 'coact/slurm/ensure-users.yaml', users=','.join(repo_obj['uers']), facility=facility, repo=repo, partitions=cluster, state='sync' )
 
         return True
 
@@ -532,7 +537,7 @@ class RepoRegistration(Registration):
             }
             """)
         runner = self.back_channel.execute( REPO_CURRENT_CLUSTERS_CGL, { 'facility': facility, 'repo': repo } )
-        #self.LOG.info(f"cluster: {runner}")
+        self.LOG.info(f"cluster: {runner}")
         partitions = [ cluster['name'] for cluster in runner['repo']['clusters'] ]
 
         self.LOG.info(f"{action} on user {user} account {facility}:{repo} on partitions {partitions}")
@@ -546,9 +551,8 @@ class RepoRegistration(Registration):
           "repo": { "name": repo, "facility": facility },
           "user": { "username": user }
         }
-
-        runner = self.run_playbook( 'coact/slurm/ensure-users.yaml', users=user, facility=facility, repo=repo, partitions=','.join(partitions), state=action )
-        #self.LOG.info(f"=> {runner}")
+        if len( partitions ):
+            runner = self.run_playbook( 'coact/slurm/ensure-users.yaml', users=user, facility=facility, repo=repo, partitions=','.join(partitions), state=action )
         # TODO: check runner status? or just except?
 
         if action == 'present':

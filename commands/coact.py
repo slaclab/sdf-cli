@@ -139,6 +139,9 @@ class SlurmRemap(Command):
             a = d['Partition'].split(',')[0]
             d['Partition'] = a
 
+        if '@' in d['Account']:
+            d['Account'], _ = d['Account'].split('@')
+
         if d['QOS'] in ( 'Unknown', ):
             d['QOS'] = 'normal'
 
@@ -165,6 +168,11 @@ class SlurmRemap(Command):
         elif d['User'] in ( 'dcesar', 'jytang', 'rafimah', ):
             d['Account'] = 'ad:beamphysics'
         elif d['User'] in ( 'kterao', 'kvtsang', 'anoronyo', 'bkroul', 'zhulcher', 'koh0207', 'drielsma', 'lkashur', 'dcarber', 'amogan', 'cyifan', 'yjwa', 'aj14' , 'jdyer', 'sindhuk', 'justinjm', 'mrmooney', 'bearc', 'fuhaoji', 'sfogarty', 'carsmith', 'yuntse') and not d['Account'] in ( 'neutrino:ml-dev', 'neutrino:icarus-ml', 'neutrino:slacube', 'neutrino:dune-ml' ):
+            d['Account'] = 'neutrino:default'
+            d['Partition'] = 'ampere'
+        elif d['User'] in ('dougl215','zhezhang'): # and d['Account'] in ('ampere:default',):
+            #self.LOG.error("HERE")
+            d['Account'] = 'mli:default'
             d['Account'] = 'neutrino:default'
             d['Partition'] = 'ampere'
         elif d['User'] in ('dougl215','zhezhang'): # and d['Account'] in ('ampere:default',):
@@ -335,9 +343,9 @@ class SlurmImport(Command,GraphQlClient):
 
     def get_alloc_id( self, facility: str, repo: str, cluster: str, time: pdl.DateTime ) -> str:
         key = ( facility, repo, cluster )
-        #self.LOG.info(f'looking for key {key} from {self._allocid}')
+        #self.LOG.info(f'looking for key {key}') # from {self._allocid}')
         if key in self._allocid:
-            self.LOG.debug(f'  find alloc for {key}')
+            #self.LOG.info(f'  find alloc for {key}')
             # go through time ranges to determine actual Id
             time_ranges = self._allocid[key]
             for t, _id in time_ranges.items():
@@ -535,8 +543,6 @@ class Overage(Command, GraphQlClient):
     'Recalcuate the usage numbers from slurm jobs in Coact'
     LOG = logging.getLogger(__name__)
 
-    per_window_template = Template('''_$key: facilityRecentComputeUsage(pastMinutes:$minutes) { clustername facility percentUsed }''')
-
     def get_parser(self, prog_name):
         p = super(Overage, self).get_parser(prog_name)
         p.add_argument('--date', help='recalculate jobs from this date', default='2023-10-18')
@@ -544,86 +550,151 @@ class Overage(Command, GraphQlClient):
         p.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
         p.add_argument('--password-file', help='basic auth password for graphql service', required=True)
         p.add_argument('--windows', help='time windows to collate overage calculations', type=int, nargs='+', required=False, default=[ 15, 60, 10080, 43800 ] )
+        p.add_argument('--threshold', help='percentage at which to be considered over allocatoin', type=float, required=False, default=100. )
+        p.add_argument('--dry-run', help='do not actually enforce job holding', required=False, action='store_true', default=False )
         return p
 
-    def take_action(self, parsed_args):
-        self.verbose = parsed_args.verbose
-        self.windows = parsed_args.windows
+    def time_function( func, level='info' ):
+        def wrap_function(*args, **kwargs):
+            s = timer()
+            result = func(*args, **kwargs) 
+            e = timer()
+            getattr( args[0].LOG, level )( f"function {func.__name__!r} executed in {(e-s):.2f}s" )
+            return result
+        return wrap_function
+
+    @time_function
+    def get_data(self, username: str, password_file: str, windows: List[str], timeout: int=300, per_window_template: Template=Template('''_$key: facilityRecentComputeUsage(pastMinutes:$minutes) { cluster: clustername, facility, percentUsed }''')) -> dict:
         self.LOG.info(f"fetching windows {self.windows}")
         all_windows = []
-        for w in self.windows:
-            all_windows.append( self.per_window_template.safe_substitute(minutes=w,key=f"{w:0>6}") )
+        for w in windows:
+            all_windows.append( per_window_template.safe_substitute(minutes=w,key=f"{w:0>6}") )
         self.LOG.debug( f"{all_windows}" )
 
-        self.back_channel = self.connect_graph_ql( username=parsed_args.username, password_file=parsed_args.password_file, timeout=300 )
-        s = timer()
-        result = self.back_channel.execute( 
-            gql('query usage {' + '\n'.join(all_windows) + '}')
-        )
-        #assert result['jobsAggregateForDate']['status'] == True
-        self.LOG.debug( f"OUT: {result}" )
-        facility = {} # facility -> clustername
+        self.back_channel = self.connect_graph_ql( username=username, password_file=password_file, timeout=timeout )
+        query = 'query usage {'
+        query += '\n'.join(all_windows) + ',\n'
+        query += 'repos { facility, allocs: currentComputeAllocations { cluster: clustername, start, end } }'
+        query += '\n}'
+
+        self.LOG.debug( f"querying: {query}" )
+        result = self.back_channel.execute( gql(query) )
+        self.LOG.debug( f"returned: {result}" )
+        return self.format_data( result )
+
+
+    def format_data( self, result: dict ) -> dict: 
+        # keep current state of whether the facility is held of not in this dict, key is facility name
+        # use current[facility][cluster] = { held: bool, percentUsed: [] }
+        current = {}
+
+        # prime list of all facilities
+        for k in result['repos']:
+            f = k['facility'].lower()
+            if not f in current:
+                current[f] = {}
+            for item in k['allocs']:
+                c = item['cluster'].lower() 
+                current[f][c] = { 'held': None, 'percentUsed': [] }
+        # purge the facility query from results so we can iterate the usages
+        del result['repos']
+
         for time, array in result.items():
+            self.LOG.debug(f"looking at time {time} with {array}")
             for a in array:
                 f = a['facility'].lower()
-                if not f in facility:
-                    facility[f] = {}
-                if not a['clustername'] in facility[f]:
-                    facility[f][ a['clustername'] ] = []
-                facility[f][ a['clustername'] ].append( int(a['percentUsed']) )
+                c = a['cluster'].lower()
+                self.LOG.debug(f" setting {f} {c} to {a['percentUsed']}")
+                current[f][c]['percentUsed'].append( int(a['percentUsed']) )
 
-        self.LOG.debug(f"overages: {facility}")
+        self.LOG.debug(f"overages: {current}")
 
-        # lets get all the current qos settings
-        current = {}
-        cmd = "sacctmgr show qos format=name%35,GrpTRES%50 --noheader"
+        # determine current hold state
+        # create list of top level assocations to query
+        list_of_assoc = []
+        for f in current.keys():
+            for c in current[f].keys():
+               list_of_assoc.append( f"{f}:_regular_@{c}" )
+        cmd = f"sacctmgr show assoc where account={','.join(list_of_assoc)} --noheader -P format=Account,GrpNodes,GrpJobs,MaxJobs"
+        self.LOG.debug(f"getting hold states using '{cmd}'...")
         for l in subprocess.check_output(cmd.split()).split(b'\n'): #, capture_output=True, text=True)
+            this = str(l, encoding='utf-8').strip().split('|')
             try:
-                out = str(l).strip().split()
-                qos = out[1]
-                tres = out[2]
-                holding = False
-                if 'node' in tres:
-                    holding = True
-                m = re.match( r"(?P<facility>\S+):(?P<repo>\S+)\^(?P<qos>\S+)@(?P<cluster>\S+)", qos )
+                m = re.match( r"^(?P<f>\S+):(?P<r>\S+)@(?P<c>\S+)$", this[0] )
+                holding = True if this[1] == '0' else False
                 if m:
                     d = m.groupdict()
-                    f = d['facility'].lower()
-                    self.LOG.debug( f"{qos} {d} \t{tres} {holding}" )
-                    if not f in current:
-                        current[f] = {}
-                    #if not d['cluster'] in current[ d['facility'] ]:
-                    if d['qos'] in ('normal'):
-                        current[f][d['cluster']] = holding
-                        #self.LOG.debug(f" set {f} {d['cluster']} to {holding}")
+                    f = d['f']
+                    c = d['c']
+                    current[f][c]['held'] = holding
+                    self.LOG.debug(f" set {f}@{c} to {holding}")
             except:
                 pass
+        return current
 
-        template = Template("sacctmgr show qos format=name%35 | grep $facility | grep $cluster | grep normal | awk '{print $1}' | xargs -n1 -I%  sacctmgr -i modify qos % set GrpTRES=node=$nodes \t# held=$held over=$over change=$change\t$percentages" )
-
-        for fac, d in facility.items():
-             for clust, percentages in d.items():
-                 #self.LOG.debug( f"{fac}:\t{clust}\t{percentages}" )
+    @time_function
+    def overaged( self, data: dict, threshold: float=100. ) -> List[dict]:
+        self.LOG.debug(f"determining overages...")
+        for fac, d in data.items():
+             self.LOG.debug(f"looping facility {fac}...")
+             for clust, m in d.items():
+                 percentages = m['percentUsed']
+                 self.LOG.debug(f"sublooping {clust}, {percentages}")
                  over = False
                  for p in percentages:
-                     if p > 100.:
+                     if p > threshold:
                          over = True
                  values = ','.join( [ f"{i:>3}" for i in percentages ])
 
                  # only bother if the desired is not hte same as current
-                 self.LOG.debug(f"looking at {fac} {clust} {over}: {current[fac]} {current[fac][clust]}")
-                 held = current[fac][clust] if fac in current and clust in current[fac] else None
-                 change = not held == over
-                 token = f"{fac}^normal@{clust}"
-                 self.LOG.info( f"{token:28} held={held:1} over={over:1} change={change:1}   {values}" )
-                 if change:
-                     self.LOG.info(f"change hold state of {fac}^normal@{clust} to {over}")
-                     print( template.safe_substitute( facility=fac.lower(), cluster=clust, nodes=0 if over else -1, percentages=percentages, held=held, over=over, change=change ) )
-                     
+                 self.LOG.debug(f"looking at {fac}@{clust} over: {over}, {m}")
+                 change = not m['held'] == over
+                 if m['held'] == None:
+                     change = False
+                 if len(percentages) > 0:
+                     self.LOG.info( f"{fac:16} {clust:12} held={m['held'] if not m['held'] == None else '-':1} over={over:1} change={change:1}   {values}" )
+                 if not m['held'] == None and change:
+                     yield { 'facility': fac.lower(), 'cluster': clust.lower(), 'percentages': percentages, 'held': m['held'], 'over': over, 'change': change }
+        return
 
-        e = timer()
-        duration = e - s
-        self.LOG.debug( f"overage determined in {duration:,.02f}s" )
+    @time_function
+    def toggle_job_blocking( self, template: Template=Template("sacctmgr modify -i account name=$facility:_regular_@$cluster set GrpTRES=node=$nodes" ), execute: bool=False, **xargs ) -> bool:
+        xargs['nodes'] = 0 if xargs['over'] else -1 # clear with -1, set to zero to block new jobs
+        self.LOG.info(f"{xargs['facility']} job holding must be toggled... {execute}" )
+        cmd = template.safe_substitute(**xargs)
+        print( cmd )
+        if execute:
+            for l in subprocess.check_output(cmd.split()).split(b'\n'):
+                self.LOG.debug(f"{l}")
+
+        return True
+
+
+    @time_function
+    def take_action(self, parsed_args):
+        self.verbose = parsed_args.verbose
+        self.windows = parsed_args.windows
+
+        # fetch the meta + data for overage calculations
+        data = self.get_data( username=parsed_args.username, password_file=parsed_args.password_file, windows=self.windows )
+        self.LOG.debug( f"returned: {data}" )
+
+        # spit out the command for each facility that is overaged
+        for facility_over in self.overaged( data, threshold=parsed_args.threshold ):
+            self.toggle_job_blocking( execute=False if parsed_args.dry_run == True else True, **facility_over )
+
+#        def allocation_class( str: name ) -> str:
+#             alloc_class = {
+#                 'normal': '_regular_',
+#                 'onshift': '_regular_',
+#                 'offshift': '_regular_',
+#                 'preemptable': '_preemptable_'
+#             }
+#             if name in alloc_class:
+#                 return alloc_class[name]
+#             return None
+#
+#
         return True
         
 
