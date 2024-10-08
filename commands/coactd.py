@@ -513,7 +513,7 @@ class RepoRegistration(Registration):
         # enact it through slurm
         ensure_repos = self.run_playbook( 'coact/slurm/ensure-repo.yaml', facility=facility, repo=repo, partition=cluster, cpus=int(r['cpus']), memory=int(r['memory'])*1024, nodes=int(ceil(r['nodes'])), gpus=int(r['gpus']), state='present' )
         # sync users
-        ensure_users = self.run_playbook( 'coact/slurm/ensure-users.yaml', users=','.join(repo_obj['uers']), facility=facility, repo=repo, partitions=cluster, state='sync' )
+        ensure_users = self.run_playbook( 'coact/slurm/ensure-users.yaml', users=','.join(repo_obj['users']), facility=facility, repo=repo, partitions=cluster, state='sync' )
 
         return True
 
