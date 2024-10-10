@@ -13,6 +13,9 @@ RUN dnf install -y dnf-plugins-core
 RUN dnf config-manager --add-repo https://rpm.releases.hashicorp.com/fedora/hashicorp.repo
 RUN dnf -y install vault
 
+# resolve "operation not permitted" vault error https://github.com/hashicorp/vault/issues/10924
+RUN setcap -r /usr/bin/vault
+
 # build env
 FROM deps AS build_1
 COPY . ./
