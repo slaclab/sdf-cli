@@ -19,6 +19,7 @@ COPY . ./
 RUN make environment
 
 # build sdf protected assets
-#FROM build_1 AS build_2
+FROM build_1 AS build_2
+RUN echo "building protected assets"
 #RUN make update-sdf-ansible
 #RUN make get-secrets
