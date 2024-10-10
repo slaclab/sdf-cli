@@ -33,3 +33,10 @@ update-sdf-ansible:
 	git submodule update --init --recursive
 
 apply: environment get-secrets update-sdf-ansible
+
+# Docker
+docker_build:
+	docker build --platform linux/amd64 --tag sdf-cli .
+
+docker_run_it: docker_build
+	docker run --tag sdf-cli -it bash
