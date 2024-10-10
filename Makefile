@@ -23,8 +23,8 @@ pip:
 
 # OS level dependencies
 deps:
+	dnf install -y python3-devel openldap-devel
 	dnf groupinstall -y "Development Tools"
-	dnf install -y python36-devel openldap-devel
 
 # run this to configure the dev environment
 environment: venv pip
@@ -36,7 +36,7 @@ apply: environment get-secrets update-sdf-ansible
 
 # Docker
 docker_build:
-	docker build --platform linux/amd64 --tag sdf-cli .
+	docker build --platform=linux/amd64 --tag sdf-cli .
 
 docker_run_it: docker_build
-	docker run --tag sdf-cli -it bash
+	docker run --platform=linux/amd64 -it sdf-cli bash
