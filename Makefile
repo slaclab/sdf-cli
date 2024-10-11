@@ -37,10 +37,13 @@ apply: environment get-secrets update-sdf-ansible
 
 # Docker
 docker_build:
-	docker build --platform=linux/amd64 --tag sdf-cli .
+	docker build --platform=linux/amd64 --tag slaclab/sdf-cli .
 
 docker_build_no_cache:
-	docker build --no-cache --platform=linux/amd64 --tag sdf-cli .
+	docker build --no-cache --platform=linux/amd64 --tag slaclab/sdf-cli .
 
 docker_run_it: docker_build
-	docker run --platform=linux/amd64 -it sdf-cli bash
+	docker run --platform=linux/amd64 -it slaclab/sdf-cli bash
+
+docker_push: docker_build
+	docker push slaclab/sdf-cli
