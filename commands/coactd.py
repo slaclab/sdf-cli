@@ -565,8 +565,8 @@ class RepoRegistration(Registration):
           self.back_channel.execute( REPO_APPEND_USER_GQL, user_req ) 
         elif action == 'absent':
           REPO_REMOVE_USER_GQL = gql("""
-            mutation repoRemoveMember($repo: RepoInput!, $user: UserInput!) {
-              repoRemoveMember(repo: $repo, user: $user) {
+            mutation repoRemoveUser($repo: RepoInput!, $user: UserInput!) {
+              repoRemoveUser(repo: $repo, user: $user) {
                   Id
               }
             }""")
