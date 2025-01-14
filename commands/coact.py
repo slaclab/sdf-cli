@@ -132,7 +132,7 @@ class SlurmRemap(Command):
     def remap_job( self, d ):
         # deal with rubin multi partition
 
-        if d['Account'] in ( 'shared', 'shared:default' ) or d['User'] in ( 'jonl', 'vanilla', 'yemi', 'yangw', 'pav', 'root', 'reranna', 'ppascual', 'renata'):
+        if d['Account'] in ( 'shared', 'shared:default' ) or d['Account'].startswith('shared') or d['User'] in ( 'jonl', 'vanilla', 'yemi', 'yangw', 'pav', 'root', 'reranna', 'ppascual', 'renata'):
             return None
 
         if ',' in d['Partition']:
