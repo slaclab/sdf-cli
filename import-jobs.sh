@@ -1,5 +1,6 @@
 #!/bin/bash
 
+export PATH=$PATH:/opt/slurm/slurm-curr/bin
 export SDF_COACT_URI=coact.slac.stanford.edu:443/graphql-service
 
 PASSWORD_FILE=./etc/.secrets/password
