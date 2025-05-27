@@ -510,8 +510,13 @@ class RepoRegistration(Registration):
           raise Exception("Could not determine allocation resources")
         r = resources.pop(0)
 
+        # TODO: determine allowable qos from Coact
+        qoses = ( 'preemptable', 'normal' )
+        if facility.lower() in ( 'rubin', ): # TODO: lcls, but only if its active
+            qoses.append( 'expedite' )
+
         # enact it through slurm
-        ensure_repos = self.run_playbook( 'coact/slurm/ensure-repo.yaml', facility=facility, repo=repo, partition=cluster, cpus=int(r['cpus']), memory=int(r['memory'])*1024, nodes=int(ceil(r['nodes'])), gpus=int(r['gpus']), state='present' )
+        ensure_repos = self.run_playbook( 'coact/slurm/ensure-repo.yaml', facility=facility, repo=repo, partition=cluster, cpus=int(r['cpus']), memory=int(r['memory'])*1024, nodes=int(ceil(r['nodes'])), gpus=int(r['gpus']), qos=','.join(qoses), state='present' )
         # sync users
         ensure_users = self.run_playbook( 'coact/slurm/ensure-users.yaml', users=','.join(repo_obj['users']), facility=facility, repo=repo, partitions=cluster, state='sync' )
 
