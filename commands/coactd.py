@@ -43,21 +43,25 @@ class RequestStatus(str,Enum):
 class AnsibleRunner():
     LOG = logging.getLogger(__name__) 
     ident = None # use this to create a directory for the ansible run output of the same name (eg the coact request id)
-    def run_playbook(self, playbook: str, private_data_dir: str = COACT_ANSIBLE_RUNNER_PATH, tags: str = 'all', **kwargs) -> ansible_runner.runner.Runner:
+    def run_playbook(self, playbook: str, private_data_dir: str = COACT_ANSIBLE_RUNNER_PATH, tags: str = 'all', dry_run: bool = False, **kwargs) -> ansible_runner.runner.Runner:
         name = Path(playbook).name
-        r = ansible_runner.run( 
-            private_data_dir=private_data_dir,
-            playbook=playbook, 
-            tags=tags, 
-            extravars=kwargs,
-            suppress_env_files=True, # do not write out arguments to disk
-            ident=f'{self.ident}_{name}:{tags}',
-            cancel_callback=lambda: None
-        )
-        self.LOG.debug(r.stats)
-        if not r.rc == 0:
-            raise Exception(f"AnsibleRunner failed")
-        return r
+        if not dry_run:
+            r = ansible_runner.run( 
+                private_data_dir=private_data_dir,
+                playbook=playbook, 
+                tags=tags, 
+                extravars=kwargs,
+                suppress_env_files=True, # do not write out arguments to disk
+                ident=f'{self.ident}_{name}:{tags}',
+                cancel_callback=lambda: None
+            )
+            self.LOG.debug(r.stats)
+            if not r.rc == 0:
+                raise Exception(f"AnsibleRunner failed")
+            return r
+        else:
+            self.LOG.warn(f"not running playbook {playbook}")
+            return None
     def playbook_events(self,runner: ansible_runner.runner.Runner) -> dict:
         for e in runner.events:
             if 'event_data' in e:
@@ -132,6 +136,7 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
         parser.add_argument('--username', help='basic auth username for graphql service', default='sdf-bot')
         parser.add_argument('--password-file', help='basic auth password for graphql service', required=True)
         parser.add_argument('--client-name', help='subscriber queue name to connect to', default=f'sdf-bot-{self.__class__.__name__}')
+        parser.add_argument('--dry-run', help='do not run any ansible playbooks', default=False, action='store_true' )
         return parser
 
     def take_action(self, parsed_args):
@@ -146,7 +151,7 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
 
                 if req_type in self.request_types:
 
-                    result = self.do( req_id, op_type, req_type, approval, req )
+                    result = self.do( req_id, op_type, req_type, approval, req, dry_run=parsed_args.dry_run )
                     if result:
                         self.LOG.info(f"Marking request {req_id} complete")
                         self.markCompleteRequest( req, f'Request {self.ident} completed' )
@@ -166,7 +171,7 @@ class Registration(Command, GraphQlSubscriber, AnsibleRunner):
                 self.LOG.exception(f"Error processing {req_id}: {e} in {duration:,.02f}s")
         
 
-    def do(self, req_id: str, op_type: Any, req_type: Any, approval: str, req: dict) -> bool:
+    def do(self, req_id: str, op_type: Any, req_type: Any, approval: str, req: dict, dry_run: bool ) -> bool:
         raise NotImplementedError('do() is abstract')
         return False
 
@@ -203,7 +208,7 @@ class UserRegistration(Registration):
         }
         """)
 
-    def do(self, req_id, op_type, req_type, approval, req):
+    def do(self, req_id, op_type, req_type, approval, req, dry_run):
 
         user = req.get('preferredUserName', None)
         facility = req.get('facilityname', None)
@@ -298,7 +303,7 @@ class UserRegistration(Registration):
 
 class RepoRegistration(Registration):
     'workflow for repo maintenance'
-    request_types = [ 'NewRepo', 'RepoMembership', 'RepoRemoveUser', 'RepoChangeComputeRequirement', 'RepoComputeAllocation' ]
+    request_types = [ 'NewRepo', 'RepoMembership', 'RepoRemoveUser', 'RepoChangeComputeRequirement', 'RepoComputeAllocation', 'RepoUpdateFeature' ]
 
     REPO_USERS_GQL = gql("""
       query getRepoUsers ( $repo: RepoInput! ) {
@@ -330,6 +335,11 @@ class RepoRegistration(Registration):
             name
             facility
             users
+            features {
+              name
+              options
+              state
+            }
             computerequirement
             currentComputeAllocations {
               Id
@@ -375,7 +385,7 @@ class RepoRegistration(Registration):
         }
         """)
 
-    def do(self, req_id, op_type, req_type, approval, req):
+    def do(self, req_id, op_type, req_type, approval, req, dry_run):
 
         user = req.get('username', None)
         repo = req.get('reponame', None)
@@ -391,7 +401,7 @@ class RepoRegistration(Registration):
             elif req_type in ('RepoMembership','RepoRemoveUser'):
                 action = 'present' if req_type == 'RepoMembership' else 'absent'
                 assert user and repo and facility
-                return self.do_repo_membership( user=user, repo=repo, facility=facility, action=action )
+                return self.do_repo_membership( user=user, repo=repo, facility=facility, action=action, dry_run=dry_run )
 
             elif req_type == 'RepoComputeAllocation':
                 clustername = req.get('clustername', None)
@@ -402,12 +412,16 @@ class RepoRegistration(Registration):
                 end = req.get('end', None)
                 if not end == None:
                     end = pdl.parse( end, timezone='UTC' )
-                return self.do_repo_compute_allocation( repo, facility, clustername, percent, allocated, start, end )
+                return self.do_repo_compute_allocation( repo, facility, clustername, percent, allocated, start, end, dry_run=dry_run )
 
             elif req_type == 'RepoChangeComputeRequirement':
                 requirement = req.get('computerequirement', None)
                 assert repo and facility and requirement
                 return self.do_compute_requirement( repo, facility, requirement )
+
+            elif req_type == 'RepoUpdateFeature':
+                return self.do_feature( repo, facility )
+
 
         return None
 
@@ -427,6 +441,10 @@ class RepoRegistration(Registration):
                 'principal': principal,
                 'leaders': leaders,
                 'users': users,
+                # default features
+                'features': { 
+                    'slurm': { 'state': True, 'options': [] }
+                }
             }
         }
         self.LOG.info(f"upserting repo record {repo_create_req}")
@@ -442,7 +460,7 @@ class RepoRegistration(Registration):
 
         return True
 
-    def upsert_repo_compute_allocation( self, repo_id: str, cluster: str, percent: int, allocated_resource: float, start: pdl.DateTime, end: Optional[str], default_end_delta=pdl.duration(years=5) ):
+    def upsert_repo_compute_allocation( self, repo_id: str, cluster: str, percent: int, allocated_resource: float, start: pdl.DateTime, end: Optional[str], default_end_delta=pdl.duration(years=5), dry_run: bool = False ):
 
         # must have an end
         if not end or end == '':
@@ -482,7 +500,17 @@ class RepoRegistration(Registration):
         self.LOG.info(f'modified {resp}')
         return resp
 
-    def do_repo_compute_allocation( self, repo: str, facility: str, cluster: str, percent: int, allocated_resource: float, start: pdl.DateTime, end: Optional[str] ):
+    def get_feature( self, repo_obj, name ):
+        state = None
+        feature = None
+        for i in repo_obj['features']:
+            if 'name' in i and i['name'] == name:
+                state = i['state'] if 'state' in i else None
+                feature = i
+                break
+        return state, feature
+
+    def do_repo_compute_allocation( self, repo: str, facility: str, cluster: str, percent: int, allocated_resource: float, start: pdl.DateTime, end: Optional[str], dry_run: bool = False ):
         """Does all the necessary tasks to setup a new or existing Repo. Tasks include configuring slurm."""
         
         # determine information required to upsert the repo_compute_allocation record
@@ -494,28 +522,44 @@ class RepoRegistration(Registration):
           repo_obj = resp['repo']
           #self.LOG.info(f'  got {repo_obj}')
           assert facility == repo_obj['facility'] and repo == repo_obj['name'] 
+          assert 'features' in repo_obj
           return repo_obj
 
         repo_obj = _get_allocation_info()
 
-        # upsert the record
-        resp = self.upsert_repo_compute_allocation( repo_obj['Id'], cluster, percent, allocated_resource, start, end )
+        # validate that the slurm feature is enabled
+        enable_slurm, slurm_feature = self.get_feature( repo_obj, 'slurm' )
+        self.LOG.info(f"slurm feature for {facility}:{repo} enabled? {enable_slurm}: {slurm_feature}") 
+        if not enable_slurm:
+            # remove users
+            ensure_users = self.run_playbook( 'coact/slurm/ensure-users.yaml', users=','.join(repo_obj['users']), facility=facility, repo=repo, partitions=cluster, state='absent', dry_run=dry_run )
+            # remove the account
+            # TODO: iterate through all partitions?
+            # TODO: this stalls?
+            ensure_repos = self.run_playbook( 'coact/slurm/ensure-repo.yaml', facility=facility, repo=repo, partition=cluster, state='absent', dry_run=dry_run )
 
-        # fetch it again to obtain the correct resources with teh new percentage
-        repo_obj = _get_allocation_info()
-        # determine the alloc resources for this partition
-        resources = [ alloc for alloc in repo_obj['currentComputeAllocations'] if 'clustername' in alloc and alloc['clustername'] == cluster ]
-        # deal with multiple allocs for same cluster?
-        if not len(resources) == 1:
-          raise Exception("Could not determine allocation resources")
-        r = resources.pop(0)
+            return True
 
-        # enact it through slurm
-        ensure_repos = self.run_playbook( 'coact/slurm/ensure-repo.yaml', facility=facility, repo=repo, partition=cluster, cpus=int(r['cpus']), memory=int(r['memory'])*1024, nodes=int(ceil(r['nodes'])), gpus=int(r['gpus']), state='present' )
-        # sync users
-        ensure_users = self.run_playbook( 'coact/slurm/ensure-users.yaml', users=','.join(repo_obj['users']), facility=facility, repo=repo, partitions=cluster, state='sync' )
+        else:
 
-        return True
+            # upsert the record
+            resp = self.upsert_repo_compute_allocation( repo_obj['Id'], cluster, percent, allocated_resource, start, end )
+
+            # fetch it again to obtain the correct resources with teh new percentage
+            repo_obj = _get_allocation_info()
+            # determine the alloc resources for this partition
+            resources = [ alloc for alloc in repo_obj['currentComputeAllocations'] if 'clustername' in alloc and alloc['clustername'] == cluster ]
+            # deal with multiple allocs for same cluster?
+            if not len(resources) == 1:
+                raise Exception("Could not determine allocation resources")
+            r = resources.pop(0)
+
+            # enact it through slurm
+            ensure_repos = self.run_playbook( 'coact/slurm/ensure-repo.yaml', facility=facility, repo=repo, partition=cluster, cpus=int(r['cpus']), memory=int(r['memory'])*1024, nodes=int(ceil(r['nodes'])), gpus=int(r['gpus']), state='present', dry_run=dry_run )
+            # sync users
+            ensure_users = self.run_playbook( 'coact/slurm/ensure-users.yaml', users=','.join(repo_obj['users']), facility=facility, repo=repo, partitions=cluster, state='sync', dry_run=dry_run )
+
+            return True
 
     def get_account_name( self, facility: str, repo: str ) -> str:
         account_name = f'{facility}:{repo}'.lower()
@@ -523,7 +567,7 @@ class RepoRegistration(Registration):
             account_name = f'{facility}'.lower()
         return account_name
 
-    def do_repo_membership( self, user: str, repo: str, facility: str, action: str ) -> bool:
+    def do_repo_membership( self, user: str, repo: str, facility: str, action: str, dry_run: bool=False ) -> bool:
         """Update the list of members for this Repo"""
 
         # fetch list of current clusters/partitions for repo
@@ -533,28 +577,45 @@ class RepoRegistration(Registration):
                 clusters: currentComputeAllocations {
                   name: clustername
                 }
+                features {
+                  name
+                  state
+                  options
+                }
               }
             }
             """)
         runner = self.back_channel.execute( REPO_CURRENT_CLUSTERS_CGL, { 'facility': facility, 'repo': repo } )
-        self.LOG.info(f"cluster: {runner}")
-        partitions = [ cluster['name'] for cluster in runner['repo']['clusters'] ]
-
-        self.LOG.info(f"{action} on user {user} account {facility}:{repo} on partitions {partitions}")
-
-        # better to do full sync?
+        assert 'repo' in runner
+        this = runner['repo']
 
         assert action in [ 'present', 'absent' ]
 
+        # better to do full sync?
+
+        # do membership of slurm
+        enable_slurm, slurm_feature = self.get_feature( this, 'slurm')
+        partitions = [ cluster['name'] for cluster in this['clusters'] ]
+        self.LOG.info(f"slurm feature for {facility}:{repo} enabled? {enable_slurm}: {slurm_feature}")
+        if enable_slurm and len( partitions ):
+            self.LOG.info(f"{action} on user {user} account {facility}:{repo} on partitions {partitions}")
+            runner = self.run_playbook( 'coact/slurm/ensure-users.yaml', users=user, facility=facility, repo=repo, partitions=','.join(partitions), state=action, dry_run=dry_run)
+        # TODO: check runner status? or just except?
+
+        # do membership of netgroups
+        enable_netgroup, netgroup_feature = self.get_feature( this, 'netgroup' )
+        self.LOG.info(f"netgroup feature for {facility}:{repo} enabled? {enable_netgroup}: {netgroup_feature}")
+        if enable_netgroup:
+            raise NotImplementedError(f"netgroup support not yet implemented for {facility}:{repo} with {netgroup_feature}")
+            assert 'name' in netgroup_feature
+            runner = self.run_playbook( 'coact/netgroup/ensure-users.yaml', users=user, facility=facility, repo=repo, netgroup=netgroup_feature['name'], state=action, dry_run=dry_run)
+
+        # finish up and mark record
         # add user into repo back in coact
         user_req = {
           "repo": { "name": repo, "facility": facility },
           "user": { "username": user }
         }
-        if len( partitions ):
-            runner = self.run_playbook( 'coact/slurm/ensure-users.yaml', users=user, facility=facility, repo=repo, partitions=','.join(partitions), state=action )
-        # TODO: check runner status? or just except?
-
         if action == 'present':
           REPO_APPEND_USER_GQL = gql("""
             mutation repoAppendMember($repo: RepoInput!, $user: UserInput!) {
@@ -570,7 +631,11 @@ class RepoRegistration(Registration):
                   Id
               }
             }""")
-          self.back_channel.execute( REPO_REMOVE_USER_GQL, user_req ) 
+          try:
+              self.back_channel.execute( REPO_REMOVE_USER_GQL, user_req ) 
+          except Exception as e:
+              if not 'is not a user in repo' in str(e):
+                  raise e
 
         return True
 
@@ -631,6 +696,8 @@ class RepoRegistration(Registration):
         # 1) onshift to offshift
         # 
 
+    def do_feature( self, repo, facility, dry_run: bool=False ) -> bool:
+        raise NotImplementedError("do_feature not yet implemented")
 
 class Get(Command,GraphQlSubscriber):
     'just streams output from requests subscription'
