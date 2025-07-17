@@ -15,6 +15,7 @@ import smtplib
 from email.message import EmailMessage
 
 from gql import gql
+import json
 
 import ansible_runner
 
@@ -582,6 +583,7 @@ class RepoRegistration(Registration):
                   state
                   options
                 }
+                users
               }
             }
             """)
@@ -606,9 +608,13 @@ class RepoRegistration(Registration):
         enable_netgroup, netgroup_feature = self.get_feature( this, 'netgroup' )
         self.LOG.info(f"netgroup feature for {facility}:{repo} enabled? {enable_netgroup}: {netgroup_feature}")
         if enable_netgroup:
-            raise NotImplementedError(f"netgroup support not yet implemented for {facility}:{repo} with {netgroup_feature}")
-            assert 'name' in netgroup_feature
-            runner = self.run_playbook( 'coact/netgroup/ensure-users.yaml', users=user, facility=facility, repo=repo, netgroup=netgroup_feature['name'], state=action, dry_run=dry_run)
+            netgroup_name = None
+            for option in netgroup_feature['options']:
+                j = json.loads(option)
+                if 'name' in j:
+                    netgroup_name = j['name']
+            assert netgroup_name != None
+            runner = self.run_playbook( 'coact/netgroup.yaml', user=user, users=this['users'], name=netgroup_name, state=action, create=True, dry_run=dry_run)
 
         # finish up and mark record
         # add user into repo back in coact
