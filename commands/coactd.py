@@ -442,10 +442,6 @@ class RepoRegistration(Registration):
                 'principal': principal,
                 'leaders': leaders,
                 'users': users,
-                # default features
-                'features': { 
-                    'slurm': { 'state': True, 'options': [] }
-                }
             }
         }
         self.LOG.info(f"upserting repo record {repo_create_req}")
@@ -458,6 +454,17 @@ class RepoRegistration(Registration):
             """)
         repo_upserted = self.back_channel.execute( REPO_UPSERT_GQL, repo_create_req )
         repo_id = repo_upserted['repoUpsert']['Id']
+
+        feature_req = { 'repo': { 'Id': repo_id }}
+        self.LOG.info(f"FEATURE: {feature_req}")
+        FEATURE_UPSERT_GQL = gql("""
+            mutation repoUpsert($repo: RepoInput! ) {
+                repoAddNewFeature(repo: $repo, feature: { name: "slurm", state: true, options: [] }) {
+                    Id
+                }
+            }
+        """)
+        feature_upserted = self.back_channel.execute( FEATURE_UPSERT_GQL, feature_req )
 
         return True
 
