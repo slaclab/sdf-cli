@@ -237,7 +237,7 @@ class UserRegistration(Registration):
 
         return True
 
-    def do_new_user( self, user: str, eppn: str, facility: str, playbook: str="add_user.yaml" ) -> bool:
+    def do_new_user( self, user: str, eppn: str, facility: str, playbook: str="coact/add_user.yaml" ) -> bool:
 
         self.LOG.info(f"Creating user {user} at facility {facility} using {playbook}")
 
