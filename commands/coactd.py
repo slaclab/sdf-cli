@@ -459,7 +459,7 @@ class RepoRegistration(Registration):
         self.LOG.info(f"FEATURE: {feature_req}")
         FEATURE_UPSERT_GQL = gql("""
             mutation repoUpsert($repo: RepoInput! ) {
-                repoAddNewFeature(repo: $repo, feature: { name: "slurm", state: true, options: [] }) {
+                repoUpsertFeature(repo: $repo, feature: { name: "slurm", state: true, options: [] }) {
                     Id
                 }
             }

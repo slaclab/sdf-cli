@@ -642,7 +642,7 @@ class Overage(Command, GraphQlClient):
                  self.LOG.debug(f"sublooping {clust}, {percentages}")
                  over = False
                  for p in percentages:
-                     if p > threshold:
+                     if p >= threshold:
                          over = True
                  values = ','.join( [ f"{i:>3}" for i in percentages ])
 
