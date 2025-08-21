@@ -456,7 +456,6 @@ class RepoRegistration(Registration):
         repo_id = repo_upserted['repoUpsert']['Id']
 
         feature_req = { 'repo': { 'Id': repo_id }}
-        self.LOG.info(f"FEATURE: {feature_req}")
         FEATURE_UPSERT_GQL = gql("""
             mutation repoUpsert($repo: RepoInput! ) {
                 repoUpsertFeature(repo: $repo, feature: { name: "slurm", state: true, options: [] }) {
@@ -622,6 +621,22 @@ class RepoRegistration(Registration):
                     netgroup_name = j['name']
             assert netgroup_name != None
             runner = self.run_playbook( 'coact/netgroup.yaml', user=user, users=this['users'], name=netgroup_name, state=action, create=True, dry_run=dry_run)
+
+        # do membership of posixGroups
+        enable_posixgroup, posixgroup_feature = self.get_feature( this, 'posixgroup')
+        self.LOG.info(f"posixgroup feature for {facility}:{repo} enabled? {enable_posixgroup}: {posixgroup_feature}")
+        if enable_posixgroup:
+            posixgroup_name = None
+            gid_number = None
+            for option in posixgroup_feature['options']:
+                j = json.loads(option)
+                if 'name' in j:
+                    posixgroup_name = j['name']
+                if 'gidNumber' in j:
+                    gid_number = j['gidNumber']
+            assert posixgroup_name != None, f"posixgroup not configured in feature options"
+            assert gid_number != None, f"gidnumber not configured in feature options"
+            runner = self.run_playbook( 'coact/posixGroup.yaml', user=user, users=this['users'], groupName=posixgroup_name, gidNumber=gid_number, state=action, create=True, dry_run=dry_run)
 
         # finish up and mark record
         # add user into repo back in coact
