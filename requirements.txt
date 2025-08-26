@@ -1,3 +1,5 @@
+# requests pkg does not support urllib3 v2.0.0
+urllib3==1.26.15
 cliff==3.10.1
 #yarl
 #multidict

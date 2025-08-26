@@ -13,7 +13,7 @@ clean-secrets:
 	rm -rf etc/.secrets
 
 virtualenv:
-	python3 -m venv .
+	python3.11 -m venv .
 
 venv: virtualenv
 
@@ -23,8 +23,9 @@ pip:
 
 # OS level dependencies
 deps:
+#   note aiohttp won't build yet on python3.12 
+	dnf install -y python3.11-devel openldap-devel
 	dnf groupinstall -y "Development Tools"
-	dnf install -y python36-devel openldap-devel
 
 # run this to configure the dev environment
 environment: venv pip
@@ -33,3 +34,16 @@ update-sdf-ansible:
 	git submodule update --init --recursive
 
 apply: environment get-secrets update-sdf-ansible
+
+# Docker
+docker_build:
+	docker build --platform=linux/amd64 --tag slaclab/sdf-cli .
+
+docker_build_no_cache:
+	docker build --no-cache --platform=linux/amd64 --tag slaclab/sdf-cli .
+
+docker_run_it: docker_build
+	docker run --platform=linux/amd64 -it slaclab/sdf-cli bash
+
+docker_push: docker_build
+	docker push slaclab/sdf-cli
