@@ -155,6 +155,7 @@ class Registration(GraphQlSubscriber, AnsibleRunner):
     """
 
     def __init__(self, username: str, password_file: str, client_name: str, dry_run: bool = False):
+        self.logger = logger
         self.username = username
         self.password_file = password_file
         self.client_name = client_name
