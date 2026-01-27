@@ -758,8 +758,8 @@ class SlurmImporter(GraphQlMixin):
             "username": d["User"],
             "allocationId": allocId,
             "qos": qos,
-            "startTs": str(startTs.in_tz("UTC")).replace("+00:00", ".000Z"),
-            "endTs": str(endTs.in_tz("UTC")).replace("+00:00", ".000Z"),
+            "startTs": str(startTs.in_tz("UTC")).replace(" ", "T").replace("+00:00", ".000Z"),
+            "endTs": str(endTs.in_tz("UTC")).replace(" ", "T").replace("+00:00", ".000Z"),
             "resourceHours": resource_hours,
         }
         return out
