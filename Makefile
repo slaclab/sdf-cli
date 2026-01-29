@@ -1,9 +1,10 @@
-PYTHON_BIN ?= ./bin/python3
-PIP_BIN ?= ./bin/pip3
-VENV_BIN ?= ./bin/activate
+VENV_DIR ?= venv
+VENV_BIN ?= $(VENV_DIR)/bin/python3
+PIP_BIN ?= $(VENV_DIR)/bin/pip
+PYTHON_BIN ?= python3.9
 VAULT_SECRET_PATH ?= secret/tid/coact
 
-get-secrets:
+secrets:
 	mkdir etc/.secrets/ -p
 	#set -e; for i in ldap_binddn ldap_bindpw; do vault kv get --field=$$i $(VAULT_SECRET_PATH) > etc/.secrets/$$i ; done
 	set -e; for i in password; do vault kv get --field=$$i $(VAULT_SECRET_PATH)/service-account > etc/.secrets/$$i ; done
@@ -13,13 +14,13 @@ clean-secrets:
 	rm -rf etc/.secrets
 
 virtualenv:
-	python3 -m venv .
+	$(PYTHON_BIN) -m venv $(VENV_DIR)
 
 venv: virtualenv
 
 pip:
-	$(PYTHON_BIN) -m pip install --upgrade pip
-	source $(VENV_BIN) && $(PIP_BIN) install -r requirements.txt
+	$(VENV_BIN) -m pip install --upgrade pip
+	$(PIP_BIN) install -r requirements.txt
 
 # OS level dependencies
 deps:
@@ -29,7 +30,12 @@ deps:
 # run this to configure the dev environment
 environment: venv pip
 
+dev: environment
+
 update-sdf-ansible:
 	git submodule update --init --recursive
 
 apply: environment get-secrets update-sdf-ansible
+
+test:
+	$(VENV_BIN) sdf_click.py 
