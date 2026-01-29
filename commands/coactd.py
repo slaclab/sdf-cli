@@ -475,7 +475,7 @@ class RepoRegistration(Registration):
             end = end.isoformat()
 
         def format_datetime( iso, round_off=None ):
-            iso = str(iso).replace('+00:00', 'Z')
+            iso = str(iso).replace(' ', 'T').replace('+00:00', 'Z')
             if not '.' in iso:
                 iso = iso.replace('Z', '.000000Z')
             return iso
