@@ -9,4 +9,3 @@ Jinja2==3.0.3
 pendulum
 tzlocal
 loguru>=0.7.0
-influxdb-python

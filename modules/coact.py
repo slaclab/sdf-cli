@@ -22,7 +22,8 @@ from timeit import default_timer as timer
 import pendulum as pdl
 from gql import gql
 
-from influxdb import InfluxDBClient
+import requests
+from urllib.parse import urlparse
 
 # Import base classes from modules.base
 from .base import GraphQlMixin, common_options, graphql_options, configure_logging_from_verbose
@@ -820,27 +821,8 @@ def overage(ctx, date, verbose, username, password_file, windows, threshold, dry
     configure_logging_from_verbose(verbose)
     ctx.obj['verbose'] = verbose
 
-    # Parse the URL to extract host and port
-    from urllib.parse import urlparse
-    parsed_url = urlparse(influxdb_url)
-    influxdb_host = parsed_url.hostname or 'localhost'
-    influxdb_port = parsed_url.port or 8086
-
-    # Initialize InfluxDB client if available and configured
-    influxdb_client = None
-    if influxdb_host:
-        influxdb_client = InfluxDBClient(
-            host=influxdb_host,
-            port=influxdb_port,
-            username=influxdb_username,
-            password=influxdb_password,
-            database=influxdb_database
-        )
-        # Create database if it doesn't exist
-        # influxdb_client.create_database(influxdb_database)
-        logger.info(f"InfluxDB client initialized: host={influxdb_host} port={influxdb_port} database={influxdb_database}")
-
-    handler = FacilityUsage(
+    # create data collection object
+    usages = FacilityUsage(
         username=username,
         password_file=password_file,
         windows=list(windows),
@@ -848,26 +830,40 @@ def overage(ctx, date, verbose, username, password_file, windows, threshold, dry
         dry_run=dry_run
     )
 
-    influx_points = []
-    for point in handler.get(date):
-        influx_points.append(point)
+    # iterate and collect data, initiate toggle as needed
+    data = []
+    for point in usages.get(date):
+        data.append(point)
         # Toggle job blocking only if held state needs to change
         if point['held'] is not None and point['change']:
             toggle_job_blocking(execute=not dry_run, **point)
 
-    # Bulk send all points to InfluxDB
-    if influxdb_client is not None and len(influx_points) > 0:
+    # Bulk send all points to InfluxDB using raw requests
+    if influxdb_url is not None and len(data) > 0:
+
         lines = []
-        for point in influx_points:
-            line = f"allocation_usage,facility={point['facility']},cluster={point['cluster']},qos={point['qos']},window_mins={point['window_mins']}i "
-            line += f"held={str(point['held']).lower()},over={str(point['over']).lower()},"
-            line += f"change={str(point['change']).lower()},percent_used={float(point['percent_used'])}"
+        for point in data:
+            line = f"allocation_usage,facility={point['facility']},cluster={point['cluster']},qos={point['qos']},window_mins={point['window_mins']} "
+            line += f"held={str(point['held']).lower()},over={str(point['over']).lower()},change={str(point['change']).lower()},percent_used={float(point['percent_used'])}"
             lines.append(line)
 
         try:
-            lines_joined = "\n".join(lines)
-            logger.info(f'Writing {len(lines)} lines to InfluxDB:\n{lines_joined}')
-            influxdb_client.write(lines, protocol='line')
+            # Parse URL
+            parsed_url = urlparse(influxdb_url)
+            write_url = f"{parsed_url.scheme or 'http'}://{parsed_url.hostname or 'localhost'}:{parsed_url.port or 8086}/write"
+
+            # Prepare auth
+            auth = None
+            if influxdb_username is not None and influxdb_password is not None:
+                auth = (influxdb_username, influxdb_password)
+
+            logger.debug(f"InfluxDB client initialized: {write_url}")
+
+            # Write data
+            response = requests.post(write_url, params={'db': influxdb_database}, data='\n'.join(lines), auth=auth)
+            response.raise_for_status()
+            logger.info(f"Successfully wrote {len(lines)} points to InfluxDB")
+
         except Exception as e:
             logger.error(f"Failed to send data to InfluxDB: {e}")
 
