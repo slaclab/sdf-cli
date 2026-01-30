@@ -12,6 +12,7 @@ from string import Template
 import re
 import math
 import sys
+import os
 
 import click
 import json
@@ -20,6 +21,8 @@ from timeit import default_timer as timer
 
 import pendulum as pdl
 from gql import gql
+
+from influxdb import InfluxDBClient
 
 # Import base classes from modules.base
 from .base import GraphQlMixin, common_options, graphql_options, configure_logging_from_verbose
@@ -807,24 +810,89 @@ def slurm_recalculate(ctx, date, verbose, username, password_file):
 @click.option('--windows', type=int, multiple=True, default=[15, 60, 10080, 43800], help='Time windows to collate overage calculations')
 @click.option('--threshold', type=float, default=100.0, help='Percentage at which to be considered over allocation')
 @click.option('--dry-run', is_flag=True, default=False, help='Do not actually enforce job holding')
+@click.option('--influxdb-url', default='http://localhost:8086', help='InfluxDB server URL (default: http://localhost:8086)')
+@click.option('--influxdb-username', default=None, help='InfluxDB username')
+@click.option('--influxdb-password', default=None, help='InfluxDB password')
+@click.option('--influxdb-database', default='coact', help='InfluxDB database name (default: coact)')
 @click.pass_context
-def overage(ctx, date, verbose, username, password_file, windows, threshold, dry_run):
+def overage(ctx, date, verbose, username, password_file, windows, threshold, dry_run, influxdb_url, influxdb_username, influxdb_password, influxdb_database):
     """Recalculate the usage numbers from slurm jobs in Coact."""
     configure_logging_from_verbose(verbose)
     ctx.obj['verbose'] = verbose
 
-    handler = OverageHandler(
+    # Parse the URL to extract host and port
+    from urllib.parse import urlparse
+    parsed_url = urlparse(influxdb_url)
+    influxdb_host = parsed_url.hostname or 'localhost'
+    influxdb_port = parsed_url.port or 8086
+
+    # Initialize InfluxDB client if available and configured
+    influxdb_client = None
+    if influxdb_host:
+        influxdb_client = InfluxDBClient(
+            host=influxdb_host,
+            port=influxdb_port,
+            username=influxdb_username,
+            password=influxdb_password,
+            database=influxdb_database
+        )
+        # Create database if it doesn't exist
+        # influxdb_client.create_database(influxdb_database)
+        logger.info(f"InfluxDB client initialized: host={influxdb_host} port={influxdb_port} database={influxdb_database}")
+
+    handler = FacilityUsage(
         username=username,
         password_file=password_file,
         windows=list(windows),
         threshold=threshold,
         dry_run=dry_run
     )
-    handler.run(date)
+
+    influx_points = []
+    for point in handler.get(date):
+        influx_points.append(point)
+        # Toggle job blocking only if held state needs to change
+        if point['held'] is not None and point['change']:
+            toggle_job_blocking(execute=not dry_run, **point)
+
+    # Bulk send all points to InfluxDB
+    if influxdb_client is not None and len(influx_points) > 0:
+        lines = []
+        for point in influx_points:
+            line = f"allocation_usage,facility={point['facility']},cluster={point['cluster']},qos={point['qos']},window_mins={point['window_mins']}i "
+            line += f"held={str(point['held']).lower()},over={str(point['over']).lower()},"
+            line += f"change={str(point['change']).lower()},percent_used={float(point['percent_used'])}"
+            lines.append(line)
+
+        try:
+            lines_joined = "\n".join(lines)
+            logger.info(f'Writing {len(lines)} lines to InfluxDB:\n{lines_joined}')
+            influxdb_client.write(lines, protocol='line')
+        except Exception as e:
+            logger.error(f"Failed to send data to InfluxDB: {e}")
 
 
-class OverageHandler(GraphQlMixin):
-    """Handles overage calculations and enforcement."""
+def toggle_job_blocking(execute: bool = False, **xargs) -> bool:
+    """Enable/disable job blocking for overaged allocations."""
+    template = Template("sacctmgr modify -i account name=$facility:_regular_@$cluster set GrpTRES=node=$nodes")
+    xargs["nodes"] = 0 if xargs["over"] else -1
+    logger.trace(f"{xargs['facility']} job holding must be toggled... execute={execute}")
+    cmd = template.safe_substitute(**xargs)
+    logger.info(f"Command: {cmd}")
+
+    if execute:
+        try:
+            for l in subprocess.check_output(cmd.split()).split(b"\n"):
+                logger.trace(f"{l}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to toggle job blocking: {e}")
+            return False
+
+    return True
+
+
+class FacilityUsage(GraphQlMixin):
+    """Handles facility usage calculations and enforcement."""
 
     def __init__(self, username: str, password_file: str, windows: list, threshold: float, dry_run: bool):
         self.username = username
@@ -833,7 +901,7 @@ class OverageHandler(GraphQlMixin):
         self.threshold = threshold
         self.dry_run = dry_run
 
-    def run(self, date: str):
+    def get(self, date: str) -> Iterator[dict]:
         """Run the overage calculation process."""
         self.back_channel = self.connect_graph_ql(
             username=self.username,
@@ -842,8 +910,8 @@ class OverageHandler(GraphQlMixin):
         )
         logger.debug(f"Fetching usage data for date: {date}")
         data = self.get_data()
-        for facility_over in self.overaged(data, threshold=self.threshold):
-            self.toggle_job_blocking(execute=not self.dry_run, **facility_over)
+        for point in self.overaged(data, threshold=self.threshold):
+            yield point
 
     def get_data(self) -> dict:
         """Fetch usage data from GraphQL."""
@@ -916,7 +984,7 @@ class OverageHandler(GraphQlMixin):
         return current
 
     def overaged(self, data: dict, threshold: float = 100.0) -> Iterator[dict]:
-        """Check which allocations are over threshold."""
+        """Check which allocations are over threshold and yield point objects."""
         logger.trace(f"Determining overages with threshold {threshold}%...")
         for fac, d in data.items():
             logger.trace(f"Looping facility {fac}...")
@@ -933,34 +1001,24 @@ class OverageHandler(GraphQlMixin):
                 if m["held"] is None:
                     change = False
                 if len(percentages) > 0:
-                    logger.info(f"{fac:16} {clust:12} held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1}   {values}")
-                if m["held"] is not None and change:
-                    yield {
-                        "facility": fac.lower(),
-                        "cluster": clust.lower(),
-                        "percentages": percentages,
-                        "held": m["held"],
-                        "over": over,
-                        "change": change,
-                    }
+                    logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1}   {values}")
 
-    def toggle_job_blocking(self, execute: bool = False, **xargs) -> bool:
-        """Enable/disable job blocking for overaged allocations."""
-        template = Template("sacctmgr modify -i account name=$facility:_regular_@$cluster set GrpTRES=node=$nodes")
-        xargs["nodes"] = 0 if xargs["over"] else -1
-        logger.trace(f"{xargs['facility']} job holding must be toggled... execute={execute}")
-        cmd = template.safe_substitute(**xargs)
-        logger.trace(f"Command: {cmd}")
+                    # Yield a point for each window
+                    for idx, pct in enumerate(percentages):
+                        window_duration = self.windows[idx] if idx < len(self.windows) else idx
+                        yield {
+                            "facility": fac.lower(),
+                            "cluster": clust.lower(),
+                            "qos": "regular",
+                            "window_mins": window_duration,
+                            "percentages": percentages,
+                            "percent_used": pct,
+                            "held": bool(m["held"]) if m["held"] is not None else None,
+                            "over": bool(over),
+                            "change": bool(change),
+                        }
 
-        if execute:
-            try:
-                for l in subprocess.check_output(cmd.split()).split(b"\n"):
-                    logger.trace(f"{l}")
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Failed to toggle job blocking: {e}")
-                return False
 
-        return True
 
 
 # For backwards compatibility, allow running this module directly
