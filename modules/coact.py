@@ -195,6 +195,7 @@ class SlurmRemapper:
             d["Account"] in ("shared", "shared:default")
             or d["Account"].startswith("shared")
             or d["User"] in ("jonl", "vanilla", "yemi", "yangw", "pav", "root", "reranna", "ppascual", "renata",)
+            or d["Partition"] in ("fermi-transfer")
         ):
             return None
 
