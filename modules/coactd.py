@@ -736,7 +736,7 @@ class RepoRegistration(Registration):
         return account_name
 
     def do_repo_membership(self, user: str, repo: str, facility: str, action: str, dry_run: bool = False) -> bool:
-        """Update the list of members for this Repo."""
+        """ Update the list of members for this Repo. """
         REPO_CURRENT_CLUSTERS_CGL = gql("""
             query repo( $facility: String!, $repo: String! ) {
               repo(filter: {facility: $facility, name: $repo}) {
@@ -822,6 +822,31 @@ class RepoRegistration(Registration):
                 dry_run=dry_run
             )
 
+        # do membership of grouper
+        enable_grouper, grouper_feature = self.get_feature(this, 'grouper')
+        self.logger.info(f"grouper feature for {facility}:{repo} enabled? {enable_grouper}: {grouper_feature}")
+
+        if enable_grouper:
+            group_name = None
+            gid_number = None
+            for option in grouper_feature['options']:
+                j = json.loads(option)
+                if 'name' in j:
+                    group_name = j['name']
+                if 'gidNumber' in j:
+                    gid_number = j['gidNumber']
+            assert group_name is not None, "grouper group name not configured in feature options"
+            assert gid_number is not None, "grouper gidNumber not configured in feature options"
+            runner = self.run_playbook(
+                'coact/grouper.yaml',
+                user=user,
+                users=this['users'],
+                groupName=group_name,
+                gidNumber=gid_number,
+                state='sync',
+                dry_run=dry_run
+            )
+        
         # finish up and mark record
         user_req = {
             "repo": {"name": repo, "facility": facility},
