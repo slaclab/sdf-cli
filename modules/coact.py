@@ -6,13 +6,12 @@ registers subcommands using click decorators instead of cliff's CommandManager.
 """
 
 from loguru import logger
-from typing import Any, Generator, Iterator, List, Optional, TYPE_CHECKING
+from typing import Any, Iterator, Optional, Sequence, TypedDict
 from functools import wraps
 from string import Template
 import re
 import math
 import sys
-import os
 
 import click
 import json
@@ -29,9 +28,6 @@ from urllib.parse import urlparse
 from .base import GraphQlMixin, common_options, graphql_options, configure_logging_from_verbose
 from .utils.graphql import GraphQlClient
 
-if TYPE_CHECKING:
-    from typing import IO
-
 # get local timezone
 _now = pdl.now()
 
@@ -39,6 +35,23 @@ _now = pdl.now()
 
 # Define context settings to support -h for help
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
+
+
+class OveragePoint(TypedDict):
+    facility: str
+    cluster: str
+    qos: str
+    window_mins: int
+    percentages: Sequence[float]
+    percent_used: float
+    held: bool | None
+    over: bool
+    change: bool
+
+class FacilityNodeUsage(TypedDict):
+    facility: str
+    cluster: str
+    nodes: int
 
 
 def parse_datetime(value: Any, timezone=_now.timezone, force_tz: bool = False):
@@ -817,7 +830,20 @@ def slurm_recalculate(ctx, date, verbose, username, password_file):
 @click.option('--influxdb-password', default=None, help='InfluxDB password')
 @click.option('--influxdb-database', default='coact', help='InfluxDB database name (default: coact)')
 @click.pass_context
-def overage(ctx, date, verbose, username, password_file, windows, threshold, dry_run, influxdb_url, influxdb_username, influxdb_password, influxdb_database):
+def overage(
+        ctx,
+        date: str,
+        verbose: int,
+        username: str,
+        password_file: str,
+        windows: Sequence[int],
+        threshold: float,
+        dry_run: bool,
+        influxdb_url: str,
+        influxdb_username: str | None,
+        influxdb_password: str | None,
+        influxdb_database: str
+    ):
     """Recalculate the usage numbers from slurm jobs in Coact."""
     configure_logging_from_verbose(verbose)
     ctx.obj['verbose'] = verbose
@@ -837,7 +863,7 @@ def overage(ctx, date, verbose, username, password_file, windows, threshold, dry
         data.append(point)
         # Toggle job blocking only if held state needs to change
         if point['held'] is not None and point['change']:
-            toggle_job_blocking(execute=not dry_run, **point)
+            toggle_job_blocking(execute=not dry_run, point=point)
 
     # Bulk send all points to InfluxDB using raw requests
     if influxdb_url is not None and len(data) > 0:
@@ -869,12 +895,18 @@ def overage(ctx, date, verbose, username, password_file, windows, threshold, dry
             logger.error(f"Failed to send data to InfluxDB: {e}")
 
 
-def toggle_job_blocking(execute: bool = False, **xargs) -> bool:
+def toggle_job_blocking(point: OveragePoint, execute: bool = False) -> bool:
     """Enable/disable job blocking for overaged allocations."""
     template = Template("sacctmgr modify -i account name=$facility:_regular_@$cluster set GrpTRES=node=$nodes")
-    xargs["nodes"] = 0 if xargs["over"] else -1
-    logger.trace(f"{xargs['facility']} job holding must be toggled... execute={execute}")
-    cmd = template.safe_substitute(**xargs)
+
+    facility_usage = FacilityNodeUsage(
+        facility=point['facility'],
+        cluster=point['cluster'],
+        nodes=0 if point['over'] else -1
+    )
+
+    logger.trace(f"{facility_usage['facility']} job holding must be toggled... execute={execute}")
+    cmd = template.safe_substitute(**facility_usage)
     logger.info(f"Command: {cmd}")
 
     if execute:
@@ -898,7 +930,7 @@ class FacilityUsage(GraphQlMixin):
         self.threshold = threshold
         self.dry_run = dry_run
 
-    def get(self, date: str) -> Iterator[dict]:
+    def get(self, date: str) -> Iterator[OveragePoint]:
         """Run the overage calculation process."""
         self.back_channel = self.connect_graph_ql(
             username=self.username,
@@ -980,7 +1012,7 @@ class FacilityUsage(GraphQlMixin):
 
         return current
 
-    def overaged(self, data: dict, threshold: float = 100.0) -> Iterator[dict]:
+    def overaged(self, data: dict, threshold: float = 100.0) -> Iterator[OveragePoint]:
         """Check which allocations are over threshold and yield point objects."""
         logger.trace(f"Determining overages with threshold {threshold}%...")
         for fac, d in data.items():
@@ -1003,18 +1035,17 @@ class FacilityUsage(GraphQlMixin):
                     # Yield a point for each window
                     for idx, pct in enumerate(percentages):
                         window_duration = self.windows[idx] if idx < len(self.windows) else idx
-                        yield {
-                            "facility": fac.lower(),
-                            "cluster": clust.lower(),
-                            "qos": "regular",
-                            "window_mins": window_duration,
-                            "percentages": percentages,
-                            "percent_used": pct,
-                            "held": bool(m["held"]) if m["held"] is not None else None,
-                            "over": bool(over),
-                            "change": bool(change),
-                        }
-
+                        yield OveragePoint(
+                            facility=fac.lower(),
+                            cluster=clust.lower(),
+                            qos="regular",
+                            window_mins=window_duration,
+                            percentages=percentages,
+                            percent_used=pct,
+                            held=bool(m["held"]) if m["held"] is not None else None,
+                            over=bool(over),
+                            change=bool(change),
+                        )
 
 
 
