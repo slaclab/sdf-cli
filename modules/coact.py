@@ -47,6 +47,7 @@ class OveragePoint(TypedDict):
     held: bool | None
     over: bool
     change: bool
+    purchased_nodes: int | None
 
 class FacilityNodeUsage(TypedDict):
     facility: str
@@ -899,20 +900,38 @@ def toggle_job_blocking(point: OveragePoint, execute: bool = False) -> bool:
     """Enable/disable job blocking for overaged allocations."""
     template = Template("sacctmgr modify -i account name=$facility:_regular_@$cluster set GrpTRES=node=$nodes")
 
+    # Determine node count based on blocking state
+    if point['over']:
+        # Blocking: set to 0
+        nodes = 0
+    else:
+        # Unblocking: use purchased nodes or fallback to unlimited
+        nodes = point.get('purchased_nodes', -1)
+        if nodes is None:
+            nodes = -1
+            logger.warning(f"No purchased node count available for {point['facility']}@{point['cluster']}, using unlimited")
+        elif nodes > 0:
+            logger.info(f"Restoring {nodes} nodes for {point['facility']}@{point['cluster']}")
+        else:
+            logger.warning(f"Invalid node count {nodes} for {point['facility']}@{point['cluster']}, using unlimited")
+            nodes = -1
+
     facility_usage = FacilityNodeUsage(
         facility=point['facility'],
         cluster=point['cluster'],
-        nodes=0 if point['over'] else -1
+        nodes=nodes
     )
 
-    logger.trace(f"{facility_usage['facility']} job holding must be toggled... execute={execute}")
+    logger.info(f"Job blocking toggle for {facility_usage['facility']}@{facility_usage['cluster']}: nodes={nodes} (over={point['over']}, execute={execute})")
     cmd = template.safe_substitute(**facility_usage)
     logger.info(f"Command: {cmd}")
 
     if execute:
         try:
-            for l in subprocess.check_output(cmd.split()).split(b"\n"):
-                logger.trace(f"{l}")
+            result = subprocess.check_output(cmd.split())
+            for line in result.split(b"\n"):
+                if line.strip():
+                    logger.debug(f"sacctmgr output: {line.decode().strip()}")
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to toggle job blocking: {e}")
             return False
@@ -945,7 +964,7 @@ class FacilityUsage(GraphQlMixin):
     def get_data(self) -> dict:
         """Fetch usage data from GraphQL."""
         per_window_template = Template(
-            """_$key: facilityRecentComputeUsage(pastMinutes:$minutes) { cluster: clustername, facility, percentUsed }"""
+            """_$key: facilityRecentComputeUsage(pastMinutes:$minutes) { cluster: clustername, facility, percentUsed, purchasedNodes }"""
         )
         logger.trace(f"Fetching windows {self.windows}")
         all_windows = []
@@ -972,7 +991,7 @@ class FacilityUsage(GraphQlMixin):
                 current[f] = {}
             for item in k["allocs"]:
                 c = item["cluster"].lower()
-                current[f][c] = {"held": None, "percentUsed": []}
+                current[f][c] = {"held": None, "percentUsed": [], "purchasedNodes": None}
         del result["repos"]
 
         for time, array in result.items():
@@ -980,8 +999,11 @@ class FacilityUsage(GraphQlMixin):
             for a in array:
                 f = a["facility"].lower()
                 c = a["cluster"].lower()
-                logger.trace(f"Setting {f} {c} to {a['percentUsed']}")
+                logger.trace(f"Setting {f} {c} to {a['percentUsed']} (nodes: {a.get('purchasedNodes')})")
                 current[f][c]["percentUsed"].append(int(a["percentUsed"]))
+                # Store purchased nodes (use the value from any time window since it's constant)
+                if a.get("purchasedNodes") is not None and current[f][c]["purchasedNodes"] is None:
+                    current[f][c]["purchasedNodes"] = a["purchasedNodes"]
 
         logger.trace(f"Overages: {current}")
 
@@ -1019,7 +1041,8 @@ class FacilityUsage(GraphQlMixin):
             logger.trace(f"Looping facility {fac}...")
             for clust, m in d.items():
                 percentages = m["percentUsed"]
-                logger.trace(f"Sublooping {clust}, {percentages}")
+                purchased_nodes = m.get("purchasedNodes")
+                logger.trace(f"Sublooping {clust}, {percentages}, purchased_nodes: {purchased_nodes}")
                 over = False
                 for p in percentages:
                     if p >= threshold:
@@ -1030,7 +1053,7 @@ class FacilityUsage(GraphQlMixin):
                 if m["held"] is None:
                     change = False
                 if len(percentages) > 0:
-                    logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1}   {values}")
+                    logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1} nodes={purchased_nodes or 'N/A':>5}   {values}")
 
                     # Yield a point for each window
                     for idx, pct in enumerate(percentages):
@@ -1045,6 +1068,7 @@ class FacilityUsage(GraphQlMixin):
                             held=bool(m["held"]) if m["held"] is not None else None,
                             over=bool(over),
                             change=bool(change),
+                            purchased_nodes=purchased_nodes
                         )
 
 
