@@ -990,7 +990,7 @@ class FacilityUsage(GraphQlMixin):
                 current[f] = {}
             for item in k["allocs"]:
                 c = item["cluster"].lower()
-                current[f][c] = {"held": None, "percentUsed": [] }
+                current[f][c] = {"held": None, "percentUsed": []}
         del result["repos"]
 
         for time, array in result.items():
@@ -1056,7 +1056,7 @@ class FacilityUsage(GraphQlMixin):
                 if m["held"] is None:
                     change = False
                 if len(percentages) > 0:
-                    logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1}  {values}")
+                    logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1}   {values}")
 
                     # Yield a point for each window
                     for idx, pct in enumerate(percentages):
