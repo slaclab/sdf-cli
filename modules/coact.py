@@ -47,7 +47,6 @@ class OveragePoint(TypedDict):
     held: bool | None
     over: bool
     change: bool
-    purchased_nodes: int | None
 
 class FacilityNodeUsage(TypedDict):
     facility: str
@@ -964,7 +963,7 @@ class FacilityUsage(GraphQlMixin):
     def get_data(self) -> dict:
         """Fetch usage data from GraphQL."""
         per_window_template = Template(
-            """_$key: facilityRecentComputeUsage(pastMinutes:$minutes) { cluster: clustername, facility, percentUsed, purchasedNodes }"""
+            """_$key: facilityRecentComputeUsage(pastMinutes:$minutes) { cluster: clustername, facility, percentUsed }"""
         )
         logger.trace(f"Fetching windows {self.windows}")
         all_windows = []
@@ -991,7 +990,7 @@ class FacilityUsage(GraphQlMixin):
                 current[f] = {}
             for item in k["allocs"]:
                 c = item["cluster"].lower()
-                current[f][c] = {"held": None, "percentUsed": [], "purchasedNodes": None}
+                current[f][c] = {"held": None, "percentUsed": [] }
         del result["repos"]
 
         for time, array in result.items():
@@ -999,11 +998,8 @@ class FacilityUsage(GraphQlMixin):
             for a in array:
                 f = a["facility"].lower()
                 c = a["cluster"].lower()
-                logger.trace(f"Setting {f} {c} to {a['percentUsed']} (nodes: {a.get('purchasedNodes')})")
+                logger.trace(f"Setting {f} {c} to {a['percentUsed']}")
                 current[f][c]["percentUsed"].append(int(a["percentUsed"]))
-                # Store purchased nodes (use the value from any time window since it's constant)
-                if a.get("purchasedNodes") is not None and current[f][c]["purchasedNodes"] is None:
-                    current[f][c]["purchasedNodes"] = a["purchasedNodes"]
 
         logger.trace(f"Overages: {current}")
 
@@ -1020,13 +1016,21 @@ class FacilityUsage(GraphQlMixin):
                 this = str(l, encoding="utf-8").strip().split("|")
                 try:
                     m = re.match(r"^(?P<f>\S+):(?P<r>\S+)@(?P<c>\S+)$", this[0])
-                    holding = True if this[1] == "0" else False
+                    grp_nodes = this[1]
+                    holding = True if grp_nodes == "0" else False
                     if m:
                         d = m.groupdict()
                         f = d["f"]
                         c = d["c"]
                         current[f][c]["held"] = holding
-                        logger.trace(f"Set {f}@{c} to {holding}")
+                        # Extract purchasedNodes from SLURM (non-zero values)
+                        try:
+                            nodes = int(grp_nodes)
+                            if nodes > 0:
+                                current[f][c]["purchasedNodes"] = nodes
+                        except ValueError:
+                            logger.trace(f"Could not parse GrpNodes '{grp_nodes}' for {f}@{c}")
+                        logger.trace(f"Set {f}@{c} to held={holding}, purchasedNodes={current[f][c]['purchasedNodes']}")
                 except Exception:
                     pass
         except subprocess.CalledProcessError as e:
@@ -1041,8 +1045,7 @@ class FacilityUsage(GraphQlMixin):
             logger.trace(f"Looping facility {fac}...")
             for clust, m in d.items():
                 percentages = m["percentUsed"]
-                purchased_nodes = m.get("purchasedNodes")
-                logger.trace(f"Sublooping {clust}, {percentages}, purchased_nodes: {purchased_nodes}")
+                logger.trace(f"Sublooping {clust}, {percentages}")
                 over = False
                 for p in percentages:
                     if p >= threshold:
@@ -1053,7 +1056,7 @@ class FacilityUsage(GraphQlMixin):
                 if m["held"] is None:
                     change = False
                 if len(percentages) > 0:
-                    logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1} nodes={purchased_nodes or 'N/A':>5}   {values}")
+                    logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1}  {values}")
 
                     # Yield a point for each window
                     for idx, pct in enumerate(percentages):
@@ -1068,7 +1071,6 @@ class FacilityUsage(GraphQlMixin):
                             held=bool(m["held"]) if m["held"] is not None else None,
                             over=bool(over),
                             change=bool(change),
-                            purchased_nodes=purchased_nodes
                         )
 
 
