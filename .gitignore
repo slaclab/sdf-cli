@@ -17,5 +17,7 @@ shell/
 ssl/
 lib64
 
+*.egg-info
+
 # VS Code
 .vscode/
