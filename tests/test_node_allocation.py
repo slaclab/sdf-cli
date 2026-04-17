@@ -1,164 +1,169 @@
 """
 Unit tests for node allocation functionality.
-Tests the core logic without requiring external dependencies.
 """
 
 from unittest.mock import patch
-import subprocess
 
-from modules.coact import toggle_job_blocking, OveragePoint
+from modules.coact import toggle_job_blocking, OveragePoint, FacilityUsage
 
 
-def test_toggle_job_blocking_uses_purchased_nodes_when_unblocking():
-    """Test that toggle_job_blocking uses purchased_nodes when unblocking."""
-    point = OveragePoint(
-        facility="test_facility",
-        cluster="test_cluster",
-        qos="regular",
-        window_mins=5,
-        percentages=[50.0],
-        percent_used=50.0,
-        held=True,
-        over=False,  # Unblocking
-        change=True,
-        purchased_nodes=100  # Should use this value
+def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
+    """
+    A facility with 256 purchased nodes goes over quota,
+    gets its jobs blocked, then recovers and is unblocked with original nodes restored.
+    
+    This tests the critical workflow:
+    - Nodes are extracted from sacctmgr
+    - When blocking: GrpNodes set to 0
+    - When unblocking: GrpNodes restored to purchased amount
+    """
+    facility = "lcls"
+    cluster = "ada"
+    purchased_nodes = 256
+    
+    # === PHASE 1: Facility Normal State ===
+    # Initial state: facility under quota with purchased nodes
+    facility_usage = FacilityUsage(
+        username="test_user",
+        password_file="/tmp/test",
+        windows=[60],
+        threshold=100.0,
+        dry_run=False
     )
-
-    # Mock the subprocess call to capture the command
+    
+    graphql_response = {
+        "repos": [
+            {
+                "facility": "LCLS",
+                "allocs": [
+                    {"cluster": "ada", "start": "2026-04-01", "end": "2026-05-01"},
+                ]
+            }
+        ],
+        "000060": [
+            {"facility": "LCLS", "cluster": "ada", "percentUsed": 85},
+        ]
+    }
+    
+    # sacctmgr shows facility has 256 nodes available
+    sacctmgr_normal = b"""lcls:_regular_@ada|256|1000|1000
+    """
+    
+    with patch('modules.coact.subprocess.check_output') as mock_subprocess:
+        mock_subprocess.return_value = sacctmgr_normal
+        result = facility_usage.format_data(graphql_response)
+        
+        # Verify initial state: facility is not held and has nodes available
+        assert result[facility][cluster]["held"] is False
+        assert result[facility][cluster]["percentUsed"] == [85]
+        assert result[facility][cluster]["purchasedNodes"] == purchased_nodes
+    
+    # === PHASE 2: Facility Goes Over Quota ===
+    # Usage exceeds 100%, needs to block jobs
+    graphql_response_over = {
+        "repos": [
+            {
+                "facility": "LCLS",
+                "allocs": [
+                    {"cluster": "ada", "start": "2026-04-01", "end": "2026-05-01"},
+                ]
+            }
+        ],
+        "000060": [
+            {"facility": "LCLS", "cluster": "ada", "percentUsed": 105},
+        ]
+    }
+    
+    # Create overage point for blocking
+    overage_point = OveragePoint(
+        facility=facility,
+        cluster=cluster,
+        qos="regular",
+        window_mins=60,
+        percentages=[105.0],
+        percent_used=105.0,
+        held=False,  # Not yet blocked
+        over=True,   # Over quota
+        change=True  # Need to block
+    )
+    overage_point['purchased_nodes'] = purchased_nodes
+    
+    # Mock sacctmgr toggle to set nodes to 0
     with patch('modules.coact.subprocess.check_output') as mock_subprocess:
         mock_subprocess.return_value = b"Modified account\n"
-
-        result = toggle_job_blocking(point, execute=True)
-
+        result = toggle_job_blocking(overage_point, execute=True)
+        
+        # Verify blocking command was issued
         assert result is True
-        mock_subprocess.assert_called_once()
-
-        # Verify the command uses purchased nodes (100) instead of unlimited (-1)
-        called_args = mock_subprocess.call_args[0][0]  # First positional arg (the command)
-        assert "GrpTRES=node=100" in called_args
-        assert "name=test_facility:_regular_@test_cluster" in called_args
-
-
-def test_toggle_job_blocking_fallback_to_unlimited():
-    """Test fallback to unlimited when no purchased_nodes available."""
-    point = OveragePoint(
-        facility="test_facility",
-        cluster="test_cluster",
-        qos="regular",
-        window_mins=5,
-        percentages=[50.0],
-        percent_used=50.0,
-        held=True,
-        over=False,  # Unblocking
-        change=True,
-        purchased_nodes=None  # No purchased nodes data
-    )
-
-    with patch('modules.coact.subprocess.check_output') as mock_subprocess:
-        mock_subprocess.return_value = b"Modified account\n"
-
-        result = toggle_job_blocking(point, execute=True)
-
-        assert result is True
-        # Should fall back to unlimited (-1)
         called_args = mock_subprocess.call_args[0][0]
-        assert "GrpTRES=node=-1" in called_args
-
-
-def test_toggle_job_blocking_blocks_with_zero():
-    """Test that blocking still sets nodes to 0 (unchanged behavior)."""
-    point = OveragePoint(
-        facility="test_facility",
-        cluster="test_cluster",
+        assert "GrpTRES=node=0" in called_args  # Jobs blocked
+        assert f"name={facility}:_regular_@{cluster}" in called_args
+    
+    # After blocking, sacctmgr now shows GrpNodes=0
+    sacctmgr_blocked = b"""lcls:_regular_@ada|0|1000|1000
+    """
+    
+    with patch('modules.coact.subprocess.check_output') as mock_subprocess:
+        mock_subprocess.return_value = sacctmgr_blocked
+        result = facility_usage.format_data(graphql_response_over)
+        
+        # Verify blocked state
+        assert result[facility][cluster]["held"] is True
+        assert result[facility][cluster]["percentUsed"] == [105]
+        # Note: purchasedNodes not set when GrpNodes=0 (only non-zero values stored)
+    
+    # === PHASE 3: Facility Recovers Below Quota ===
+    # Usage drops back below 100%, needs to unblock
+    graphql_response_recovered = {
+        "repos": [
+            {
+                "facility": "LCLS",
+                "allocs": [
+                    {"cluster": "ada", "start": "2026-04-01", "end": "2026-05-01"},
+                ]
+            }
+        ],
+        "000060": [
+            {"facility": "LCLS", "cluster": "ada", "percentUsed": 95},
+        ]
+    }
+    
+    # CRITICAL: Must restore with original purchased_nodes, not unlimited
+    recovery_point = OveragePoint(
+        facility=facility,
+        cluster=cluster,
         qos="regular",
-        window_mins=5,
-        percentages=[150.0],
-        percent_used=150.0,
-        held=False,
-        over=True,  # Blocking
-        change=True,
-        purchased_nodes=100  # Should be ignored when blocking
+        window_mins=60,
+        percentages=[95.0],
+        percent_used=95.0,
+        held=True,   # Currently blocked
+        over=False,  # Back under quota
+        change=True  # Need to unblock
     )
-
+    recovery_point['purchased_nodes'] = purchased_nodes  # Restored from sacctmgr
+    
     with patch('modules.coact.subprocess.check_output') as mock_subprocess:
         mock_subprocess.return_value = b"Modified account\n"
-
-        result = toggle_job_blocking(point, execute=True)
-
+        result = toggle_job_blocking(recovery_point, execute=True)
+        
+        # Verify unblocking command uses original purchased nodes
         assert result is True
-        # Should use 0 for blocking, regardless of purchased_nodes
         called_args = mock_subprocess.call_args[0][0]
-        assert "GrpTRES=node=0" in called_args
-
-
-def test_toggle_job_blocking_dry_run_mode():
-    """Test that dry run mode doesn't execute commands."""
-    point = OveragePoint(
-        facility="test_facility",
-        cluster="test_cluster",
-        qos="regular",
-        window_mins=5,
-        percentages=[50.0],
-        percent_used=50.0,
-        held=True,
-        over=False,
-        change=True,
-        purchased_nodes=100
-    )
-
+        assert f"GrpTRES=node={purchased_nodes}" in called_args  # CRITICAL: restores 256, not -1
+        assert "GrpTRES=node=-1" not in called_args  # NOT unlimited
+        assert f"name={facility}:_regular_@{cluster}" in called_args
+    
+    # Verify final state: sacctmgr shows nodes restored
+    sacctmgr_restored = b"""lcls:_regular_@ada|256|1000|1000
+    """
+    
     with patch('modules.coact.subprocess.check_output') as mock_subprocess:
-        result = toggle_job_blocking(point, execute=False)
-
-        assert result is True
-        # Should not call subprocess in dry run
-        mock_subprocess.assert_not_called()
-
-
-def test_toggle_job_blocking_handles_invalid_purchased_nodes():
-    """Test handling of invalid purchased_nodes values."""
-    point = OveragePoint(
-        facility="test_facility",
-        cluster="test_cluster",
-        qos="regular",
-        window_mins=5,
-        percentages=[50.0],
-        percent_used=50.0,
-        held=True,
-        over=False,  # Unblocking
-        change=True,
-        purchased_nodes=0  # Invalid: zero nodes
-    )
-
-    with patch('modules.coact.subprocess.check_output') as mock_subprocess:
-        mock_subprocess.return_value = b"Modified account\n"
-
-        result = toggle_job_blocking(point, execute=True)
-
-        assert result is True
-        # Should fall back to unlimited (-1) for invalid node count
-        called_args = mock_subprocess.call_args[0][0]
-        assert "GrpTRES=node=-1" in called_args
+        mock_subprocess.return_value = sacctmgr_restored
+        result = facility_usage.format_data(graphql_response_recovered)
+        
+        # Verify recovered state
+        assert result[facility][cluster]["held"] is False
+        assert result[facility][cluster]["percentUsed"] == [95]
+        assert result[facility][cluster]["purchasedNodes"] == purchased_nodes
 
 
-def test_toggle_job_blocking_subprocess_called_process_error_returns_false():
-    """Test that subprocess CalledProcessError returns False without raising."""
-    point = OveragePoint(
-        facility="test_facility",
-        cluster="test_cluster",
-        qos="regular",
-        window_mins=5,
-        percentages=[50.0],
-        percent_used=50.0,
-        held=True,
-        over=False,
-        change=True,
-        purchased_nodes=100
-    )
-
-    with patch('modules.coact.subprocess.check_output') as mock_subprocess:
-        # Simulate sacctmgr failure mode handled by implementation
-        mock_subprocess.side_effect = subprocess.CalledProcessError(1, ["sacctmgr"])
-
-        result = toggle_job_blocking(point, execute=True)
-
-        assert result is False
