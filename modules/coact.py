@@ -44,10 +44,10 @@ class OveragePoint(TypedDict):
     window_mins: int
     percentages: Sequence[float]
     percent_used: float
-    held: bool | None
+    held: bool
     over: bool
     change: bool
-    purchased_nodes: int | None
+    purchased_nodes: int
 
 class FacilityNodeUsage(TypedDict):
     facility: str
@@ -841,8 +841,8 @@ def overage(
         threshold: float,
         dry_run: bool,
         influxdb_url: str,
-        influxdb_username: str | None,
-        influxdb_password: str | None,
+        influxdb_username: str,
+        influxdb_password: str,
         influxdb_database: str
     ):
     """Recalculate the usage numbers from slurm jobs in Coact."""
