@@ -1,5 +1,5 @@
 VENV_DIR ?= venv
-VENV_BIN ?= $(VENV_DIR)/bin/python3
+VENV_BIN ?= $(VENV_DIR)/bin/python3.9
 PIP_BIN ?= $(VENV_DIR)/bin/pip
 PYTHON_BIN ?= python3.9
 VAULT_SECRET_PATH ?= secret/tid/coact
