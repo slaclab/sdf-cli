@@ -19,8 +19,9 @@ from loguru import logger
 # Suppress noisy gql loggers (they use standard logging)
 from gql.transport.requests import log as requests_logger
 requests_logger.setLevel(logging.ERROR)
-from gql.transport.websockets import log as websockets_logger
-websockets_logger.setLevel(logging.ERROR)
+
+websockets_logger = logging.getLogger('gql.transport.websockets')
+websockets_logger.setLevel(logging.WARNING)
 
 SDF_COACT_URI = getenv("SDF_COACT_URI", "coact-dev.slac.stanford.edu:443/graphql-service")
 
