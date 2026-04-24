@@ -964,7 +964,7 @@ class FacilityUsage(GraphQlMixin):
     def get_data(self) -> dict:
         """Fetch usage data from GraphQL."""
         per_window_template = Template(
-            """_$key: facilityRecentComputeUsage(pastMinutes:$minutes) { cluster: clustername, facility, percentUsed, purchasedNodes }"""
+            """_$key: facilityRecentComputeUsage(pastMinutes:$minutes) { cluster: clustername, facility, percentUsed }"""
         )
         logger.trace(f"Fetching windows {self.windows}")
         all_windows = []
@@ -974,6 +974,7 @@ class FacilityUsage(GraphQlMixin):
 
         query = "query usage {"
         query += "\n".join(all_windows) + ",\n"
+        query += "facilities(filter:{}) { name, computepurchases { clustername, purchased } },\n"
         query += "repos { facility, allocs: currentComputeAllocations { cluster: clustername, start, end } }"
         query += "\n}"
 
@@ -984,6 +985,12 @@ class FacilityUsage(GraphQlMixin):
 
     def format_data(self, result: dict) -> dict:
         """Format the raw data for processing."""
+        # Build purchased nodes lookup from Facility.computepurchases
+        fac_purchases = {}
+        for fac in result.pop("facilities", []):
+            for cp in fac.get("computepurchases") or []:
+                fac_purchases[(fac["name"].lower(), cp["clustername"].lower())] = cp["purchased"]
+
         current = {}
         for k in result["repos"]:
             f = k["facility"].lower()
@@ -991,7 +998,7 @@ class FacilityUsage(GraphQlMixin):
                 current[f] = {}
             for item in k["allocs"]:
                 c = item["cluster"].lower()
-                current[f][c] = {"held": None, "percentUsed": [], "purchasedNodes": None}
+                current[f][c] = {"held": None, "percentUsed": [], "purchasedNodes": fac_purchases.get((f, c))}
         del result["repos"]
 
         for time, array in result.items():
@@ -999,11 +1006,8 @@ class FacilityUsage(GraphQlMixin):
             for a in array:
                 f = a["facility"].lower()
                 c = a["cluster"].lower()
-                logger.trace(f"Setting {f} {c} to {a['percentUsed']} (nodes: {a.get('purchasedNodes')})")
+                logger.trace(f"Setting {f} {c} to {a['percentUsed']}")
                 current[f][c]["percentUsed"].append(int(a["percentUsed"]))
-                # Store purchased nodes (use the value from any time window since it's constant)
-                if a.get("purchasedNodes") is not None and current[f][c]["purchasedNodes"] is None:
-                    current[f][c]["purchasedNodes"] = a["purchasedNodes"]
 
         logger.trace(f"Overages: {current}")
 
