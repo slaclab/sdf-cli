@@ -37,3 +37,9 @@ One remains difficult due to the un-migratable write operation:
 ## Possible Alternatives
 
 All potential workarounds within `slurmrest` hae significant disadvantages vs the current `GrpTRES=node=0` approach. `sacctmgr` appears to be the only reliable away to make modifications to account allocations. There is [a ticket](https://support.schedmd.com/show_bug.cgi?id=24356) with SLURM to support more `sacctmgr` features, however there is no activity on it other than the original post.
+
+### Still Using the CLI
+
+We already have to maintain a `ssh` connection to the SLURM instance for execution of ansible playbooks, so we could configure `slurm.conf` to connect to the remote `slurmdbd` to maintain the same CLI usage within the container. This would require no code changes and uses SLURM's existing authentication model.
+
+Alternatively, direct ssh commands (e.g. `ssh slurm-admin@slurm-headnode.example.com {sacctmgr command}`) are possible. More manual and relies on POSIX credentials rather than direct SLURM authentication.
