@@ -1,0 +1,39 @@
+# Migration of `sacctmgr` and `sacct` Calls to `slurmrest`
+
+Currently, `sdf-cli` runs `sacctmgr` and `sacct` CLI tools directly via `subprocess` in order to gather account association information, job accounting information, and toggling the number of nodes assigned to a facility in the event of an overage. In a step towards containerization and more robust interaction with SLURM, it is desired to migrate these CLI tool usages to `slurmrest` endpoints.
+
+## Current Usage
+
+There are currently three read operations and one write operations:
+
+### Read Operations
+
+- `sacctmgr show assoc where account={','.join(list_of_assoc)} --noheader -P format=Account,GrpNodes,GrpJobs,MaxJobs`
+    - `cli/modules/coact.py:1015`
+    - Equivalent endpoint: `GET /slurmdb/v0.0.44/associations/`
+- `SLURM_TIME_FORMAT=%s sacct --allusers --duplicates --allclusters --allocations --starttime="{start}T00:00:00" --endtime="{start}T23:59:59" --truncate --parsable2 --format=JobID,User,UID,Account,Partition,QOS,Submit,Start,End,Elapsed,NCPUS,AllocNodes,AllocTRES,CPUTimeRAW,NodeList,Reservation,ReservationId,State`
+    - `api/scripts/jobs2usage.py:37`
+    - Equivalent endpoint: `GET /slurmdb/v0.0.44/jobs/`
+- `SLURM_TIME_FORMAT=%s {sacct_bin_path} --allusers --duplicates --allclusters --allocations --starttime="{date}T{start_time}" --endtime="{date}T{end_time}" --truncate --parsable2 --format=JobID,User,UID,Account,Partition,QOS,Submit,Start,End,Elapsed,NCPUS,AllocNodes,AllocTRES,CPUTimeRAW,NodeList,Reservation,ReservationId,State`
+    - `cli/modules/coact.py:135`
+    - Equivalent endpoint: `GET /slurmdb/v0.0.44/jobs/`
+
+### Write Operations
+
+- `sacctmgr modify -i account name=$facility:_regular_@$cluster set GrpTRES=node=$nodes`
+    - `cli/modules/coact.py`
+    - NOT directly possible, `slurmrest` does not support account resource allocation assignments
+
+## Migration Implications
+
+Currently, three daemon tasks can be migrated easily:
+- `coact-jobs-import.sh`
+- `coact-reporegistration-daemon.sh`
+- `coact-userregistration-daemon.sh`
+
+One remains difficult due to the un-migratable write operation:
+- `coact-facility-overage-daemon.sh`
+
+## Possible Alternatives
+
+All potential workarounds within `slurmrest` hae significant disadvantages vs the current `GrpTRES=node=0` approach. `sacctmgr` appears to be the only reliable away to make modifications to account allocations. There is [a ticket](https://support.schedmd.com/show_bug.cgi?id=24356) with SLURM to support more `sacctmgr` features, however there is no activity on it other than the original post.
