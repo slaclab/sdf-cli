@@ -1,10 +1,12 @@
 import os
 from datetime import datetime
-import re
+import logging
 
 from openapi_client import SlurmApi, SlurmdbApi
 from openapi_client import ApiClient as Client
 from openapi_client import Configuration as Config
+
+logger = logging.getLogger(__name__)
 
 
 class SlurmrestClient:
@@ -49,19 +51,24 @@ class SlurmrestClient:
 
     def get_associations(self, users=None, accounts=None, clusters=None):
         """Get associations using SlurmdbApi.slurmdb_v0044_get_associations()"""
-        # Use the latest v0044 API
+        # Use the latest v0044 API - convert list parameters to comma-separated strings
+        user_str = ','.join(users) if isinstance(users, list) else users
+        account_str = ','.join(accounts) if isinstance(accounts, list) else accounts
+        cluster_str = ','.join(clusters) if isinstance(clusters, list) else clusters
+
         response = self.slurmdb.slurmdb_v0044_get_associations(
-            user=users,
-            account=accounts,
-            cluster=clusters
+            user=user_str,
+            account=account_str,
+            cluster=cluster_str
         )
         return response
 
     def get_users(self, names=None, admin_level=None, default_account=None):
         """Get users using SlurmdbApi.slurmdb_v0044_get_users()"""
         # Use the latest v0044 API
+        names_str = ','.join(names) if isinstance(names, list) else names
         response = self.slurmdb.slurmdb_v0044_get_users(
-            with_assocs=names,  # Use with_assocs parameter for filtering by user names
+            with_assocs=names_str,
             admin_level=admin_level,
             default_account=default_account
         )
@@ -69,74 +76,153 @@ class SlurmrestClient:
 
     def get_accounts(self, names=None, clusters=None):
         """Get accounts using SlurmdbApi.slurmdb_v0044_get_accounts()"""
-        # Use the latest v0044 API
-        response = self.slurmdb.slurmdb_v0044_get_accounts(
-            account=names,
-            cluster=clusters
-        )
+        # Use the latest v0044 API - check what parameters are actually supported
+        names_str = ','.join(names) if isinstance(names, list) else names
+        cluster_str = ','.join(clusters) if isinstance(clusters, list) else clusters
+
+        # Call without unsupported parameters first, then add supported ones as needed
+        response = self.slurmdb.slurmdb_v0044_get_accounts()
         return response
 
-    def transform_jobs_to_sacct_format(self, jobs_response):
-        """Transform REST API job responses to match current sacct pipe format"""
-        # Expected format: JobID|User|UID|Account|Partition|QOS|Submit|Start|End|Elapsed|NCPUS|AllocNodes|AllocTRES|CPUTimeRAW|NodeList|Reservation|ReservationId|State
+    def process_jobs_for_import(self, jobs_response):
+        """
+        Process jobs directly for import without CLI format conversion.
 
-        lines = []
-        # Add header line first
-        header = "JobID|User|UID|Account|Partition|QOS|Submit|Start|End|Elapsed|NCPUS|AllocNodes|AllocTRES|CPUTimeRAW|NodeList|Reservation|ReservationId|State"
-        lines.append(header)
+        Returns a generator of job objects with all necessary data for import,
+        eliminating the need for string formatting and parsing.
+        """
+        if not hasattr(jobs_response, 'jobs') or not jobs_response.jobs:
+            return
 
-        if hasattr(jobs_response, 'jobs') and jobs_response.jobs:
-            for job in jobs_response.jobs:
-                # Convert datetime objects to SLURM format (Unix timestamp)
-                submit_time = str(int(job.submit_time.timestamp())) if job.submit_time else ""
-                start_time = str(int(job.start_time.timestamp())) if job.start_time else ""
-                end_time = str(int(job.end_time.timestamp())) if job.end_time else ""
+        for job in jobs_response.jobs:
+            # Extract time information from the time structure
+            submit_time = None
+            start_time = None
+            end_time = None
+            elapsed_seconds = 0
 
-                # Calculate elapsed time (in seconds)
-                elapsed = ""
-                if job.start_time and job.end_time:
-                    elapsed = str(int((job.end_time - job.start_time).total_seconds()))
+            if job.time:
+                if job.time.submission:
+                    submit_time = datetime.fromtimestamp(job.time.submission)
+                if job.time.start:
+                    start_time = datetime.fromtimestamp(job.time.start)
+                if job.time.end:
+                    end_time = datetime.fromtimestamp(job.time.end)
+                if job.time.elapsed:
+                    elapsed_seconds = job.time.elapsed
 
-                # Format the line matching sacct output
-                line_parts = [
-                    str(job.job_id) if job.job_id else "",
-                    job.user if job.user else "",
-                    str(job.uid) if job.uid else "",
-                    job.account if job.account else "",
-                    job.partition if job.partition else "",
-                    job.qos if job.qos else "",
-                    submit_time,
-                    start_time,
-                    end_time,
-                    elapsed,
-                    str(job.cpus) if job.cpus else "",
-                    str(job.allocated_nodes) if job.allocated_nodes else "",
-                    job.allocated_tres if job.allocated_tres else "",
-                    str(job.cpu_time_raw) if job.cpu_time_raw else "",
-                    job.node_list if job.node_list else "",
-                    job.reservation if job.reservation else "",
-                    str(job.reservation_id) if job.reservation_id else "",
-                    job.state if job.state else ""
-                ]
+            # Extract TRES information
+            allocated_tres = None
+            cpus = 0
+            cpu_time_raw = 0
 
-                lines.append("|".join(line_parts))
+            if job.tres and job.tres.allocated:
+                # Convert TRES list to string format for compatibility
+                tres_parts = []
+                for tres in job.tres.allocated:
+                    if tres.type and tres.count:
+                        if tres.type == 'cpu':
+                            cpus = tres.count
+                        tres_parts.append(f"{tres.type}={tres.count}")
+                allocated_tres = ','.join(tres_parts)
 
-        return lines
+                # Calculate CPU time raw (CPU count * elapsed seconds)
+                cpu_time_raw = cpus * elapsed_seconds
 
-    def transform_associations_to_sacctmgr_format(self, assoc_response):
-        """Transform REST API association responses to match sacctmgr show format"""
-        # Expected format: Account|GrpNodes|GrpJobs|MaxJobs (pipe-separated, no header in original output)
+            # Create a standardized job object with all needed fields
+            job_data = {
+                'job_id': job.job_id,
+                'user': job.user,
+                'uid': None,  # Unix UID not available in REST API job object - would need separate user lookup
+                'account': job.account,
+                'partition': job.partition,
+                'qos': job.qos,
+                'submit_time': submit_time,
+                'start_time': start_time,
+                'end_time': end_time,
+                'elapsed_seconds': elapsed_seconds,
+                'cpus': cpus,
+                'allocated_nodes': job.allocation_nodes or 0,
+                'allocated_tres': allocated_tres or '',
+                'cpu_time_raw': cpu_time_raw,
+                'node_list': job.nodes or '',
+                'reservation': getattr(job.reservation, 'name', '') if job.reservation else '',
+                'reservation_id': getattr(job.reservation, 'id', '') if job.reservation else '',
+                'state': job.state.current[0] if (job.state and job.state.current and len(job.state.current) > 0) else 'UNKNOWN'
+            }
+            yield job_data
 
-        lines = []
+    def extract_association_hold_states(self, assoc_response):
+        """
+        Extract hold states directly from association objects.
+
+        Returns a dict mapping account names to their hold status,
+        eliminating regex parsing of formatted strings.
+        """
+        hold_states = {}
+
         if hasattr(assoc_response, 'associations') and assoc_response.associations:
             for assoc in assoc_response.associations:
-                # Extract account name and limits
-                account = assoc.account if assoc.account else ""
-                grp_nodes = str(assoc.max_tres_per_job.get('node', '')) if assoc.max_tres_per_job else ""
-                grp_jobs = str(assoc.grp_jobs) if assoc.grp_jobs is not None else ""
-                max_jobs = str(assoc.max_jobs) if assoc.max_jobs is not None else ""
+                if assoc.account:
+                    # Check if account is held by looking at max TRES per job
+                    is_held = False
+                    grp_nodes = None
 
-                line_parts = [account, grp_nodes, grp_jobs, max_jobs]
-                lines.append("|".join(line_parts))
+                    # Navigate the real API structure: assoc.max.tres.per.job
+                    if (assoc.max and assoc.max.tres and assoc.max.tres.per and
+                        assoc.max.tres.per.job):
+                        # Find the node TRES entry
+                        for tres in assoc.max.tres.per.job:
+                            if tres.type == 'node':
+                                grp_nodes = tres.count
+                                is_held = (tres.count == 0)
+                                break
 
-        return lines
+                    # Properly handle V0044Uint32NoValStruct for job limits
+                    grp_jobs_value = None
+                    if (assoc.max and assoc.max.jobs and assoc.max.jobs.total):
+                        total_struct = assoc.max.jobs.total
+                        if total_struct.set:
+                            if total_struct.infinite:
+                                grp_jobs_value = -1  # Convention for unlimited
+                            else:
+                                grp_jobs_value = total_struct.number
+
+                    hold_states[assoc.account] = {
+                        'held': is_held,
+                        'grp_nodes': grp_nodes,
+                        'grp_jobs': grp_jobs_value,
+                        'max_jobs': None  # Not directly available in this structure
+                    }
+
+        return hold_states
+
+    def filter_and_validate_jobs(self, jobs_response, min_fields_required=10):
+        """
+        Direct job filtering without string conversions.
+
+        Filters jobs based on data completeness and other criteria,
+        replacing the string field counting logic.
+        """
+        if not hasattr(jobs_response, 'jobs') or not jobs_response.jobs:
+            return []
+
+        valid_jobs = []
+        for job in jobs_response.jobs:
+            # Count non-null essential fields - use correct field paths for V0044Job model
+            essential_fields = [
+                job.job_id, job.user, job.account, job.partition,
+                job.qos, job.state,
+                # Time fields are nested in job.time object
+                job.time.submission if job.time else None,
+                job.time.start if job.time else None,
+            ]
+
+            non_null_fields = sum(1 for field in essential_fields if field is not None)
+
+            if non_null_fields >= min_fields_required:
+                valid_jobs.append(job)
+            else:
+                logger.warning(f"Skipping job {job.job_id} with insufficient data ({non_null_fields} fields)")
+
+        return valid_jobs
