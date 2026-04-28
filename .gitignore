@@ -21,3 +21,6 @@ lib64
 
 # VS Code
 .vscode/
+
+# Secrets
+.env

@@ -2,7 +2,8 @@
 Unit tests for node allocation functionality.
 """
 
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+import os
 
 import pytest
 
@@ -30,17 +31,20 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
     """
     A facility with 256 purchased nodes goes over quota,
     gets its jobs blocked, then recovers and is unblocked with original nodes restored.
-    
+
     This tests the critical workflow:
     - Nodes are extracted from GraphQL (coact-api is the source of truth)
     - SLURM sacctmgr only tracks current hold state (GrpNodes value)
     - When blocking: GrpNodes set to 0
     - When unblocking: GrpNodes restored to purchased amount (from GraphQL)
     """
+    # Setup JWT token for REST client
+    os.environ["SLURM_JWT"] = "test_token"
+
     facility = "lcls"
     cluster = "ada"
     purchased_nodes = 256
-    
+
     # === PHASE 1: Facility Normal State ===
     # Initial state: facility under quota with purchased nodes
     facility_usage = FacilityUsage(
@@ -50,7 +54,7 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
         threshold=100.0,
         dry_run=False
     )
-    
+
     # GraphQL response includes purchasedNodes from coact-api
     graphql_response = {
         "repos": [
@@ -69,9 +73,21 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
     # sacctmgr shows facility has nodes available (GrpNodes != 0 means not held)
     sacctmgr_normal = b"""lcls:_regular_@ada|256|1000|1000
     """
-    
-    with patch('modules.coact.subprocess.check_output') as mock_subprocess:
-        mock_subprocess.return_value = sacctmgr_normal
+
+    # Mock the REST API client to return association data that indicates not held
+    def create_mock_associations_response(grp_nodes_value):
+        mock_assoc = Mock()
+        mock_assoc.account = "lcls:_regular_@ada"
+        mock_assoc.max_tres_per_job = {"node": grp_nodes_value}
+        mock_assoc.grp_jobs = 1000
+        mock_assoc.max_jobs = 1000
+
+        mock_response = Mock()
+        mock_response.associations = [mock_assoc]
+        return mock_response
+
+    with patch.object(facility_usage.slurm_client, 'get_associations') as mock_get_assoc:
+        mock_get_assoc.return_value = create_mock_associations_response(256)  # Normal state
         result = facility_usage.format_data(graphql_response)
         
         # Verify initial state: facility is not held and has nodes from GraphQL
@@ -84,10 +100,8 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
     graphql_response_over = create_graphql_response(105, purchased_nodes)
     
     # Format the over-quota data (including purchasedNodes from GraphQL)
-    sacctmgr_normal = b"""lcls:_regular_@ada|256|1000|1000
-    """
-    with patch('modules.coact.subprocess.check_output') as mock_subprocess:
-        mock_subprocess.return_value = sacctmgr_normal
+    with patch.object(facility_usage.slurm_client, 'get_associations') as mock_get_assoc:
+        mock_get_assoc.return_value = create_mock_associations_response(256)  # Still normal state
         data_over = facility_usage.format_data(graphql_response_over)
     
     # Now get the OveragePoint through overage()
@@ -113,14 +127,11 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
         assert f"name={facility}:_regular_@{cluster}" in called_args
     
     # After blocking, sacctmgr shows GrpNodes=0 (but GraphQL still has purchasedNodes)
-    sacctmgr_blocked = b"""lcls:_regular_@ada|0|1000|1000
-    """
-    
     # Create a fresh GraphQL response for the blocked state
     graphql_response_blocked = create_graphql_response(105, purchased_nodes)
-    
-    with patch('modules.coact.subprocess.check_output') as mock_subprocess:
-        mock_subprocess.return_value = sacctmgr_blocked
+
+    with patch.object(facility_usage.slurm_client, 'get_associations') as mock_get_assoc:
+        mock_get_assoc.return_value = create_mock_associations_response(0)  # Blocked state
         result = facility_usage.format_data(graphql_response_blocked)
         
         # Verify blocked state: held is True (GrpNodes=0), but purchasedNodes preserved from GraphQL
@@ -135,10 +146,8 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
     graphql_response_recovered = create_graphql_response(95, purchased_nodes)
     
     # Format the recovered data and check held state
-    sacctmgr_blocked_still = b"""lcls:_regular_@ada|0|1000|1000
-    """
-    with patch('modules.coact.subprocess.check_output') as mock_subprocess:
-        mock_subprocess.return_value = sacctmgr_blocked_still
+    with patch.object(facility_usage.slurm_client, 'get_associations') as mock_get_assoc:
+        mock_get_assoc.return_value = create_mock_associations_response(0)  # Still blocked
         data_recovered = facility_usage.format_data(graphql_response_recovered)
     
     # Get the recovery OveragePoint through overage()
@@ -165,19 +174,20 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
         assert f"name={facility}:_regular_@{cluster}" in called_args
     
     # Verify final state: sacctmgr shows nodes restored
-    sacctmgr_restored = b"""lcls:_regular_@ada|256|1000|1000
-    """
-    
     # Create fresh GraphQL response for final state
     graphql_response_final = create_graphql_response(95, purchased_nodes)
-    
-    with patch('modules.coact.subprocess.check_output') as mock_subprocess:
-        mock_subprocess.return_value = sacctmgr_restored
+
+    with patch.object(facility_usage.slurm_client, 'get_associations') as mock_get_assoc:
+        mock_get_assoc.return_value = create_mock_associations_response(256)  # Restored state
         result = facility_usage.format_data(graphql_response_final)
         
         # Verify recovered state: not held and purchasedNodes from GraphQL
         assert result[facility][cluster]["held"] is False
         assert result[facility][cluster]["percentUsed"] == [95]
         assert result[facility][cluster]["purchasedNodes"] == purchased_nodes
+
+    # Clean up JWT token
+    if "SLURM_JWT" in os.environ:
+        del os.environ["SLURM_JWT"]
 
 

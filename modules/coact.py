@@ -18,6 +18,8 @@ import json
 import subprocess
 from timeit import default_timer as timer
 
+from .slurmrest import SlurmrestClient
+
 import pendulum as pdl
 from gql import gql
 
@@ -125,30 +127,41 @@ def slurm_dump(ctx, verbose, date, starttime, endtime):
 
 
 def run_sacct(
-    sacct_bin_path: str = "sacct",
+    sacct_bin_path: str = "sacct",  # Kept for compatibility but ignored
     date: str = "2023-10-12",
     start_time: str = "00:00:00",
     end_time: str = "23:59:59",
     verbose: bool = False
 ) -> Any:
-    """Run sacct command and yield output lines."""
-    commandstr = f"""SLURM_TIME_FORMAT=%s {sacct_bin_path} --allusers --duplicates --allclusters --allocations --starttime="{date}T{start_time}" --endtime="{date}T{end_time}" --truncate --parsable2 --format=JobID,User,UID,Account,Partition,QOS,Submit,Start,End,Elapsed,NCPUS,AllocNodes,AllocTRES,CPUTimeRAW,NodeList,Reservation,ReservationId,State"""
+    """Run SLURM REST API to get job data and yield output lines in sacct format."""
+    # Convert date and time to datetime format for REST API
+    start_datetime = f"{date}T{start_time}"
+    end_datetime = f"{date}T{end_time}"
 
     if verbose:
-        logger.info(f"cmd: {commandstr}")
+        logger.info(f"Using SLURM REST API with start_time={start_datetime}, end_time={end_datetime}")
 
-    index = 0
+    try:
+        client = SlurmrestClient()
+        jobs_response = client.get_jobs(
+            start_time=start_datetime,
+            end_time=end_datetime
+        )
 
-    process = subprocess.Popen(commandstr, shell=True, stdout=subprocess.PIPE)
-    for line in iter(process.stdout.readline, b""):
-        fields = line.decode("utf-8").split("|")
-        if index == 0 or len(fields) >= 10:
-            yield line.decode("utf-8").strip()
-            index += 1
-        else:
-            logger.warning(
-                f"skipping ({len(fields)}, {int(fields[7])} < {int(fields[8])}) {line}"
-            )
+        # Transform to sacct format and yield each line
+        formatted_lines = client.transform_jobs_to_sacct_format(jobs_response)
+
+        for index, line in enumerate(formatted_lines):
+            fields = line.split("|")
+            if index == 0 or len(fields) >= 10: 
+                yield line
+            else:
+                logger.warning(f"skipping ({len(fields)}) {line}")
+
+    except Exception as e:
+        logger.error(f"Failed to get jobs from SLURM REST API: {e}")
+        # Re-raise to maintain error handling behavior
+        raise
 
 
 # ============================================================================
@@ -948,6 +961,7 @@ class FacilityUsage(GraphQlMixin):
         self.windows = windows
         self.threshold = threshold
         self.dry_run = dry_run
+        self.slurm_client = SlurmrestClient()
 
     def get(self, date: str) -> Iterator[OveragePoint]:
         """Run the overage calculation process."""
@@ -1012,25 +1026,32 @@ class FacilityUsage(GraphQlMixin):
             for c in current[f].keys():
                 list_of_assoc.append(f"{f}:_regular_@{c}")
 
-        cmd = f"sacctmgr show assoc where account={','.join(list_of_assoc)} --noheader -P format=Account,GrpNodes,GrpJobs,MaxJobs"
-        logger.trace(f"Getting hold states using '{cmd}'...")
+        logger.trace(f"Getting hold states for accounts: {list_of_assoc}")
 
         try:
-            for l in subprocess.check_output(cmd.split()).split(b"\n"):
-                this = str(l, encoding="utf-8").strip().split("|")
-                try:
-                    m = re.match(r"^(?P<f>\S+):(?P<r>\S+)@(?P<c>\S+)$", this[0])
-                    holding = True if this[1] == "0" else False
-                    if m:
-                        d = m.groupdict()
-                        f = d["f"]
-                        c = d["c"]
-                        current[f][c]["held"] = holding
-                        logger.trace(f"Set {f}@{c} to {holding}")
-                except Exception:
-                    pass
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to get hold states: {e}")
+            # Use REST API instead of subprocess
+            associations_response = self.slurm_client.get_associations(
+                accounts=','.join(list_of_assoc)
+            )
+
+            # Transform the response to match the expected format
+            for assoc_line in self.slurm_client.transform_associations_to_sacctmgr_format(associations_response):
+                if assoc_line.strip():
+                    this = assoc_line.strip().split("|")
+                    try:
+                        m = re.match(r"^(?P<f>\S+):(?P<r>\S+)@(?P<c>\S+)$", this[0])
+                        holding = True if this[1] == "0" else False
+                        if m:
+                            d = m.groupdict()
+                            f = d["f"]
+                            c = d["c"]
+                            current[f][c]["held"] = holding
+                            logger.trace(f"Set {f}@{c} to {holding}")
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            logger.warning(f"Failed to get hold states from REST API: {e}")
 
         return current
 
