@@ -473,7 +473,7 @@ wheels = [
 [[package]]
 name = "openapi-client"
 version = "1.0.0"
-source = { directory = "/Users/ryanw/Documents/code/coact/slurmrest_client" }
+source = { editable = "slurmrest_client" }
 dependencies = [
     { name = "pydantic" },
     { name = "python-dateutil" },
@@ -837,7 +837,7 @@ requires-dist = [
     { name = "gql", extras = ["all"], specifier = ">=3.4.1" },
     { name = "jinja2", specifier = ">=3.1.2" },
     { name = "loguru", specifier = ">=0.7.0" },
-    { name = "openapi-client", directory = "/Users/ryanw/Documents/code/coact/slurmrest_client" },
+    { name = "openapi-client", editable = "slurmrest_client" },
     { name = "pendulum", specifier = ">=3.2.0" },
     { name = "tzlocal", specifier = ">=5.3.1" },
 ]

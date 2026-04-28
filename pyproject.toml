@@ -19,6 +19,9 @@ dependencies = [
     "openapi_client",
 ]
 
+[tool.uv.sources]
+openapi_client = { path = "slurmrest_client", editable = true }
+
 [dependency-groups]
 dev = [
     {include-group = "test"},

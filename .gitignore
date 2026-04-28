@@ -24,3 +24,6 @@ lib64
 
 # Secrets
 .env
+
+# Generated Client
+slurmrest_client/
