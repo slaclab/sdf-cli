@@ -2,12 +2,10 @@
 Unit tests for node allocation functionality.
 """
 
-from unittest.mock import patch, Mock
+from unittest.mock import patch
 import os
 
-import pytest
-
-from modules.coact import toggle_job_blocking, OveragePoint, FacilityUsage
+from modules.coact import toggle_job_blocking, FacilityUsage
 
 # Import the OpenAPI client models for proper typing
 from openapi_client.models.v0044_openapi_assocs_resp import V0044OpenapiAssocsResp
@@ -79,10 +77,6 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
             {"facility": "LCLS", "cluster": "ada", "percentUsed": 85, "purchasedNodes": purchased_nodes},
         ]
     }
-    
-    # sacctmgr shows facility has nodes available (GrpNodes != 0 means not held)
-    sacctmgr_normal = b"""lcls:_regular_@ada|256|1000|1000
-    """
 
     # Mock the REST API client to return association data that indicates not held
     def create_mock_associations_response(grp_nodes_value):
