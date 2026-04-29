@@ -16,7 +16,7 @@ class SlurmrestClient:
     Args:
         host (str, optional): The slurmrest URL. If not provided, uses
                              SLURMREST_URL environment variable or defaults
-                             to http://localhost:6820
+                             to https://sdf-slurmrest-dev.slac.stanford.edu:6820.
     """
 
     def __init__(self, host: str | None = None):
@@ -26,7 +26,7 @@ class SlurmrestClient:
         if host:
             c.host = host
         else:
-            c.host = os.getenv("SLURMREST_URL", "http://localhost:6820")
+            c.host = os.getenv("SLURMREST_URL", "https://sdf-slurmrest-dev.slac.stanford.edu:6820")
 
         # Set JWT token for authentication
         c.access_token = os.getenv("SLURM_JWT")
