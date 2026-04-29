@@ -4,6 +4,14 @@ PIP_BIN ?= $(VENV_DIR)/bin/pip
 PYTHON_BIN ?= python3.9
 VAULT_SECRET_PATH ?= secret/tid/coact
 
+generate-client:
+	npm install -g @openapitools/openapi-generator-cli
+	openapi-generator-cli generate \
+		-i openapi-specs/slurmrest-api-v0.0.44.json \
+		-g python \
+		-o slurmrest_client \
+		--package-name openapi_client
+
 secrets:
 	mkdir etc/.secrets/ -p
 	#set -e; for i in ldap_binddn ldap_bindpw; do vault kv get --field=$$i $(VAULT_SECRET_PATH) > etc/.secrets/$$i ; done

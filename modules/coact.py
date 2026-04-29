@@ -18,6 +18,8 @@ import json
 import subprocess
 from timeit import default_timer as timer
 
+from .slurmrest import SlurmrestClient
+
 import pendulum as pdl
 from gql import gql
 
@@ -115,40 +117,47 @@ def slurm_dump(ctx, verbose, date, starttime, endtime):
     configure_logging_from_verbose(verbose)
     ctx.obj['verbose'] = verbose
 
-    for line in run_sacct(
+    for job_data in run_sacct(
         date=date,
         start_time=starttime,
         end_time=endtime,
         verbose=verbose > 0
     ):
-        click.echo(line)
+        # Convert job object to a readable format for CLI output
+        job_line = json.dumps(job_data, default=str, separators=(',', ':'))
+        click.echo(job_line)
 
 
 def run_sacct(
-    sacct_bin_path: str = "sacct",
     date: str = "2023-10-12",
     start_time: str = "00:00:00",
     end_time: str = "23:59:59",
     verbose: bool = False
 ) -> Any:
-    """Run sacct command and yield output lines."""
-    commandstr = f"""SLURM_TIME_FORMAT=%s {sacct_bin_path} --allusers --duplicates --allclusters --allocations --starttime="{date}T{start_time}" --endtime="{date}T{end_time}" --truncate --parsable2 --format=JobID,User,UID,Account,Partition,QOS,Submit,Start,End,Elapsed,NCPUS,AllocNodes,AllocTRES,CPUTimeRAW,NodeList,Reservation,ReservationId,State"""
+    """Get job data from SLURM REST API - returns job objects for efficient processing."""
+    # Convert date and time to datetime format for REST API
+    start_datetime = f"{date}T{start_time}"
+    end_datetime = f"{date}T{end_time}"
 
     if verbose:
-        logger.info(f"cmd: {commandstr}")
+        logger.info(f"Using SLURM REST API with start_time={start_datetime}, end_time={end_datetime}")
 
-    index = 0
+    try:
+        client = SlurmrestClient()
+        jobs_response = client.get_jobs(
+            start_time=start_datetime,
+            end_time=end_datetime
+        )
 
-    process = subprocess.Popen(commandstr, shell=True, stdout=subprocess.PIPE)
-    for line in iter(process.stdout.readline, b""):
-        fields = line.decode("utf-8").split("|")
-        if index == 0 or len(fields) >= 10:
-            yield line.decode("utf-8").strip()
-            index += 1
-        else:
-            logger.warning(
-                f"skipping ({len(fields)}, {int(fields[7])} < {int(fields[8])}) {line}"
-            )
+        # Always return job objects for efficient processing
+        for job_data in client.process_jobs_for_import(jobs_response):
+            yield job_data
+
+    except Exception as e:
+        logger.error(f"Failed to get jobs from SLURM REST API: {e}")
+        # Re-raise to maintain error handling behavior
+        raise
+
 
 
 # ============================================================================
@@ -522,7 +531,7 @@ class SlurmImporter(GraphQlMixin):
         self._clusters = {}
 
     def run(self, data, output_format: str, batch_size: int) -> None:
-        """Run the import process."""
+        """Run the import process using job objects."""
         self.back_channel = self.connect_graph_ql(
             username=self.username,
             password_file=self.password_file,
@@ -530,32 +539,89 @@ class SlurmImporter(GraphQlMixin):
         )
         self.get_metadata()
 
-        first = True
-        index = {}
         buffer = []
         s = timer()
 
-        for line in data.readlines():
+        # Process job objects directly
+        for job_data in data:
             if self.verbose:
-                click.echo(f"\n{line.strip()}")
-            if line:
-                parts = line.split("|")
-                if first:
-                    index = {field: idx for idx, field in enumerate(parts)}
-                    first = False
-                else:
-                    job = self.convert(index, parts)
-                    if job:
-                        buffer.append(job)
-                        if len(buffer) >= batch_size:
-                            self.generate_output(buffer, output_format)
-                            buffer = []
+                logger.info(f"Processing job {job_data.get('job_id')}")
+
+            job = self.convert_slurmrest(job_data)
+            if job:
+                buffer.append(job)
+                if len(buffer) >= batch_size:
+                    self.generate_output(buffer, output_format)
+                    buffer = []
 
         if len(buffer) > 0:
             self.generate_output(buffer, output_format)
 
         duration = timer() - s
-        logger.info(f"upload completed in {duration:,.02f}")
+        logger.info(f"import completed in {duration:,.02f}")
+
+    def convert_slurmrest(self, job_data: dict) -> Optional[dict]:
+        """Convert job object directly to import format."""
+        try:
+            # Apply the same remap logic but directly from job object
+            remapped_job = self.remap_job_slurmrest(job_data)
+            if not remapped_job:
+                return None
+
+            return {
+                "alloc": self.get_alloc(remapped_job['account']),
+                "job": {
+                    **remapped_job,
+                    # Convert datetime objects if needed
+                    'submit_time': remapped_job['submit_time'].isoformat() if remapped_job.get('submit_time') else None,
+                    'start_time': remapped_job['start_time'].isoformat() if remapped_job.get('start_time') else None,
+                    'end_time': remapped_job['end_time'].isoformat() if remapped_job.get('end_time') else None,
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error converting job {job_data.get('job_id', 'unknown')}: {e}")
+            if self.exit_on_error:
+                sys.exit(1)
+            return None
+
+    def remap_job_slurmrest(self, job_data: dict) -> Optional[dict]:
+        """Apply job remapping logic directly to job object."""
+        # Apply the same filtering logic as the original remap_job
+        account = job_data.get('account', '')
+        user = job_data.get('user', '')
+        partition = job_data.get('partition', '')
+
+        # Skip certain accounts and users (same logic as original)
+        if (
+            account in ("shared", "shared:default")
+            or account.startswith("shared")
+            or user in ("jonl", "vanilla", "yemi", "yangw", "pav", "root", "reranna", "ppascual", "renata")
+            or partition in ("fermi-transfer",)
+        ):
+            return None
+
+        # Clean up partition if it has commas
+        if "," in partition:
+            partition = partition.split(",")[0]
+
+        # Clean up account if it has @ symbol
+        if "@" in account:
+            account = account.split("@")[0]
+
+        # Fix QOS
+        qos = job_data.get('qos', 'Unknown')
+        if qos == "Unknown":
+            qos = "normal"
+
+        # Return the cleaned job data
+        return {
+            **job_data,
+            'account': account,
+            'partition': partition,
+            'qos': qos
+        }
+
 
     def get_metadata(self) -> bool:
         """Fetch repository and allocation metadata."""
@@ -672,116 +738,6 @@ class SlurmImporter(GraphQlMixin):
     def output_json(self, jobs: list, indent: int = 2):
         """Output jobs as JSON."""
         click.echo(json.dumps(jobs, indent=indent, default=datetime_converter))
-
-    def convert(self, index: dict, parts: list, default_facility: str = "shared", default_repo: str = "default") -> Optional[dict]:
-        """Convert a line of sacct output to a job dictionary."""
-
-        def conv(s, fx, default=None):
-            try:
-                return fx(s)
-            except:
-                return default
-
-        def kilos_to_int(s: str) -> int:
-            m = re.match(r"(^[0-9.]+)([KMG])?", s.upper())
-            if m:
-                mul = 1
-                g = m.group(2)
-                if g:
-                    p = "KMG".find(g)
-                    if p >= 0:
-                        mul = math.pow(2, (p + 1) * 10)
-                    else:
-                        raise Exception("Can't handle multiplier=%s for value=%s" % (g, s))
-                return int(float(m.group(1)) * mul)
-            else:
-                raise Exception("Can't parse %s" % s)
-
-        def calc_resource_hours(startTs, endTs, tres: str, cluster: dict, alloc_nodes: Optional[int], ncpus: Optional[int]) -> tuple:
-            elapsed_secs = (endTs - startTs).total_seconds()
-            # min time
-            if elapsed_secs <= 0:
-                elapsed_secs = 1.0
-            # determine maximal amounts
-            # if a single node, then divide all metrics by the number of nodes
-            used = {}
-            if tres != "":
-                for x in tres.split(","):
-                    k, v = x.split("=")
-                    if "gpu" in k:
-                        k = "gpu"
-                    if alloc_nodes > 0:
-                        used[k] = kilos_to_int(v) * 1.0 / alloc_nodes
-            # if node is exclusive
-            # max % of cpu, mem or gpu's for servers
-            ratios = {}
-            max_ratio = 0
-            for resource in ("cpu", "gpu", "mem"):
-                if resource in used:
-                    ratios[resource] = used[resource] / cluster[resource]
-                    if ratios[resource] > max_ratio:
-                        max_ratio = ratios[resource]
-                    logger.debug(f"    {resource}: used {used[resource]} / {cluster[resource]} -> {ratios[resource]:.5}")
-            compute_time = elapsed_secs * ncpus / 3600.0
-            resource_time = elapsed_secs * alloc_nodes * max_ratio * cluster["cpu"] / 3600.0
-            if self.verbose:
-                click.echo(f"  calc time: {elapsed_secs}s compute_hours: {resource_time:.5} core_hours: {compute_time:.5}")
-            return resource_time, elapsed_secs
-
-        d = {field: parts[idx] for field, idx in index.items()}
-        facility = default_facility
-        repo = default_repo
-        try:
-            facility, repo = d["Account"].split(":")
-        except Exception:
-            logger.warning(f"could not determine facility and repo from {d['Account']}")
-
-        startTs = parse_datetime(int(d["Start"]), force_tz=True)
-        endTs = parse_datetime(int(d["End"]), force_tz=True)
-
-        if d["Partition"] in self._clusters:
-            alloc_nodes = kilos_to_int(d["AllocNodes"])
-            ncpus = conv(d["NCPUS"], int, 0)
-            resource_hours, elapsed_secs = calc_resource_hours(
-                startTs=startTs, endTs=endTs, tres=d["AllocTRES"],
-                alloc_nodes=alloc_nodes, ncpus=ncpus, cluster=self._clusters[d["Partition"]],
-            )
-        else:
-            resource_hours = 0.0
-            logger.warning(f"partition {d['Partition']} not defined in coact, ignoring job")
-
-        if resource_hours == 0.0:
-            return None
-
-        allocId = None
-        try:
-            allocId = self.get_alloc_id(facility, repo, d["Partition"], startTs)
-        except Exception as e:
-            logger.warning(f"{e}: {d}")
-            if self.exit_on_error:
-                sys.exit(1)
-            return None
-
-        qos = d["QOS"]
-        try:
-            a = qos.split("^")
-            b = a[1].split("@")
-            qos = b[0]
-        except:
-            pass
-        if qos not in ("scavenger", "preemptable", "normal"):
-            logger.warning(f"could not determine appropriate qos '{d['QOS']}': line {d}")
-
-        out = {
-            "jobId": d["JobID"],
-            "username": d["User"],
-            "allocationId": allocId,
-            "qos": qos,
-            "startTs": str(startTs.in_tz("UTC")).replace(" ", "T").replace("+00:00", ".000Z"),
-            "endTs": str(endTs.in_tz("UTC")).replace(" ", "T").replace("+00:00", ".000Z"),
-            "resourceHours": resource_hours,
-        }
-        return out
 
 
 # ============================================================================
@@ -948,6 +904,7 @@ class FacilityUsage(GraphQlMixin):
         self.windows = windows
         self.threshold = threshold
         self.dry_run = dry_run
+        self.slurm_client = SlurmrestClient()
 
     def get(self, date: str) -> Iterator[OveragePoint]:
         """Run the overage calculation process."""
@@ -1012,25 +969,41 @@ class FacilityUsage(GraphQlMixin):
             for c in current[f].keys():
                 list_of_assoc.append(f"{f}:_regular_@{c}")
 
-        cmd = f"sacctmgr show assoc where account={','.join(list_of_assoc)} --noheader -P format=Account,GrpNodes,GrpJobs,MaxJobs"
-        logger.trace(f"Getting hold states using '{cmd}'...")
+        logger.trace(f"Getting hold states for accounts: {list_of_assoc}")
 
         try:
-            for l in subprocess.check_output(cmd.split()).split(b"\n"):
-                this = str(l, encoding="utf-8").strip().split("|")
-                try:
-                    m = re.match(r"^(?P<f>\S+):(?P<r>\S+)@(?P<c>\S+)$", this[0])
-                    holding = True if this[1] == "0" else False
-                    if m:
-                        d = m.groupdict()
-                        f = d["f"]
-                        c = d["c"]
-                        current[f][c]["held"] = holding
-                        logger.trace(f"Set {f}@{c} to {holding}")
-                except Exception:
-                    pass
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to get hold states: {e}")
+            # Use REST API instead of subprocess - handle case where SlurmDB API is not available
+            hold_states = {}
+            try:
+                associations_response = self.slurm_client.get_associations(
+                    accounts=','.join(list_of_assoc)
+                )
+
+                # Extract hold states directly from association objects
+                hold_states = self.slurm_client.extract_association_hold_states(associations_response)
+                logger.debug(f"Successfully retrieved {len(hold_states)} association hold states from REST API")
+
+            except Exception as e:
+                logger.warning(f"Failed to get hold states from REST API: {e}")
+                logger.info("Association data not available via REST API - this is common in SLURM setups where SlurmDB API is disabled")
+                # Set default hold states (not held) for all associations when SlurmDB API is unavailable
+                hold_states = {assoc: {'held': False, 'grp_nodes': None, 'grp_jobs': None, 'max_jobs': None}
+                              for assoc in list_of_assoc}
+
+            # Apply hold states to current data structure
+            for account_name, state_info in hold_states.items():
+                # Parse account name to extract facility and cluster
+                m = re.match(r"^(?P<f>\S+):(?P<r>\S+)@(?P<c>\S+)$", account_name)
+                if m:
+                    d = m.groupdict()
+                    f = d["f"]
+                    c = d["c"]
+                    if f in current and c in current[f]:
+                        current[f][c]["held"] = state_info["held"]
+                        logger.trace(f"Set {f}@{c} to {state_info['held']}")
+
+        except Exception as e:
+            logger.warning(f"Failed to get hold states from REST API: {e}")
 
         return current
 
