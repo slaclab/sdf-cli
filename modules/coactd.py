@@ -534,6 +534,22 @@ class RepoRegistration(Registration):
         # run the facility tasks for this repo
         runner = self.run_playbook("coact/add_repo.yaml", facility=facility, repo=repo)
 
+        # Extract repo GID if it was created for facilities that use grouper
+        repo_gid = None
+        repo_group_name = ""
+        if facility.lower() in ['lcls', 'cryoem']:
+            try:
+                # Get the repo_gid fact that was set in add_repo.yaml
+                repo_facts = self.playbook_task_res(runner, 'Create a facility repo', 'Expose group values for runner')
+                if repo_facts and 'ansible_facts' in repo_facts:
+                    repo_gid = repo_facts['ansible_facts']['repo_gid']
+                    repo_group_name = repo_facts['ansible_facts']['repo_group_name']
+                    self.logger.info(f"Retrieved repo GID for {facility}:{repo}: {repo_gid}")
+                else:
+                    self.logger.warning(f"No repo GID found in playbook results for {facility}:{repo}")
+            except Exception as e:
+                self.logger.warning(f"Failed to extract repo GID for {facility}:{repo}: {e}")
+
         leaders = [principal]
         users = [principal]
 
@@ -558,15 +574,43 @@ class RepoRegistration(Registration):
         repo_upserted = self.back_channel.execute(REPO_UPSERT_GQL, repo_create_req)
         repo_id = repo_upserted['repoUpsert']['Id']
 
-        feature_req = {'repo': {'Id': repo_id}}
+        # Create a parameterized feature upsert mutation
         FEATURE_UPSERT_GQL = gql("""
-            mutation repoUpsert($repo: RepoInput! ) {
-                repoUpsertFeature(repo: $repo, feature: { name: "slurm", state: true, options: [] }) {
+            mutation repoUpsert($repo: RepoInput!, $feature: RepoFeatureInput!) {
+                repoUpsertFeature(repo: $repo, feature: $feature) {
                     Id
                 }
             }
         """)
-        feature_upserted = self.back_channel.execute(FEATURE_UPSERT_GQL, feature_req)
+
+        # Create slurm feature
+        slurm_feature_req = {
+            'repo': {'Id': repo_id},
+            'feature': {'name': 'slurm', 'state': True, 'options': []}
+        }
+        self.back_channel.execute(FEATURE_UPSERT_GQL, slurm_feature_req)
+
+        # Create posixgroup feature if GID was obtained from grouper
+        if repo_gid is not None:
+            posixgroup_options = [json.dumps({
+                "name": repo_group_name,
+                "gidNumber": int(repo_gid)
+            })]
+
+            posixgroup_feature_req = {
+                'repo': {'Id': repo_id},
+                'feature': {
+                    'name': 'posixgroup',
+                    'state': True,
+                    'options': posixgroup_options
+                }
+            }
+
+            try:
+                self.back_channel.execute(FEATURE_UPSERT_GQL, posixgroup_feature_req)
+                self.logger.info(f"Created posixgroup feature for {facility}:{repo} with GID {repo_gid}")
+            except Exception as e:
+                self.logger.warning(f"Failed to create posixgroup feature for {facility}:{repo}: {e}")
 
         return True
 
