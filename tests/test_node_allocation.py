@@ -20,8 +20,11 @@ def create_graphql_response(usage_percent: float, nodes: int):
                 ]
             }
         ],
+        "facilities": [
+            {"name": "LCLS", "computepurchases": [{"clustername": "ada", "purchased": nodes}]}
+        ],
         "000060": [
-            {"facility": "LCLS", "cluster": "ada", "percentUsed": usage_percent, "purchasedNodes": nodes},
+            {"facility": "LCLS", "cluster": "ada", "percentUsed": usage_percent},
         ]
     }
 
@@ -51,7 +54,7 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
         dry_run=False
     )
     
-    # GraphQL response includes purchasedNodes from coact-api
+    # GraphQL response includes purchasedNodes from Facility.computepurchases
     graphql_response = {
         "repos": [
             {
@@ -61,8 +64,11 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
                 ]
             }
         ],
+        "facilities": [
+            {"name": "LCLS", "computepurchases": [{"clustername": "ada", "purchased": purchased_nodes}]}
+        ],
         "000060": [
-            {"facility": "LCLS", "cluster": "ada", "percentUsed": 85, "purchasedNodes": purchased_nodes},
+            {"facility": "LCLS", "cluster": "ada", "percentUsed": 85},
         ]
     }
     
