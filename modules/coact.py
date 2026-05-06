@@ -1093,14 +1093,14 @@ class FacilityManager(GraphQlMixin):
 
     FACILITY_UPDATE_PURCHASED_GQL = gql("""
         mutation facilityUpdatePurchased(
-            $facilityName: String!,
-            $clusterName: String!,
-            $purchased: Int!
+            $facility: FacilityInput!,
+            $cluster: ClusterInput!,
+            $purchase: Float!
         ) {
-            facilityUpdateComputePurchase(
-                facility: $facilityName,
-                cluster: $clusterName,
-                purchased: $purchased
+            facilityAddUpdateComputePurchase(
+                facility: $facility,
+                cluster: $cluster,
+                purchase: $purchase
             ) {
                 name
                 computepurchases {
@@ -1124,7 +1124,7 @@ class FacilityManager(GraphQlMixin):
     """)
 
     REPOS_WITH_ALLOCATIONS_GQL = gql("""
-        query reposWithAllocations($facilityName: String!, $clusterName: String!) {
+        query reposWithAllocations($facilityName: String!) {
             repos(filter: {facility: $facilityName}) {
                 Id
                 name
@@ -1158,9 +1158,9 @@ class FacilityManager(GraphQlMixin):
                 result = self.back_channel.execute(
                     self.FACILITY_UPDATE_PURCHASED_GQL,
                     {
-                        'facilityName': facility,
-                        'clusterName': cluster,
-                        'purchased': nodes
+                        'facility': {'name': facility},
+                        'cluster': {'name': cluster},
+                        'purchase': float(nodes)
                     }
                 )
                 logger.info(f"Successfully updated facility: {result}")
@@ -1214,7 +1214,7 @@ class FacilityManager(GraphQlMixin):
             # Get affected repos
             repos_result = self.back_channel.execute(
                 self.REPOS_WITH_ALLOCATIONS_GQL,
-                {'facilityName': facility, 'clusterName': cluster}
+                {'facilityName': facility}
             )
 
             affected_count = 0
