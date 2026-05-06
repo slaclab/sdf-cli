@@ -975,39 +975,25 @@ class FacilityUsage(GraphQlMixin):
 
         logger.trace(f"Getting hold states for accounts: {list_of_assoc}")
 
-        try:
-            # Use REST API instead of subprocess - handle case where SlurmDB API is not available
-            hold_states = {}
+        # Query each account individually to avoid bulk-request issues with slurmrest
+        for account in list_of_assoc:
             try:
-                associations_response = self.slurm_client.get_associations(
-                    accounts=','.join(list_of_assoc)
-                )
-
-                # Extract hold states directly from association objects
+                associations_response = self.slurm_client.get_associations(accounts=account)
                 hold_states = self.slurm_client.extract_association_hold_states(associations_response)
-                logger.debug(f"Successfully retrieved {len(hold_states)} association hold states from REST API")
+                logger.debug(f"Retrieved hold state for {account}: {hold_states}")
+
+                for account_name, state_info in hold_states.items():
+                    m = re.match(r"^(?P<f>\S+):(?P<r>\S+)@(?P<c>\S+)$", account_name)
+                    if m:
+                        d = m.groupdict()
+                        f = d["f"]
+                        c = d["c"]
+                        if f in current and c in current[f]:
+                            current[f][c]["held"] = state_info["held"]
+                            logger.trace(f"Set {f}@{c} to {state_info['held']}")
 
             except Exception as e:
-                logger.warning(f"Failed to get hold states from REST API: {e}")
-                logger.info("Association data not available via REST API - this is common in SLURM setups where SlurmDB API is disabled")
-                # Set default hold states (not held) for all associations when SlurmDB API is unavailable
-                hold_states = {assoc: {'held': False, 'grp_nodes': None, 'grp_jobs': None, 'max_jobs': None}
-                              for assoc in list_of_assoc}
-
-            # Apply hold states to current data structure
-            for account_name, state_info in hold_states.items():
-                # Parse account name to extract facility and cluster
-                m = re.match(r"^(?P<f>\S+):(?P<r>\S+)@(?P<c>\S+)$", account_name)
-                if m:
-                    d = m.groupdict()
-                    f = d["f"]
-                    c = d["c"]
-                    if f in current and c in current[f]:
-                        current[f][c]["held"] = state_info["held"]
-                        logger.trace(f"Set {f}@{c} to {state_info['held']}")
-
-        except Exception as e:
-            logger.warning(f"Failed to get hold states from REST API: {e}")
+                logger.warning(f"Failed to get hold state for {account}: {e}")
 
         return current
 
