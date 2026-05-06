@@ -26,8 +26,8 @@ def make_handler():
 def test_approved_request_dispatches_cascade_with_payload_fields():
     """
     An approved FacilityComputeAllocation request routes to
-    do_facility_compute_allocation_cascade with facility, cluster,
-    old/new purchased, and strategy taken directly from the request dict.
+    do_facility_compute_allocation_cascade with facility and cluster
+    extracted from the request dict.
     """
     handler = make_handler()
     handler.do_facility_compute_allocation_cascade = MagicMock(return_value=True)
@@ -35,22 +35,19 @@ def test_approved_request_dispatches_cascade_with_payload_fields():
     req = {
         'facilityname': 'lcls',
         'clustername': 'ada',
-        'oldPurchased': 100,
-        'newPurchased': 200,
-        'updateStrategy': 'proportional',
     }
     result = handler.do('req1', 'INSERT', 'FacilityComputeAllocation', RequestStatus.APPROVED, req, dry_run=False)
 
     assert result is True
     handler.do_facility_compute_allocation_cascade.assert_called_once_with(
-        'lcls', 'ada', 100, 200, 'proportional', dry_run=False
+        'lcls', 'ada', dry_run=False
     )
 
 
 def test_cascade_recalculates_every_repo_allocation_by_percentage():
     """
     When purchased nodes change, every repo on that cluster receives a new
-    absolute allocation of (percentOfFacility / 100) * new_purchased, preserving
+    absolute allocation of (percentOfFacility / 100) * purchased, preserving
     each repo's percentage share of the facility.
     """
     handler = make_handler()
@@ -76,14 +73,14 @@ def test_cascade_recalculates_every_repo_allocation_by_percentage():
         },
     ]
     handler.back_channel.execute.side_effect = [
+        {'facility': {'computepurchases': [{'clustername': 'ada', 'purchased': 200}]}},  # facility query
         {'repos': repos},
         {'repo': {'currentComputeAllocations': []}},  # SLURM re-query for repo-a
         {'repo': {'currentComputeAllocations': []}},  # SLURM re-query for repo-b
     ]
 
     result = handler.do_facility_compute_allocation_cascade(
-        'lcls', 'ada', old_purchased=100, new_purchased=200,
-        update_strategy='proportional', dry_run=False
+        'lcls', 'ada', dry_run=False
     )
 
     assert result is True

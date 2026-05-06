@@ -148,9 +148,6 @@ class Registration(GraphQlSubscriber, AnsibleRunner):
                     end
                     percentOfFacility
                     allocated
-                    oldPurchased
-                    newPurchased
-                    updateStrategy
                 }
                 operationType
             }
@@ -539,12 +536,9 @@ class RepoRegistration(Registration):
 
             elif req_type == 'FacilityComputeAllocation':
                 clustername = req.get('clustername', None)
-                old_purchased = req.get('oldPurchased', None)
-                new_purchased = req.get('newPurchased', None)
-                update_strategy = req.get('updateStrategy', 'proportional')
-                assert facility and clustername and old_purchased is not None and new_purchased is not None
+                assert facility and clustername
                 return self.do_facility_compute_allocation_cascade(
-                    facility, clustername, old_purchased, new_purchased, update_strategy, dry_run=dry_run
+                    facility, clustername, dry_run=dry_run
                 )
 
         return None
@@ -938,37 +932,36 @@ class RepoRegistration(Registration):
         self,
         facility: str,
         clustername: str,
-        old_purchased: int,
-        new_purchased: int,
-        update_strategy: str = 'proportional',
         dry_run: bool = False
     ) -> bool:
         """
         Handle facility-level compute allocation changes by updating all affected repo allocations.
-
-        Args:
-            facility: Name of the facility (e.g., 'shared', 'lcls')
-            clustername: Name of the cluster (e.g., 'roma', 'ampere')
-            old_purchased: Previous number of purchased nodes
-            new_purchased: New number of purchased nodes
-            update_strategy: 'proportional' (maintain percentages) or 'manual' (no auto-update)
-            dry_run: If True, only log what would be done without making changes
-
-        Returns:
-            True if successful, False otherwise
+        Queries the facility record directly for the current purchased node count.
         """
-        self.logger.info(
-            f"Processing facility compute allocation cascade: {facility}@{clustername} "
-            f"from {old_purchased} to {new_purchased} nodes (strategy: {update_strategy})"
+        # Fetch current purchased nodes from the facility record
+        facility_resp = self.back_channel.execute(
+            self.FACILITY_CURRENT_COMPUTE_CGL,
+            {'facility': facility}
         )
+        fac_data = facility_resp.get('facility', {})
+        new_purchased = None
+        for cp in fac_data.get('computepurchases', []):
+            if cp['clustername'].lower() == clustername.lower():
+                new_purchased = cp['purchased']
+                break
 
-        if update_strategy != 'proportional':
-            self.logger.info(f"Update strategy '{update_strategy}' - no automatic updates performed")
-            return True
+        if new_purchased is None:
+            self.logger.error(f"No purchase record found for {facility}@{clustername} - cannot cascade")
+            return False
 
         if new_purchased <= 0:
-            self.logger.warning(f"Invalid new_purchased nodes: {new_purchased} - skipping cascade updates")
+            self.logger.warning(f"Invalid purchased nodes: {new_purchased} - skipping cascade updates")
             return True
+
+        self.logger.info(
+            f"Processing facility compute allocation cascade: {facility}@{clustername} "
+            f"-> {new_purchased} purchased nodes"
+        )
 
         try:
             # Get all repositories with allocations on this facility/cluster
