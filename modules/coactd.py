@@ -148,6 +148,9 @@ class Registration(GraphQlSubscriber, AnsibleRunner):
                     end
                     percentOfFacility
                     allocated
+                    oldPurchased
+                    newPurchased
+                    updateStrategy
                 }
                 operationType
             }
@@ -404,7 +407,8 @@ class RepoRegistration(Registration):
         'RepoRemoveUser',
         'RepoChangeComputeRequirement',
         'RepoComputeAllocation',
-        'RepoUpdateFeature'
+        'RepoUpdateFeature',
+        'FacilityComputeAllocation'
     ]
 
     REPO_USERS_GQL = gql("""
@@ -449,6 +453,24 @@ class RepoRegistration(Registration):
           }
         }
         """)
+
+    REPOS_WITH_ALLOCATIONS_GQL = gql("""
+        query reposWithAllocations($facilityName: String!) {
+            repos(filter: {facility: $facilityName}) {
+                Id
+                name
+                facility
+                currentComputeAllocations {
+                    Id
+                    clustername
+                    percentOfFacility
+                    start
+                    end
+                    allocatedNodesCount
+                }
+            }
+        }
+    """)
 
     FACILITY_CURRENT_COMPUTE_CGL = gql("""
         query facility( $facility: String! ) {
@@ -514,6 +536,16 @@ class RepoRegistration(Registration):
 
             elif req_type == 'RepoUpdateFeature':
                 return self.do_feature(repo, facility)
+
+            elif req_type == 'FacilityComputeAllocation':
+                clustername = req.get('clustername', None)
+                old_purchased = req.get('oldPurchased', None)
+                new_purchased = req.get('newPurchased', None)
+                update_strategy = req.get('updateStrategy', 'proportional')
+                assert facility and clustername and old_purchased is not None and new_purchased is not None
+                return self.do_facility_compute_allocation_cascade(
+                    facility, clustername, old_purchased, new_purchased, update_strategy, dry_run=dry_run
+                )
 
         return None
 
@@ -902,6 +934,140 @@ class RepoRegistration(Registration):
     def do_feature(self, repo, facility, dry_run: bool = False) -> bool:
         raise NotImplementedError("do_feature not yet implemented")
 
+    def do_facility_compute_allocation_cascade(
+        self,
+        facility: str,
+        clustername: str,
+        old_purchased: int,
+        new_purchased: int,
+        update_strategy: str = 'proportional',
+        dry_run: bool = False
+    ) -> bool:
+        """
+        Handle facility-level compute allocation changes by updating all affected repo allocations.
+
+        Args:
+            facility: Name of the facility (e.g., 'shared', 'lcls')
+            clustername: Name of the cluster (e.g., 'roma', 'ampere')
+            old_purchased: Previous number of purchased nodes
+            new_purchased: New number of purchased nodes
+            update_strategy: 'proportional' (maintain percentages) or 'manual' (no auto-update)
+            dry_run: If True, only log what would be done without making changes
+
+        Returns:
+            True if successful, False otherwise
+        """
+        self.logger.info(
+            f"Processing facility compute allocation cascade: {facility}@{clustername} "
+            f"from {old_purchased} to {new_purchased} nodes (strategy: {update_strategy})"
+        )
+
+        if update_strategy != 'proportional':
+            self.logger.info(f"Update strategy '{update_strategy}' - no automatic updates performed")
+            return True
+
+        if new_purchased <= 0:
+            self.logger.warning(f"Invalid new_purchased nodes: {new_purchased} - skipping cascade updates")
+            return True
+
+        try:
+            # Get all repositories with allocations on this facility/cluster
+            repos_resp = self.back_channel.execute(
+                self.REPOS_WITH_ALLOCATIONS_GQL,
+                {'facilityName': facility}
+            )
+
+            affected_repos = []
+            for repo in repos_resp['repos']:
+                for allocation in repo['currentComputeAllocations']:
+                    if allocation['clustername'].lower() == clustername.lower():
+                        affected_repos.append({
+                            'repo': repo,
+                            'allocation': allocation
+                        })
+
+            self.logger.info(f"Found {len(affected_repos)} repo allocations to update on {facility}@{clustername}")
+
+            # Process each affected repository allocation
+            update_count = 0
+            for item in affected_repos:
+                repo = item['repo']
+                allocation = item['allocation']
+
+                # Calculate new node allocation maintaining the same percentage
+                percent_of_facility = allocation['percentOfFacility']
+                new_allocated_nodes = (percent_of_facility / 100.0) * new_purchased
+
+                self.logger.info(
+                    f"Updating {repo['facility']}:{repo['name']} on {clustername}: "
+                    f"{percent_of_facility}% -> {new_allocated_nodes:.2f} nodes (was {allocation['allocatedNodesCount']})"
+                )
+
+                if not dry_run:
+                    try:
+                        # Update the allocation using existing upsert method
+                        start_time = pdl.parse(allocation['start'], timezone='UTC')
+                        end_time = allocation['end']
+
+                        self.upsert_repo_compute_allocation(
+                            repo_id=repo['Id'],
+                            cluster=clustername,
+                            percent=percent_of_facility,
+                            allocated_resource=new_allocated_nodes,
+                            start=start_time,
+                            end=end_time,
+                            dry_run=dry_run
+                        )
+
+                        # Re-run the SLURM configuration to apply the new limits
+                        # Get updated allocation info
+                        repo_req = {'repo': {'facility': repo['facility'], 'name': repo['name']}}
+                        updated_resp = self.back_channel.execute(self.REPO_CURRENT_COMPUTE_REQUIREMENT_GQL, repo_req)
+                        updated_repo = updated_resp['repo']
+
+                        # Find the updated allocation for this cluster
+                        updated_alloc = None
+                        for alloc in updated_repo['currentComputeAllocations']:
+                            if alloc['clustername'].lower() == clustername.lower():
+                                updated_alloc = alloc
+                                break
+
+                        if updated_alloc:
+                            # Update SLURM with the new resource limits
+                            self.run_playbook(
+                                'coact/slurm/ensure-repo.yaml',
+                                facility=repo['facility'],
+                                repo=repo['name'],
+                                partition=clustername,
+                                cpus=int(updated_alloc['cpus']),
+                                memory=int(updated_alloc['memory']) * 1024,
+                                nodes=int(ceil(updated_alloc['nodes'])),
+                                gpus=int(updated_alloc['gpus']),
+                                state='present',
+                                dry_run=dry_run
+                            )
+
+                        update_count += 1
+                        self.logger.info(f"Successfully updated {repo['facility']}:{repo['name']} allocation")
+
+                    except Exception as e:
+                        self.logger.error(f"Failed to update {repo['facility']}:{repo['name']}: {e}")
+                        # Continue with other repos even if one fails
+                        continue
+                else:
+                    self.logger.info(f"DRY RUN: Would update {repo['facility']}:{repo['name']} allocation")
+                    update_count += 1
+
+            self.logger.info(
+                f"Facility cascade update completed: {update_count}/{len(affected_repos)} "
+                f"repo allocations updated on {facility}@{clustername}"
+            )
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Facility compute allocation cascade failed: {e}")
+            return False
+
 
 @coactd.command(name='reporegistration')
 @common_options
@@ -911,7 +1077,7 @@ def repo_registration(ctx, verbose, username, password_file, client_name, dry_ru
     """Workflow for repository maintenance.
 
     Handles NewRepo, RepoMembership, RepoRemoveUser, RepoChangeComputeRequirement,
-    RepoComputeAllocation, and RepoUpdateFeature request types.
+    RepoComputeAllocation, RepoUpdateFeature, and FacilityComputeAllocation request types.
     """
     configure_logging_from_verbose(verbose)
     ctx.obj['verbose'] = verbose

@@ -1077,6 +1077,224 @@ class FacilityUsage(GraphQlMixin):
 
 
 
+# ============================================================================
+# Facility Management Commands
+# ============================================================================
+
+@click.group(name='facility', help="Facility compute management commands", context_settings=CONTEXT_SETTINGS)
+@click.pass_context
+def facility(ctx):
+    """Facility management command group for compute allocation operations."""
+    ctx.ensure_object(dict)
+
+
+class FacilityManager(GraphQlMixin):
+    """Handles facility compute management operations."""
+
+    FACILITY_UPDATE_PURCHASED_GQL = gql("""
+        mutation facilityUpdatePurchased(
+            $facilityName: String!,
+            $clusterName: String!,
+            $purchased: Int!
+        ) {
+            facilityUpdateComputePurchase(
+                facility: $facilityName,
+                cluster: $clusterName,
+                purchased: $purchased
+            ) {
+                name
+                computepurchases {
+                    clustername
+                    purchased
+                }
+            }
+        }
+    """)
+
+    FACILITY_QUERY_GQL = gql("""
+        query facility($facilityName: String!) {
+            facility(filter: {name: $facilityName}) {
+                name
+                computepurchases {
+                    clustername
+                    purchased
+                }
+            }
+        }
+    """)
+
+    REPOS_WITH_ALLOCATIONS_GQL = gql("""
+        query reposWithAllocations($facilityName: String!, $clusterName: String!) {
+            repos(filter: {facility: $facilityName}) {
+                Id
+                name
+                facility
+                currentComputeAllocations {
+                    Id
+                    clustername
+                    percentOfFacility
+                    allocatedNodesCount
+                }
+            }
+        }
+    """)
+
+    def __init__(self, username: str, password_file: str):
+        self.username = username
+        self.password_file = password_file
+
+    def update_purchased_nodes(self, facility: str, cluster: str, nodes: int, dry_run: bool = False) -> bool:
+        """Update the purchased node count for a facility/cluster."""
+        self.back_channel = self.connect_graph_ql(
+            username=self.username,
+            password_file=self.password_file,
+            timeout=60
+        )
+
+        logger.info(f"Updating {facility}@{cluster} to {nodes} purchased nodes (dry_run={dry_run})")
+
+        if not dry_run:
+            try:
+                result = self.back_channel.execute(
+                    self.FACILITY_UPDATE_PURCHASED_GQL,
+                    {
+                        'facilityName': facility,
+                        'clusterName': cluster,
+                        'purchased': nodes
+                    }
+                )
+                logger.info(f"Successfully updated facility: {result}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to update facility: {e}")
+                return False
+        else:
+            logger.info(f"DRY RUN: Would update {facility}@{cluster} to {nodes} nodes")
+            return True
+
+    def simulate_change(self, facility: str, cluster: str, nodes: int) -> bool:
+        """Simulate facility change and show what repos would be affected."""
+        self.back_channel = self.connect_graph_ql(
+            username=self.username,
+            password_file=self.password_file,
+            timeout=60
+        )
+
+        logger.info(f"Simulating facility change: {facility}@{cluster} -> {nodes} nodes")
+
+        try:
+            # Get current facility state
+            current_result = self.back_channel.execute(
+                self.FACILITY_QUERY_GQL,
+                {'facilityName': facility}
+            )
+
+            current_facility = current_result.get('facility')
+            if not current_facility:
+                logger.error(f"Facility '{facility}' not found")
+                return False
+
+            current_purchased = None
+            for purchase in current_facility.get('computepurchases', []):
+                if purchase['clustername'].lower() == cluster.lower():
+                    current_purchased = purchase['purchased']
+                    break
+
+            if current_purchased is None:
+                logger.error(f"Cluster '{cluster}' not found in facility '{facility}'")
+                return False
+
+            logger.info(f"Current purchased nodes: {current_purchased}")
+            logger.info(f"Proposed purchased nodes: {nodes}")
+
+            if current_purchased == nodes:
+                logger.info("No change detected - no repos would be affected")
+                return True
+
+            # Get affected repos
+            repos_result = self.back_channel.execute(
+                self.REPOS_WITH_ALLOCATIONS_GQL,
+                {'facilityName': facility, 'clusterName': cluster}
+            )
+
+            affected_count = 0
+            for repo in repos_result['repos']:
+                for allocation in repo['currentComputeAllocations']:
+                    if allocation['clustername'].lower() == cluster.lower():
+                        current_nodes = allocation['allocatedNodesCount']
+                        percent = allocation['percentOfFacility']
+                        new_nodes = (percent / 100.0) * nodes
+
+                        logger.info(
+                            f"  {repo['facility']}:{repo['name']} - "
+                            f"{percent}% -> {current_nodes} nodes would become {new_nodes:.2f} nodes"
+                        )
+                        affected_count += 1
+
+            logger.info(f"Total affected repo allocations: {affected_count}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Simulation failed: {e}")
+            return False
+
+
+@facility.command(name='update-purchased')
+@common_options
+@graphql_options
+@click.option('--facility', required=True, help='Facility name (e.g., shared, lcls)')
+@click.option('--cluster', required=True, help='Cluster name (e.g., roma, ampere)')
+@click.option('--nodes', required=True, type=int, help='New number of purchased nodes')
+@click.option('--dry-run', is_flag=True, default=False, help='Show what would be done without making changes')
+@click.pass_context
+def facility_update_purchased(ctx, verbose, username, password_file, facility, cluster, nodes, dry_run):
+    """Update the number of purchased nodes for a facility/cluster.
+
+    This will trigger automatic cascade updates of all repo allocations on this facility/cluster
+    if facility monitoring is enabled.
+    """
+    configure_logging_from_verbose(verbose)
+    ctx.obj['verbose'] = verbose
+
+    manager = FacilityManager(
+        username=username,
+        password_file=password_file
+    )
+
+    success = manager.update_purchased_nodes(facility, cluster, nodes, dry_run)
+    if not success:
+        raise click.ClickException("Failed to update facility purchased nodes")
+
+
+@facility.command(name='simulate-change')
+@common_options
+@graphql_options
+@click.option('--facility', required=True, help='Facility name (e.g., shared, lcls)')
+@click.option('--cluster', required=True, help='Cluster name (e.g., roma, ampere)')
+@click.option('--nodes', required=True, type=int, help='Proposed number of purchased nodes')
+@click.pass_context
+def facility_simulate_change(ctx, verbose, username, password_file, facility, cluster, nodes):
+    """Simulate a facility compute change and show what repo allocations would be affected.
+
+    This is useful for understanding the impact of facility changes before applying them.
+    """
+    configure_logging_from_verbose(verbose)
+    ctx.obj['verbose'] = verbose
+
+    manager = FacilityManager(
+        username=username,
+        password_file=password_file
+    )
+
+    success = manager.simulate_change(facility, cluster, nodes)
+    if not success:
+        raise click.ClickException("Simulation failed")
+
+
+# Add facility to main coact group
+coact.add_command(facility)
+
+
 # For backwards compatibility, allow running this module directly
 if __name__ == '__main__':
     coact(obj={})
