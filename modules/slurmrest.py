@@ -6,8 +6,8 @@ from typing import TypedDict
 from openapi_client import SlurmApi, SlurmdbApi
 from openapi_client import ApiClient as Client
 from openapi_client import Configuration as Config
-from openapi_client.models.v0044_openapi_slurmdbd_jobs_resp import V0044OpenapiSlurmdbdJobsResp
-from openapi_client.models.v0044_openapi_assocs_resp import V0044OpenapiAssocsResp
+from openapi_client.models.v0042_openapi_slurmdbd_jobs_resp import V0042OpenapiSlurmdbdJobsResp
+from openapi_client.models.v0042_openapi_assocs_resp import V0042OpenapiAssocsResp
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +70,8 @@ class SlurmrestClient:
         self.slurmdb = SlurmdbApi(Client(c))
 
     def get_jobs(self, start_time: str | None = None, end_time: str | None = None, **filters):
-        """Get jobs using SlurmdbApi.slurmdb_v0044_get_jobs()"""
-        response = self.slurmdb.slurmdb_v0044_get_jobs(
+        """Get jobs using SlurmdbApi.slurmdb_v0042_get_jobs()"""
+        response = self.slurmdb.slurmdb_v0042_get_jobs(
             start_time=start_time,
             end_time=end_time,
             **filters
@@ -79,14 +79,14 @@ class SlurmrestClient:
         return response
 
     def get_associations(self, accounts: str | None = None):
-        """Get associations using SlurmdbApi.slurmdb_v0044_get_associations()"""
-        # Use the latest v0044 API - convert list parameters to comma-separated strings
-        response = self.slurmdb.slurmdb_v0044_get_associations(
+        """Get associations using SlurmdbApi.slurmdb_v0042_get_associations()"""
+        # Use the latest v0042 API - convert list parameters to comma-separated strings
+        response = self.slurmdb.slurmdb_v0042_get_associations(
             account=accounts
         )
         return response
     
-    def process_jobs_for_import(self, jobs_response: V0044OpenapiSlurmdbdJobsResp):
+    def process_jobs_for_import(self, jobs_response: V0042OpenapiSlurmdbdJobsResp):
         """
         Process jobs directly for import without CLI format conversion.
 
@@ -151,7 +151,7 @@ class SlurmrestClient:
             )
             yield job_data
 
-    def extract_association_hold_states(self, assoc_response: V0044OpenapiAssocsResp):
+    def extract_association_hold_states(self, assoc_response: V0042OpenapiAssocsResp):
         """
         Extract hold states directly from association objects.
 
@@ -176,7 +176,7 @@ class SlurmrestClient:
                             is_held = (tres.count == 0)
                             break
 
-                # Properly handle V0044Uint32NoValStruct for job limits
+                # Properly handle V0042Uint32NoValStruct for job limits
                 grp_jobs_value = None
                 if (assoc.max and assoc.max.jobs and assoc.max.jobs.total):
                     total_struct = assoc.max.jobs.total
