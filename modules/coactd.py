@@ -955,8 +955,8 @@ class RepoRegistration(Registration):
             return False
 
         if new_purchased <= 0:
-            self.logger.warning(f"Invalid purchased nodes: {new_purchased} - skipping cascade updates")
-            return True
+            self.logger.error(f"Invalid purchased nodes: {new_purchased} for {facility}@{clustername} - cannot cascade")
+            return False
 
         self.logger.info(
             f"Processing facility compute allocation cascade: {facility}@{clustername} "
@@ -996,60 +996,24 @@ class RepoRegistration(Registration):
                     f"{percent_of_facility}% -> {new_allocated_nodes:.2f} nodes (was {allocation['allocatedNodesCount']})"
                 )
 
-                if not dry_run:
-                    try:
-                        # Update the allocation using existing upsert method
-                        start_time = pdl.parse(allocation['start'], timezone='UTC')
-                        end_time = allocation['end']
-
-                        self.upsert_repo_compute_allocation(
-                            repo_id=repo['Id'],
-                            cluster=clustername,
-                            percent=percent_of_facility,
-                            allocated_resource=new_allocated_nodes,
-                            start=start_time,
-                            end=end_time,
-                            dry_run=dry_run
-                        )
-
-                        # Re-run the SLURM configuration to apply the new limits
-                        # Get updated allocation info
-                        repo_req = {'repo': {'facility': repo['facility'], 'name': repo['name']}}
-                        updated_resp = self.back_channel.execute(self.REPO_CURRENT_COMPUTE_REQUIREMENT_GQL, repo_req)
-                        updated_repo = updated_resp['repo']
-
-                        # Find the updated allocation for this cluster
-                        updated_alloc = None
-                        for alloc in updated_repo['currentComputeAllocations']:
-                            if alloc['clustername'].lower() == clustername.lower():
-                                updated_alloc = alloc
-                                break
-
-                        if updated_alloc:
-                            # Update SLURM with the new resource limits
-                            self.run_playbook(
-                                'coact/slurm/ensure-repo.yaml',
-                                facility=repo['facility'],
-                                repo=repo['name'],
-                                partition=clustername,
-                                cpus=int(updated_alloc['cpus']),
-                                memory=int(updated_alloc['memory']) * 1024,
-                                nodes=int(ceil(updated_alloc['nodes'])),
-                                gpus=int(updated_alloc['gpus']),
-                                state='present',
-                                dry_run=dry_run
-                            )
-
-                        update_count += 1
-                        self.logger.info(f"Successfully updated {repo['facility']}:{repo['name']} allocation")
-
-                    except Exception as e:
-                        self.logger.error(f"Failed to update {repo['facility']}:{repo['name']}: {e}")
-                        # Continue with other repos even if one fails
-                        continue
-                else:
-                    self.logger.info(f"DRY RUN: Would update {repo['facility']}:{repo['name']} allocation")
+                try:
+                    self.do_repo_compute_allocation(
+                        repo['name'],
+                        repo['facility'],
+                        clustername,
+                        percent_of_facility,
+                        new_allocated_nodes,
+                        pdl.parse(allocation['start'], timezone='UTC'),
+                        allocation['end'],
+                        dry_run=dry_run,
+                    )
                     update_count += 1
+                    self.logger.info(f"Successfully updated {repo['facility']}:{repo['name']} allocation")
+
+                except Exception as e:
+                    self.logger.error(f"Failed to update {repo['facility']}:{repo['name']}: {e}")
+                    # Continue with other repos even if one fails
+                    continue
 
             self.logger.info(
                 f"Facility cascade update completed: {update_count}/{len(affected_repos)} "

@@ -49,10 +49,13 @@ def test_cascade_recalculates_every_repo_allocation_by_percentage():
     When purchased nodes change, every repo on that cluster receives a new
     absolute allocation of (percentOfFacility / 100) * purchased, preserving
     each repo's percentage share of the facility.
+
+    do_repo_compute_allocation is the single delegate for each repo; it owns
+    the SLURM feature-flag check, the DB upsert, the SLURM playbook call, and
+    the user sync.
     """
     handler = make_handler()
-    handler.upsert_repo_compute_allocation = MagicMock(return_value={})
-    handler.run_playbook = MagicMock(return_value=None)
+    handler.do_repo_compute_allocation = MagicMock(return_value=True)
 
     repos = [
         {
@@ -75,8 +78,6 @@ def test_cascade_recalculates_every_repo_allocation_by_percentage():
     handler.back_channel.execute.side_effect = [
         {'facility': {'computepurchases': [{'clustername': 'ada', 'purchased': 200}]}},  # facility query
         {'repos': repos},
-        {'repo': {'currentComputeAllocations': []}},  # SLURM re-query for repo-a
-        {'repo': {'currentComputeAllocations': []}},  # SLURM re-query for repo-b
     ]
 
     result = handler.do_facility_compute_allocation_cascade(
@@ -84,11 +85,12 @@ def test_cascade_recalculates_every_repo_allocation_by_percentage():
     )
 
     assert result is True
-    assert handler.upsert_repo_compute_allocation.call_count == 2
+    assert handler.do_repo_compute_allocation.call_count == 2
 
+    # args: (repo_name, facility, cluster, percent, allocated_resource, start, end)
     by_repo = {
-        c.kwargs['repo_id']: c.kwargs['allocated_resource']
-        for c in handler.upsert_repo_compute_allocation.call_args_list
+        c.args[0]: c.args[4]
+        for c in handler.do_repo_compute_allocation.call_args_list
     }
-    assert by_repo['repo-a'] == 50.0   # 25% of 200
-    assert by_repo['repo-b'] == 100.0  # 50% of 200
+    assert by_repo['alpha'] == 50.0   # 25% of 200
+    assert by_repo['beta'] == 100.0   # 50% of 200
