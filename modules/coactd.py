@@ -537,7 +537,7 @@ class RepoRegistration(Registration):
         # Extract repo GID if it was created for facilities that use grouper
         repo_gid = None
         repo_group_name = ""
-        if facility.lower() in ['lcls', 'cryoem']:
+        if facility.lower() in ['cryoem']:
             try:
                 # Get the repo_gid fact that was set in add_repo.yaml
                 repo_facts = self.playbook_task_res(runner, 'Create a facility repo', 'Expose group values for runner')
