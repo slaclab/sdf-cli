@@ -154,12 +154,13 @@ class Registration(GraphQlSubscriber, AnsibleRunner):
         }
     """
 
-    def __init__(self, username: str, password_file: str, client_name: str, dry_run: bool = False):
+    def __init__(self, username: str, password_file: str, client_name: str, dry_run: bool = False, grouper_password_file: str = None):
         self.logger = logger
         self.username = username
         self.password_file = password_file
         self.client_name = client_name
         self.dry_run = dry_run
+        self.grouper_password_file = grouper_password_file
 
     def run(self):
         """Main entry point - connect and process subscription requests."""
@@ -230,6 +231,12 @@ def registration_options(f):
         required=True,
         type=click.Path(exists=True),
         help='Basic auth password for graphql service'
+    )(f)
+    f = click.option(
+        '--grouper-password-file',
+        default=None,
+        type=click.Path(exists=True),
+        help='Path to file containing the Grouper service account password'
     )(f)
     f = click.option(
         '--client-name',
@@ -532,23 +539,36 @@ class RepoRegistration(Registration):
             repo_allocation_end_delta = pdl.duration(years=5)
 
         # run the facility tasks for this repo
-        runner = self.run_playbook("coact/add_repo.yaml", facility=facility, repo=repo)
+        self.run_playbook("coact/add_repo.yaml", facility=facility, repo=repo)
 
-        # Extract repo GID if it was created for facilities that use grouper
+        # For CryoEM repos (ct* / ce*), create a POSIX group via Grouper
         repo_gid = None
         repo_group_name = ""
-        if facility.lower() in ['cryoem']:
+        uses_grouper = (
+            facility.lower() == 'cryoem'
+            and (repo.lower().startswith('ct') or repo.lower().startswith('ce'))
+        )
+        if uses_grouper:
+            grouper_name = f"sdf-{facility.lower()}-{repo.lower()}"
             try:
-                # Get the repo_gid fact that was set in add_repo.yaml
-                repo_facts = self.playbook_task_res(runner, 'Create a facility repo', 'Expose group values for runner')
-                if repo_facts and 'ansible_facts' in repo_facts:
-                    repo_gid = repo_facts['ansible_facts']['repo_gid']
-                    repo_group_name = repo_facts['ansible_facts']['repo_group_name']
+                if not self.grouper_password_file:
+                    raise ValueError("Grouper password file must be provided for CryoEM ct/ce repos")
+                grouper_kwargs = dict(
+                    grouper_name=grouper_name,
+                    state="present",
+                    grouper_description=f"POSIX group for {facility} {repo} repository access",
+                    grouper_password_file=self.grouper_password_file
+                )
+                grouper_runner = self.run_playbook("coact/grouper.yml", **grouper_kwargs)
+                grouper_facts = self.playbook_task_res(grouper_runner, 'Grouper', 'Export grouper params')
+                if grouper_facts and 'ansible_facts' in grouper_facts:
+                    repo_gid = grouper_facts['ansible_facts']['gid']
+                    repo_group_name = grouper_name
                     self.logger.info(f"Retrieved repo GID for {facility}:{repo}: {repo_gid}")
                 else:
-                    self.logger.warning(f"No repo GID found in playbook results for {facility}:{repo}")
+                    self.logger.warning(f"No GID found in grouper playbook results for {facility}:{repo}")
             except Exception as e:
-                self.logger.warning(f"Failed to extract repo GID for {facility}:{repo}: {e}")
+                self.logger.warning(f"Failed to create grouper POSIX group for {facility}:{repo}: {e}")
 
         leaders = [principal]
         users = [principal]
@@ -951,7 +971,7 @@ class RepoRegistration(Registration):
 @common_options
 @registration_options
 @click.pass_context
-def repo_registration(ctx, verbose, username, password_file, client_name, dry_run):
+def repo_registration(ctx, verbose, username, password_file, client_name, dry_run, grouper_password_file):
     """Workflow for repository maintenance.
 
     Handles NewRepo, RepoMembership, RepoRemoveUser, RepoChangeComputeRequirement,
@@ -964,7 +984,8 @@ def repo_registration(ctx, verbose, username, password_file, client_name, dry_ru
         username=username,
         password_file=password_file,
         client_name=client_name or 'sdf-bot-RepoRegistration',
-        dry_run=dry_run
+        dry_run=dry_run,
+        grouper_password_file=grouper_password_file
     )
     handler.run()
 
