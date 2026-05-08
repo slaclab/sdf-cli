@@ -307,7 +307,7 @@ class SlurmImporter(GraphQlMixin):
         # Find the maximum ratio of used/available for cpu, gpu, mem
         max_ratio = 0.0
         for resource in ("cpu", "gpu", "mem"):
-            if resource in used and resource in cluster and cluster[resource] > 0:
+            if resource in used and resource in cluster:
                 ratio = used[resource] / cluster[resource]
                 if ratio > max_ratio:
                     max_ratio = ratio
@@ -391,8 +391,8 @@ class SlurmImporter(GraphQlMixin):
                 "username": remapped_job['user'],
                 "allocationId": allocId,
                 "qos": qos,
-                "startTs": str(start_time.in_tz("UTC")).replace("+00:00", ".000Z"),
-                "endTs": str(end_time.in_tz("UTC")).replace("+00:00", ".000Z"),
+                "startTs": str(start_time.in_tz("UTC")).replace(" ", "T").replace("+00:00", ".000Z"),
+                "endTs": str(end_time.in_tz("UTC")).replace(" ", "T").replace("+00:00", ".000Z"),
                 "resourceHours": resource_hours,
             }
 
@@ -721,7 +721,14 @@ class FacilityUsage(GraphQlMixin):
         self.windows = windows
         self.threshold = threshold
         self.dry_run = dry_run
-        self.slurm_client = SlurmrestClient()
+        self._slurm_client: SlurmrestClient | None = None
+
+    @property
+    def slurm_client(self) -> SlurmrestClient:
+        """Lazily construct SlurmrestClient so missing SLURM_JWT fails at call time, not startup."""
+        if self._slurm_client is None:
+            self._slurm_client = SlurmrestClient()
+        return self._slurm_client
 
     def get(self, date: str) -> Iterator[OveragePoint]:
         """Run the overage calculation process."""

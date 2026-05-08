@@ -1,7 +1,9 @@
 import os
-from datetime import datetime
 import logging
-from typing import TypedDict, Dict, Tuple
+from typing import TypedDict
+
+import pendulum
+from pendulum import DateTime
 
 from openapi_client import SlurmApi, SlurmdbApi
 from openapi_client import ApiClient as Client
@@ -19,9 +21,9 @@ class JobData(TypedDict):
     account: str
     partition: str
     qos: str
-    submit_time: datetime | None
-    start_time: datetime | None
-    end_time: datetime | None
+    submit_time: DateTime | None
+    start_time: DateTime | None
+    end_time: DateTime | None
     elapsed_seconds: int
     cpus: int
     allocated_nodes: int
@@ -39,7 +41,7 @@ class HoldData(TypedDict):
     max_jobs: int | None
 
 # Mapping of (account, cluster) -> HoldData for association hold states
-HoldStates = Dict[Tuple[str, str], HoldData]
+HoldStates = dict[tuple[str, str], HoldData]
 
 
 class SlurmrestClient:
@@ -102,11 +104,11 @@ class SlurmrestClient:
 
             if job.time:
                 if job.time.submission:
-                    submit_time = datetime.fromtimestamp(job.time.submission)
+                    submit_time = pendulum.from_timestamp(job.time.submission)
                 if job.time.start:
-                    start_time = datetime.fromtimestamp(job.time.start)
+                    start_time = pendulum.from_timestamp(job.time.start)
                 if job.time.end:
-                    end_time = datetime.fromtimestamp(job.time.end)
+                    end_time = pendulum.from_timestamp(job.time.end)
                 if job.time.elapsed:
                     elapsed_seconds = job.time.elapsed
 
@@ -171,11 +173,13 @@ class SlurmrestClient:
                 is_held = False
                 grp_nodes = None
 
-                # Navigate the API structure: assoc.max.tres.per.job
-                if (assoc.max and assoc.max.tres and assoc.max.tres.per and
-                    assoc.max.tres.per.job):
+                # GrpTRES is the Slurm field written by toggle_job_blocking (via sacctmgr subprocess).
+                # In the REST read model that field surfaces as assoc.max.tres.group.active,
+                # NOT assoc.max.tres.per.job which is the per-individual-job limit (MaxTRESPerJob).
+                if (assoc.max and assoc.max.tres and assoc.max.tres.group and
+                    assoc.max.tres.group.active):
                     # Find the node TRES entry
-                    for tres in assoc.max.tres.per.job:
+                    for tres in assoc.max.tres.group.active:
                         if tres.type == 'node':
                             grp_nodes = tres.count
                             is_held = (tres.count == 0)
