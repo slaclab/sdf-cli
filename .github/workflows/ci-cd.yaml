@@ -1,4 +1,4 @@
-name: CI/CD
+name: CLI CI/CD
 
 on:
   push:
@@ -16,6 +16,21 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Set up Java (for OpenAPI Generator)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '26'
+          distribution: 'temurin'
+
+      - name: Generate OpenAPI Client
+        run: |
+          # Install and run OpenAPI Generator
+          npm install -g @openapitools/openapi-generator-cli
+          openapi-generator-cli generate \
+            -i openapi-specs/slurmrest-api-v0.0.44.json \
+            -g python \
+            -o slurmrest_client/ 
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7

@@ -21,3 +21,9 @@ lib64
 
 # VS Code
 .vscode/
+
+# Secrets
+.env
+
+# Generated Client
+slurmrest_client/

@@ -16,9 +16,16 @@ dependencies = [
     "pendulum>=3.2.0",
     "tzlocal>=5.3.1",
     "loguru>=0.7.0",
+    "openapi_client",
 ]
 
-[project.optional-dependencies]
+[tool.uv.sources]
+openapi_client = { path = "slurmrest_client", editable = true }
+
+[dependency-groups]
+dev = [
+    {include-group = "test"},
+]
 test = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",

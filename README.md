@@ -36,6 +36,22 @@ then run
 make apply
 ```
 
+## OpenAPI Client Generation
+
+The CLI includes auto-generated Python client for the Slurm REST API. To generate the client locally:
+
+**Prerequisites:**
+- Java runtime (required by OpenAPI Generator)
+- On macOS with Homebrew: `brew install openjdk`
+- Add to your shell profile: `echo 'export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"' >> ~/.zshrc`
+
+**Generate the client:**
+```
+make generate-client
+```
+
+The client is automatically generated in CI/CD and included when installing dependencies with `uv sync`.
+
 
 # Usage
 
