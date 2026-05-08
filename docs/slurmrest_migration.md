@@ -71,25 +71,6 @@ In the `slurmrest` implementation, now associations are collected one by one as 
 
 Several format differences between sacct/sacctmgr CLI output and slurmrest REST API responses required explicit handling in the migration.
 
-### Associations: `account@cluster` filter syntax
-
-In `sacctmgr`, the `@cluster` suffix on the `where account=` filter is a **query qualifier** that restricts results to a specific cluster — it is not part of the account name:
-
-```bash
-sacctmgr show assoc where account=lcls:_regular_@ada
-# → filters for account "lcls:_regular_" on cluster "ada"
-```
-
-The REST API exposes `account` and `cluster` as **separate query parameters**. Passing the raw `account@cluster` string as the `account` parameter would match nothing, since no account with a literal `@` in its name exists:
-
-```python
-# Wrong — passes sacctmgr filter syntax verbatim:
-get_associations(account="lcls:_regular_@ada")
-
-# Correct — split before calling:
-get_associations(account="lcls:_regular_", cluster="ada")
-```
-
 ### Jobs: Memory TRES units
 
 sacct serialises memory TRES with a unit suffix (K/M/G), e.g.:

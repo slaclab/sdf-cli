@@ -379,7 +379,7 @@ class SlurmImporter(GraphQlMixin):
             # Normalise QOS (mirrors commands/coact.py:773–783)
             qos = remapped_job.get('qos', 'normal')
             try:
-                # Strip Slurm internal QOS decoration e.g. "normal^1@roma"
+                # Strip Slurm internal QOS decoration e.g. "42^normal@roma" → "normal"
                 qos = qos.split("^")[1].split("@")[0]
             except (IndexError, AttributeError):
                 pass
@@ -800,16 +800,12 @@ class FacilityUsage(GraphQlMixin):
         logger.trace(f"Getting hold states for accounts: {list_of_assoc}")
 
         # Query each account individually to avoid bulk-request issues with slurmrest.
-        # list_of_assoc entries are "facility:_regular_@cluster" — split into separate
-        # account/cluster params since the REST API does not use the sacctmgr @cluster syntax.
+        # list_of_assoc entries are "facility:_regular_@cluster"
         for entry in list_of_assoc:
-            account_name, cluster_name = entry.split("@", 1)
             try:
-                associations_response = self.slurm_client.get_associations(
-                    account=account_name, cluster=cluster_name
-                )
+                associations_response = self.slurm_client.get_associations(account=entry)
                 hold_states = self.slurm_client.extract_association_hold_states(associations_response)
-                logger.debug(f"Retrieved hold state for {account_name}@{cluster_name}: {hold_states}")
+                logger.debug(f"Retrieved hold state for {entry}: {hold_states}")
 
                 for (assoc_account, assoc_cluster), state_info in hold_states.items():
                     # assoc_account is e.g. "lcls:_regular_", assoc_cluster is e.g. "ada"
@@ -821,7 +817,7 @@ class FacilityUsage(GraphQlMixin):
                         logger.trace(f"Set {f}@{c} to {state_info['held']}")
 
             except Exception as e:
-                logger.warning(f"Failed to get hold state for {account_name}@{cluster_name}: {e}")
+                logger.warning(f"Failed to get hold state for {entry}: {e}")
 
         return current
 

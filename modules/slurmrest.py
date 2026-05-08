@@ -70,11 +70,10 @@ class SlurmrestClient:
         )
         return response
 
-    def get_associations(self, account: str | None = None, cluster: str | None = None):
+    def get_associations(self, account: str | None = None):
         """Get associations using SlurmdbApi.slurmdb_v0042_get_associations()"""
         response = self.slurmdb.slurmdb_v0042_get_associations(
             account=account,
-            cluster=cluster,
         )
         return response
     
