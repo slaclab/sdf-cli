@@ -800,24 +800,28 @@ class FacilityUsage(GraphQlMixin):
         logger.trace(f"Getting hold states for accounts: {list_of_assoc}")
 
         # Query each account individually to avoid bulk-request issues with slurmrest.
-        # extract_association_hold_states returns {(account, cluster): HoldData}.
-        for account in list_of_assoc:
+        # list_of_assoc entries are "facility:_regular_@cluster" — split into separate
+        # account/cluster params since the REST API does not use the sacctmgr @cluster syntax.
+        for entry in list_of_assoc:
+            account_name, cluster_name = entry.split("@", 1)
             try:
-                associations_response = self.slurm_client.get_associations(accounts=account)
+                associations_response = self.slurm_client.get_associations(
+                    account=account_name, cluster=cluster_name
+                )
                 hold_states = self.slurm_client.extract_association_hold_states(associations_response)
-                logger.debug(f"Retrieved hold state for {account}: {hold_states}")
+                logger.debug(f"Retrieved hold state for {account_name}@{cluster_name}: {hold_states}")
 
-                for (account_name, cluster_name), state_info in hold_states.items():
-                    # account_name is e.g. "rubin:_regular_", cluster_name is e.g. "roma"
+                for (assoc_account, assoc_cluster), state_info in hold_states.items():
+                    # assoc_account is e.g. "lcls:_regular_", assoc_cluster is e.g. "ada"
                     # Strip the ":_regular_" suffix to get the facility key used in current{}
-                    f = account_name.split(":")[0]
-                    c = cluster_name
+                    f = assoc_account.split(":")[0]
+                    c = assoc_cluster
                     if f in current and c in current[f]:
                         current[f][c]["held"] = state_info["held"]
                         logger.trace(f"Set {f}@{c} to {state_info['held']}")
 
             except Exception as e:
-                logger.warning(f"Failed to get hold state for {account}: {e}")
+                logger.warning(f"Failed to get hold state for {account_name}@{cluster_name}: {e}")
 
         return current
 

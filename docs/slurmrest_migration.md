@@ -66,3 +66,60 @@ sacctmgr show assoc where account={','.join(list_of_assoc)} --noheader -P format
 ```
 
 In the `slurmrest` implementation, now associations are collected one by one as the data volume over network has caused instability.
+
+## Data Format Differences
+
+Several format differences between sacct/sacctmgr CLI output and slurmrest REST API responses required explicit handling in the migration.
+
+### Associations: `account@cluster` filter syntax
+
+In `sacctmgr`, the `@cluster` suffix on the `where account=` filter is a **query qualifier** that restricts results to a specific cluster — it is not part of the account name:
+
+```bash
+sacctmgr show assoc where account=lcls:_regular_@ada
+# → filters for account "lcls:_regular_" on cluster "ada"
+```
+
+The REST API exposes `account` and `cluster` as **separate query parameters**. Passing the raw `account@cluster` string as the `account` parameter would match nothing, since no account with a literal `@` in its name exists:
+
+```python
+# Wrong — passes sacctmgr filter syntax verbatim:
+get_associations(account="lcls:_regular_@ada")
+
+# Correct — split before calling:
+get_associations(account="lcls:_regular_", cluster="ada")
+```
+
+### Jobs: Memory TRES units
+
+sacct serialises memory TRES with a unit suffix (K/M/G), e.g.:
+
+```
+AllocTRES=cpu=128,mem=512G,node=4,billing=128,gres/gpu:a100=4
+```
+
+slurmrest returns memory TRES `count` as a **bare integer in megabytes** with no suffix. To remain compatible with `_kilos_to_int()`, which was written for sacct-style suffixed strings, the migration appends an `M` suffix when serialising memory from the REST response:
+
+```python
+value = f"{tres.count}M" if tres.type == "mem" else str(tres.count)
+```
+
+Without this, `_kilos_to_int("524288")` would interpret the value as bytes rather than megabytes, producing a ~1024× underestimate relative to `cluster["mem"]` (which is stored in bytes from `nodememgb * 1073741824`).
+
+### Jobs: Time fields
+
+sacct returns Unix timestamps as integers when `SLURM_TIME_FORMAT=%s` is set. The migration code then called `parse_datetime(int(d["Start"]), force_tz=True)` to convert them.
+
+slurmrest returns timestamps as integers in the same epoch-second format, but nested under a `time` struct:
+
+```python
+# sacct:  int(d["Start"])  →  unix timestamp
+# REST:   job.time.start   →  unix timestamp (same value, different path)
+pendulum.from_timestamp(job.time.start)
+```
+
+No unit conversion is needed, but a guard for `0` / falsy values is required since slurmrest uses `0` to indicate "not set" (e.g. a job that never started has `time.start == 0`).
+
+### Jobs: TRES key format for GPUs
+
+sacct uses `gres/gpu:a100=4` (type/name:subtype=count). slurmrest splits this into `tres.type = "gres/gpu"`, `tres.name = "a100"`, `tres.count = 4`. The migration reconstructs the sacct-style key as `f"{tres.type}/{tres.name}"` where a name is present, otherwise just `tres.type`. The `_calc_resource_hours` GPU detection (`if "gpu" in k`) handles both forms correctly.

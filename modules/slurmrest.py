@@ -5,7 +5,7 @@ from typing import TypedDict
 import pendulum
 from pendulum import DateTime
 
-from openapi_client import SlurmApi, SlurmdbApi
+from openapi_client import SlurmdbApi
 from openapi_client import ApiClient as Client
 from openapi_client import Configuration as Config
 from openapi_client.models.v0042_openapi_slurmdbd_jobs_resp import V0042OpenapiSlurmdbdJobsResp
@@ -17,28 +17,19 @@ logger = logging.getLogger(__name__)
 class JobData(TypedDict):
     job_id: int
     user: str
-    uid: int | None
     account: str
     partition: str
     qos: str
-    submit_time: DateTime | None
     start_time: DateTime | None
     end_time: DateTime | None
     elapsed_seconds: int
     cpus: int
     allocated_nodes: int
     allocated_tres: str
-    cpu_time_raw: int
-    node_list: str
-    reservation: str
-    reservation_id: str
-    state: str
 
 class HoldData(TypedDict):
     held: bool
     grp_nodes: int | None
-    grp_jobs: int | None
-    max_jobs: int | None
 
 # Mapping of (account, cluster) -> HoldData for association hold states
 HoldStates = dict[tuple[str, str], HoldData]
@@ -68,7 +59,6 @@ class SlurmrestClient:
         if not c.access_token:
             raise EnvironmentError("No SLURM_JWT set")
 
-        self.slurm = SlurmApi(Client(c))
         self.slurmdb = SlurmdbApi(Client(c))
 
     def get_jobs(self, start_time: str | None = None, end_time: str | None = None, **filters):
@@ -80,11 +70,11 @@ class SlurmrestClient:
         )
         return response
 
-    def get_associations(self, accounts: str | None = None):
+    def get_associations(self, account: str | None = None, cluster: str | None = None):
         """Get associations using SlurmdbApi.slurmdb_v0042_get_associations()"""
-        # Use the latest v0042 API - convert list parameters to comma-separated strings
         response = self.slurmdb.slurmdb_v0042_get_associations(
-            account=accounts
+            account=account,
+            cluster=cluster,
         )
         return response
     
@@ -97,14 +87,11 @@ class SlurmrestClient:
         """
         for job in jobs_response.jobs:
             # Extract time information from the time structure
-            submit_time = None
             start_time = None
             end_time = None
             elapsed_seconds = 0
 
             if job.time:
-                if job.time.submission:
-                    submit_time = pendulum.from_timestamp(job.time.submission)
                 if job.time.start:
                     start_time = pendulum.from_timestamp(job.time.start)
                 if job.time.end:
@@ -115,7 +102,6 @@ class SlurmrestClient:
             # Extract TRES information
             allocated_tres = None
             cpus = 0
-            cpu_time_raw = 0
 
             if job.tres and job.tres.allocated:
                 # Convert TRES list to string format matching sacct output (type/name=count)
@@ -126,34 +112,26 @@ class SlurmrestClient:
                             cpus = tres.count
                         # Include the name component (e.g. "gres/gpu") to match sacct format
                         key = f"{tres.type}/{tres.name}" if tres.name else tres.type
-                        tres_parts.append(f"{key}={tres.count}")
+                        # slurmrest returns memory count in MB (bare int); sacct uses an 'M'
+                        # suffix so that _kilos_to_int() converts correctly to bytes — preserve
+                        # the same unit by appending 'M' here.
+                        value = f"{tres.count}M" if tres.type == 'mem' else str(tres.count)
+                        tres_parts.append(f"{key}={value}")
                 allocated_tres = ','.join(tres_parts)
 
-                # Calculate CPU time raw (CPU count * elapsed seconds)
-                cpu_time_raw = cpus * elapsed_seconds
-
-            # Create a standardized job object with all needed fields
-            job_data = JobData(
+            yield JobData(
                 job_id=job.job_id,
                 user=job.user,
-                uid=None,  # Unix UID not available in REST API job object - would need separate user lookup
                 account=job.account,
                 partition=job.partition,
                 qos=job.qos,
-                submit_time=submit_time,
                 start_time=start_time,
                 end_time=end_time,
                 elapsed_seconds=elapsed_seconds,
                 cpus=cpus,
                 allocated_nodes=job.allocation_nodes or 0,
                 allocated_tres=allocated_tres or '',
-                cpu_time_raw=cpu_time_raw,
-                node_list=job.nodes or '',
-                reservation=getattr(job.reservation, 'name', '') if job.reservation else '',
-                reservation_id=getattr(job.reservation, 'id', '') if job.reservation else '',
-                state=job.state.current[0] if (job.state and job.state.current and len(job.state.current) > 0) else 'UNKNOWN'
             )
-            yield job_data
 
     def extract_association_hold_states(self, assoc_response: V0042OpenapiAssocsResp):
         """
@@ -185,22 +163,10 @@ class SlurmrestClient:
                             is_held = (tres.count == 0)
                             break
 
-                # Properly handle V0042Uint32NoValStruct for job limits
-                grp_jobs_value = None
-                if (assoc.max and assoc.max.jobs and assoc.max.jobs.total):
-                    total_struct = assoc.max.jobs.total
-                    if total_struct.set:
-                        if total_struct.infinite:
-                            grp_jobs_value = -1  # Convention for unlimited
-                        else:
-                            grp_jobs_value = total_struct.number
-
                 key = (assoc.account.lower(), assoc.cluster.lower())
                 hold_states[key] = HoldData(
                     held=is_held,
                     grp_nodes=grp_nodes,
-                    grp_jobs=grp_jobs_value,
-                    max_jobs=None  # Not directly available in this structure
                 )
 
         return hold_states
