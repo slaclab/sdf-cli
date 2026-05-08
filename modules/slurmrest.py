@@ -1,7 +1,7 @@
 import os
 from datetime import datetime
 import logging
-from typing import TypedDict
+from typing import TypedDict, Dict, Tuple
 
 from openapi_client import SlurmApi, SlurmdbApi
 from openapi_client import ApiClient as Client
@@ -38,8 +38,8 @@ class HoldData(TypedDict):
     grp_jobs: int | None
     max_jobs: int | None
 
-class HoldStates(TypedDict):
-    account: HoldData
+# Mapping of (account, cluster) -> HoldData for association hold states
+HoldStates = Dict[Tuple[str, str], HoldData]
 
 
 class SlurmrestClient:
@@ -64,7 +64,7 @@ class SlurmrestClient:
         # Set JWT token for authentication
         c.access_token = os.getenv("SLURM_JWT")
         if not c.access_token:
-            raise KeyError("No SLURM_JWT set")
+            raise EnvironmentError("No SLURM_JWT set")
 
         self.slurm = SlurmApi(Client(c))
         self.slurmdb = SlurmdbApi(Client(c))
@@ -116,13 +116,15 @@ class SlurmrestClient:
             cpu_time_raw = 0
 
             if job.tres and job.tres.allocated:
-                # Convert TRES list to string format for compatibility
+                # Convert TRES list to string format matching sacct output (type/name=count)
                 tres_parts = []
                 for tres in job.tres.allocated:
-                    if tres.type and tres.count:
+                    if tres.type and tres.count is not None:
                         if tres.type == 'cpu':
                             cpus = tres.count
-                        tres_parts.append(f"{tres.type}={tres.count}")
+                        # Include the name component (e.g. "gres/gpu") to match sacct format
+                        key = f"{tres.type}/{tres.name}" if tres.name else tres.type
+                        tres_parts.append(f"{key}={tres.count}")
                 allocated_tres = ','.join(tres_parts)
 
                 # Calculate CPU time raw (CPU count * elapsed seconds)
@@ -155,13 +157,16 @@ class SlurmrestClient:
         """
         Extract hold states directly from association objects.
 
-        Returns a dict mapping account names to their hold status,
-        eliminating regex parsing of formatted strings.
+        Returns a dict mapping (account, cluster) tuples to their hold status.
+        Both keys are lower-cased to match the facility/cluster naming used in coact.
+
+        The old sacctmgr implementation returned "account@cluster" as a single string;
+        the REST API exposes these as separate fields on V0042Assoc, so no regex is needed.
         """
         hold_states: HoldStates = {}
 
         for assoc in assoc_response.associations:
-            if assoc.account:
+            if assoc.account and assoc.cluster:
                 # Check if account is held by looking at max TRES per job
                 is_held = False
                 grp_nodes = None
@@ -186,7 +191,8 @@ class SlurmrestClient:
                         else:
                             grp_jobs_value = total_struct.number
 
-                hold_states[assoc.account] = HoldData(
+                key = (assoc.account.lower(), assoc.cluster.lower())
+                hold_states[key] = HoldData(
                     held=is_held,
                     grp_nodes=grp_nodes,
                     grp_jobs=grp_jobs_value,

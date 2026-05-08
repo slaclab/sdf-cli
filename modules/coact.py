@@ -161,319 +161,6 @@ def run_sacct(
 
 
 # ============================================================================
-# SlurmRemap Command
-# ============================================================================
-
-@coact.command(name='slurmremap')
-@common_options
-@click.option(
-    '--data',
-    type=click.File('r'),
-    default='-',
-    help='Data to read from (default: stdin)'
-)
-@click.pass_context
-def slurm_remap(ctx, verbose, data):
-    """Remaps/patches the slurm job data to prepare for import."""
-    configure_logging_from_verbose(verbose)
-    ctx.obj['verbose'] = verbose
-
-    remapper = SlurmRemapper(verbose=verbose > 0)
-    remapper.run(data)
-
-
-class SlurmRemapper:
-    """Handles the slurm remap logic."""
-
-    def __init__(self, verbose: bool = False):
-        self.verbose = verbose
-
-    def run(self, data):
-        """Run the remap process."""
-        first = True
-        index = {}
-        order = []
-        for line in data.readlines():
-            if line:
-                parts = line.split("|")
-                if first:
-                    index = {s: idx for idx, s in enumerate(parts)}
-                    order = parts
-                    first = False
-                    click.echo(f"{line.strip()}")
-                else:
-                    out = self.convert(index, parts, order)
-                    if out:
-                        click.echo(f"{out}")
-
-    def convert(self, index, parts, order) -> Optional[str]:
-        d = {field: parts[idx] for field, idx in index.items()}
-        d = self.remap_job(d)
-        if d:
-            out = []
-            for i in order:
-                out.append(d[i])
-            return "|".join(out).strip()
-        return None
-
-    def remap_job(self, d) -> Optional[dict]:
-        """Remap job data to fix account info."""
-        if (
-            d["Account"] in ("shared", "shared:default")
-            or d["Account"].startswith("shared")
-            or d["User"] in ("jonl", "vanilla", "yemi", "yangw", "pav", "root", "reranna", "ppascual", "renata",)
-            or d["Partition"] in ("fermi-transfer")
-        ):
-            return None
-
-        if "," in d["Partition"]:
-            a = d["Partition"].split(",")[0]
-            d["Partition"] = a
-
-        if "@" in d["Account"]:
-            d["Account"], _ = d["Account"].split("@")
-
-        if d["QOS"] in ("Unknown",):
-            d["QOS"] = "normal"
-
-        return d
-
-    def remap_job_pre2024(self, d):
-        """deal with old jobs with wrong account info"""
-        # self.logger.info(f"in: {d}")
-        if d["User"] in ("lsstsvc1") and d["Account"] in ("rubin", "shared", ""):
-            d["Account"] = "rubin:production"
-        elif d["Account"] in ("shared", "shared:default") or d["User"] in (
-            "jonl",
-            "vanilla",
-            "yemi",
-            "yangw",
-            "pav",
-            "root",
-            "reranna",
-            "ppascual",
-            "renata",
-        ):
-            return None
-        elif d["User"] in (
-            "csaunder",
-            "elhoward",
-            "mrawls",
-            "brycek",
-            "mfl",
-            "digel",
-            "wguan",
-            "laurenma",
-            "smau",
-            "bos",
-            "erykoff",
-            "ebellm",
-            "mccarthy",
-            "yesw",
-            "abrought",
-            "shuang92",
-            "aconnoll",
-            "daues",
-            "aheinze",
-            "zhaoyu",
-            "dagoret",
-            "kannawad",
-            "kherner",
-            "eske",
-            "cslater",
-            "sierrav",
-            "jmeyers3",
-            "lskelvin",
-            "jchiang",
-            "yanny",
-            "ktl",
-            "jneveu",
-            "hchiang2",
-            "snyder18",
-            "fred3m",
-            "brycek",
-            "eiger",
-            "esteves",
-            "mxk",
-            "yusra",
-            "mrabus",
-            "ryczano",
-            "mgower",
-            "yoachim",
-            "scichris",
-            "jcheval",
-            "richard",
-            "tguillem",
-        ) and d["Account"] in ("", "milano", "roma", "rubin"):
-            d["Account"] = "rubin:developers"
-            if d["Partition"] == "ampere":
-                d["Partition"] = "milano"
-        elif d["User"] == "kocevski" or (
-            d["User"]
-            in (
-                "burnett",
-                "horner",
-                "mdimauro",
-                "burnett",
-                "laviron",
-                "omodei",
-                "tyrelj",
-                "echarles",
-                "bruel",
-            )
-            and d["Account"] in ("", "latba", "ligo", "repository", "burnett")
-        ):
-            d["Account"] = "fermi:users"
-        elif d["User"] in ("glastraw",):
-            d["Account"] = "fermi:l1"
-        elif d["User"] in ("vossj",):
-            d["Partition"] = "roma"
-        elif d["User"] in (
-            "dcesar",
-            "jytang",
-            "rafimah",
-        ):
-            d["Account"] = "ad:beamphysics"
-        elif d["User"] in (
-            "kterao",
-            "kvtsang",
-            "anoronyo",
-            "bkroul",
-            "zhulcher",
-            "koh0207",
-            "drielsma",
-            "lkashur",
-            "dcarber",
-            "amogan",
-            "cyifan",
-            "yjwa",
-            "aj14",
-            "jdyer",
-            "sindhuk",
-            "justinjm",
-            "mrmooney",
-            "bearc",
-            "fuhaoji",
-            "sfogarty",
-            "carsmith",
-            "yuntse",
-        ) and not d["Account"] in (
-            "neutrino:ml-dev",
-            "neutrino:icarus-ml",
-            "neutrino:slacube",
-            "neutrino:dune-ml",
-        ):
-            d["Account"] = "neutrino:default"
-            d["Partition"] = "ampere"
-        elif d["User"] in (
-            "dougl215",
-            "zhezhang",
-        ):  # and d['Account'] in ('ampere:default',):
-            # self.logger.error("HERE")
-            d["Account"] = "mli:default"
-            d["Account"] = "neutrino:default"
-            d["Partition"] = "ampere"
-        elif d["User"] in (
-            "dougl215",
-            "zhezhang",
-        ):  # and d['Account'] in ('ampere:default',):
-            # self.logger.error("HERE")
-            d["Account"] = "mli:default"
-        elif d["User"] in (
-            "jfkern",
-            "taisgork",
-            "valmar",
-            "tgrant",
-            "arijit01",
-            "mmdoyle",
-            "fpoitevi",
-            "ashojaei",
-            "monarin",
-            "claussen",
-            "batyuk",
-            "kevinkgu",
-            "tfujit27",
-            "haoyuan",
-            "aliang",
-            "jshenoy",
-            "dorlhiac",
-            "xjql",
-        ):  # and d['Account'] in ('','milano', 'roma'):
-            d["Account"] = "lcls:default"
-        elif d["User"] in (
-            "psdatmgr",
-            "xiangli",
-            "sachsm",
-            "hekstra",
-            "snelson",
-            "cwang31",
-            "espov",
-            "thorsten",
-            "wilko",
-            "snelson",
-            "melchior",
-            "cpo",
-            "wilko",
-            "mshankar",
-        ) and d["Account"] in (
-            "",
-            "lcls:xpp",
-            "lcls:psmfx",
-            "lcls:data",
-            "ampere",
-            "roma",
-            "rubin",
-            "lcls-xpp1234",
-            "lcls:xpptut15",
-            "lcls:xpptut16",
-            "s3dfadmin",
-        ):
-            d["Account"] = "lcls:default"
-        elif d["User"] in ("lsstccs", "rubinmgr"):
-            d["Account"] = "rubin:commissioning"
-        elif d["User"] in (
-            "majernik",
-            "knetsch",
-        ):
-            d["Account"] = "facet:default"
-        elif d["User"] in ("jberger",):
-            d["Account"] = "epptheory:default"
-        elif d["User"] in ("tabel",):
-            d["Account"] = "kipac:kipac"
-        elif d["User"] in (
-            "vnovati",
-            "owwen",
-            "melwan",
-            "zatschls",
-            "yanliu",
-            "cartaro",
-            "aditi",
-            "emichiel",
-        ):
-            d["Account"] = "supercdms:default"
-
-        if d["Account"] == "":
-            raise Exception(f"could not determine account for {d}")
-
-        if "," in d["Partition"]:
-            a = d["Partition"].split(",")[0]
-            d["Partition"] = a
-        elif d["Partition"] in ("testweka",):
-            return None
-
-        if not ":" in d["Account"]:
-            d["Account"] = d["Account"] + ":default"
-
-        if d["QOS"] in ("Unknown",):
-            d["QOS"] = "preemptable"
-        elif d["QOS"] in ("expedite",):
-            d["QOS"] = "normal"
-
-        # self.logger.info(f"out: {d}")
-        return d
-
-
-# ============================================================================
 # SlurmImport Command
 # ============================================================================
 
@@ -542,8 +229,18 @@ class SlurmImporter(GraphQlMixin):
         buffer = []
         s = timer()
 
-        # Process job objects directly
-        for job_data in data:
+        # Process job objects directly (data is a file of newline-delimited JSON from slurmdump)
+        for line in data:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                job_data = json.loads(line)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON line: {e}")
+                if self.exit_on_error:
+                    sys.exit(1)
+                continue
             if self.verbose:
                 logger.info(f"Processing job {job_data.get('job_id')}")
 
@@ -560,23 +257,143 @@ class SlurmImporter(GraphQlMixin):
         duration = timer() - s
         logger.info(f"import completed in {duration:,.02f}")
 
+    @staticmethod
+    def _kilos_to_int(s: str) -> int:
+        """Parse a Slurm TRES value string like '128', '4K', '32G' into an integer."""
+        m = re.match(r"(^[0-9.]+)([KMG])?", s.upper())
+        if m:
+            mul = 1
+            g = m.group(2)
+            if g:
+                p = "KMG".find(g)
+                if p >= 0:
+                    mul = math.pow(2, (p + 1) * 10)
+                else:
+                    raise ValueError(f"Can't handle multiplier={g!r} for value={s!r}")
+            return int(float(m.group(1)) * mul)
+        raise ValueError(f"Can't parse TRES value {s!r}")
+
+    @staticmethod
+    def _calc_resource_hours(
+        start_time,
+        end_time,
+        allocated_tres: str,
+        cluster: dict,
+        alloc_nodes: int,
+    ) -> float:
+        """
+        Calculate normalised resource-hours for a job.
+
+        Mirrors the original calc_resource_hours() from commands/coact.py:672.
+        The metric is: elapsed_secs * alloc_nodes * max_resource_ratio * cluster_cpus / 3600
+        where max_resource_ratio is the maximum fraction of per-node resources used
+        across cpu, gpu, and memory.
+        """
+        # Elapsed time in seconds; floor at 1s
+        elapsed_secs = (end_time - start_time).total_seconds()
+        if elapsed_secs <= 0:
+            elapsed_secs = 1.0
+
+        # Parse allocated TRES into per-node usage fractions
+        used = {}
+        if allocated_tres:
+            for x in allocated_tres.split(","):
+                k, v = x.split("=")
+                if "gpu" in k:
+                    k = "gpu"
+                if alloc_nodes > 0:
+                    used[k] = SlurmImporter._kilos_to_int(v) * 1.0 / alloc_nodes
+
+        # Find the maximum ratio of used/available for cpu, gpu, mem
+        max_ratio = 0.0
+        for resource in ("cpu", "gpu", "mem"):
+            if resource in used and resource in cluster and cluster[resource] > 0:
+                ratio = used[resource] / cluster[resource]
+                if ratio > max_ratio:
+                    max_ratio = ratio
+                logger.debug(f"    {resource}: used {used[resource]} / {cluster[resource]} -> {ratio:.5f}")
+
+        return elapsed_secs * alloc_nodes * max_ratio * cluster["cpu"] / 3600.0
+
     def convert_slurmrest(self, job_data: dict) -> Optional[dict]:
-        """Convert job object directly to import format."""
+        """Convert a JobData dict (from process_jobs_for_import) into a GQL Job input dict."""
         try:
-            # Apply the same remap logic but directly from job object
             remapped_job = self.remap_job_slurmrest(job_data)
             if not remapped_job:
                 return None
 
+            account = remapped_job['account']
+            partition = remapped_job['partition']
+            start_time = remapped_job.get('start_time')
+            end_time = remapped_job.get('end_time')
+
+            # Require usable timestamps
+            if not start_time or not end_time:
+                logger.warning(f"Job {job_data.get('job_id')}: missing start/end time, skipping")
+                return None
+
+            # Convert to pendulum if they came in as isoformat strings (from JSON round-trip)
+            if isinstance(start_time, str):
+                start_time = parse_datetime(start_time)
+            if isinstance(end_time, str):
+                end_time = parse_datetime(end_time)
+
+            # Determine facility and repo from account ("facility:repo")
+            try:
+                facility, repo = account.split(":", 1)
+            except ValueError:
+                logger.warning(f"Job {job_data.get('job_id')}: cannot split account {account!r}, skipping")
+                return None
+
+            # Look up allocation ID matching this partition and start time
+            allocId = None
+            try:
+                allocId = self.get_alloc_id(
+                    facility.lower(), repo.lower(), partition.lower(), start_time
+                )
+            except Exception as e:
+                logger.warning(f"Job {job_data.get('job_id')}: {e}")
+                if self.exit_on_error:
+                    sys.exit(1)
+                return None
+
+            # Calculate resource hours (skip if partition unknown)
+            resource_hours = 0.0
+            if partition in self._clusters:
+                alloc_nodes = remapped_job.get('allocated_nodes', 0)
+                allocated_tres = remapped_job.get('allocated_tres', '')
+                resource_hours = self._calc_resource_hours(
+                    start_time=start_time,
+                    end_time=end_time,
+                    allocated_tres=allocated_tres,
+                    alloc_nodes=alloc_nodes,
+                    cluster=self._clusters[partition],
+                )
+            else:
+                logger.warning(f"Job {job_data.get('job_id')}: partition {partition!r} not in coact clusters, skipping")
+                return None
+
+            if resource_hours == 0.0:
+                return None
+
+            # Normalise QOS (mirrors commands/coact.py:773–783)
+            qos = remapped_job.get('qos', 'normal')
+            try:
+                # Strip Slurm internal QOS decoration e.g. "normal^1@roma"
+                qos = qos.split("^")[1].split("@")[0]
+            except (IndexError, AttributeError):
+                pass
+            if qos not in ("scavenger", "preemptable", "normal"):
+                logger.warning(f"Job {job_data.get('job_id')}: unexpected qos {qos!r}")
+
             return {
-                "alloc": self.get_alloc(remapped_job['account']),
-                "job": {
-                    **remapped_job,
-                    # Convert datetime objects if needed
-                    'submit_time': remapped_job['submit_time'].isoformat() if remapped_job.get('submit_time') else None,
-                    'start_time': remapped_job['start_time'].isoformat() if remapped_job.get('start_time') else None,
-                    'end_time': remapped_job['end_time'].isoformat() if remapped_job.get('end_time') else None,
-                }
+                "jobId": str(remapped_job['job_id']),
+                "username": remapped_job['user'],
+                "allocationId": allocId,
+                "qos": qos,
+                "startTs": str(start_time.in_tz("UTC")).replace("+00:00", ".000Z"),
+                "endTs": str(end_time.in_tz("UTC")).replace("+00:00", ".000Z"),
+                "resourceHours": resource_hours,
             }
 
         except Exception as e:
@@ -975,22 +792,22 @@ class FacilityUsage(GraphQlMixin):
 
         logger.trace(f"Getting hold states for accounts: {list_of_assoc}")
 
-        # Query each account individually to avoid bulk-request issues with slurmrest
+        # Query each account individually to avoid bulk-request issues with slurmrest.
+        # extract_association_hold_states returns {(account, cluster): HoldData}.
         for account in list_of_assoc:
             try:
                 associations_response = self.slurm_client.get_associations(accounts=account)
                 hold_states = self.slurm_client.extract_association_hold_states(associations_response)
                 logger.debug(f"Retrieved hold state for {account}: {hold_states}")
 
-                for account_name, state_info in hold_states.items():
-                    m = re.match(r"^(?P<f>\S+):(?P<r>\S+)@(?P<c>\S+)$", account_name)
-                    if m:
-                        d = m.groupdict()
-                        f = d["f"]
-                        c = d["c"]
-                        if f in current and c in current[f]:
-                            current[f][c]["held"] = state_info["held"]
-                            logger.trace(f"Set {f}@{c} to {state_info['held']}")
+                for (account_name, cluster_name), state_info in hold_states.items():
+                    # account_name is e.g. "rubin:_regular_", cluster_name is e.g. "roma"
+                    # Strip the ":_regular_" suffix to get the facility key used in current{}
+                    f = account_name.split(":")[0]
+                    c = cluster_name
+                    if f in current and c in current[f]:
+                        current[f][c]["held"] = state_info["held"]
+                        logger.trace(f"Set {f}@{c} to {state_info['held']}")
 
             except Exception as e:
                 logger.warning(f"Failed to get hold state for {account}: {e}")

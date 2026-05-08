@@ -86,9 +86,14 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
 
     # Mock the REST API client to return association data that indicates not held
     def create_mock_associations_response(grp_nodes_value):
-        """Create OpenAPI association response for testing."""
+        """Create OpenAPI association response for testing.
+
+        The slurmrest V0042Assoc model returns account and cluster as separate fields,
+        unlike the old sacctmgr output which combined them as 'account@cluster'.
+        """
         mock_assoc = V0042Assoc(
-            account="lcls:_regular_@ada",
+            account="lcls:_regular_",
+            cluster="ada",
             user="lcls",
             max=V0042AssocMax(
                 tres=V0042AssocMaxTres(
