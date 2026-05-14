@@ -1,7 +1,6 @@
 """
 Behavioral tests for FacilityComputeAllocation handling in the RepoRegistration daemon.
 """
-import pytest
 from unittest.mock import MagicMock
 
 from modules.coactd import RepoRegistration, RequestStatus
@@ -94,3 +93,80 @@ def test_cascade_recalculates_every_repo_allocation_by_percentage():
     }
     assert by_repo['alpha'] == 50.0   # 25% of 200
     assert by_repo['beta'] == 100.0   # 50% of 200
+
+
+def test_cascade_returns_false_when_no_purchase_record():
+    """
+    When the facility has no computepurchases entry for the requested cluster,
+    the cascade logs an error and returns False without touching any repos.
+    """
+    handler = make_handler()
+    handler.do_repo_compute_allocation = MagicMock(return_value=True)
+
+    handler.back_channel.execute.return_value = {
+        'facility': {'computepurchases': [{'clustername': 'other-cluster', 'purchased': 100}]}
+    }
+
+    result = handler.do_facility_compute_allocation_cascade('lcls', 'ada', dry_run=False)
+
+    assert result is False
+    handler.do_repo_compute_allocation.assert_not_called()
+    handler.logger.error.assert_called_once()
+
+
+def test_cascade_returns_false_when_purchased_nodes_is_zero():
+    """
+    A purchase record with zero nodes is rejected before any repo is updated.
+    """
+    handler = make_handler()
+    handler.do_repo_compute_allocation = MagicMock(return_value=True)
+
+    handler.back_channel.execute.return_value = {
+        'facility': {'computepurchases': [{'clustername': 'ada', 'purchased': 0}]}
+    }
+
+    result = handler.do_facility_compute_allocation_cascade('lcls', 'ada', dry_run=False)
+
+    assert result is False
+    handler.do_repo_compute_allocation.assert_not_called()
+    handler.logger.error.assert_called_once()
+
+
+def test_cascade_continues_after_per_repo_failure():
+    """
+    If do_repo_compute_allocation raises for one repo, the cascade logs the
+    error and continues processing the remaining repos, returning True overall.
+    """
+    handler = make_handler()
+
+    repos = [
+        {
+            'Id': 'repo-a', 'name': 'alpha', 'facility': 'lcls',
+            'currentComputeAllocations': [{
+                'Id': 'alloc-a', 'clustername': 'ada',
+                'percentOfFacility': 25.0, 'allocatedNodesCount': 50.0,
+                'start': START, 'end': END,
+            }],
+        },
+        {
+            'Id': 'repo-b', 'name': 'beta', 'facility': 'lcls',
+            'currentComputeAllocations': [{
+                'Id': 'alloc-b', 'clustername': 'ada',
+                'percentOfFacility': 50.0, 'allocatedNodesCount': 100.0,
+                'start': START, 'end': END,
+            }],
+        },
+    ]
+    handler.back_channel.execute.side_effect = [
+        {'facility': {'computepurchases': [{'clustername': 'ada', 'purchased': 200}]}},
+        {'repos': repos},
+    ]
+    handler.do_repo_compute_allocation = MagicMock(
+        side_effect=[Exception("slurm playbook failed"), True]
+    )
+
+    result = handler.do_facility_compute_allocation_cascade('lcls', 'ada', dry_run=False)
+
+    assert result is True
+    assert handler.do_repo_compute_allocation.call_count == 2
+    handler.logger.error.assert_called_once()
