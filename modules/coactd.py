@@ -1004,7 +1004,7 @@ class RepoRegistration(Registration):
                         percent_of_facility,
                         new_allocated_nodes,
                         pdl.parse(allocation['start'], timezone='UTC'),
-                        allocation['end'],
+                        pdl.parse(allocation['end'], timezone='UTC') if allocation['end'] else None,
                         dry_run=dry_run,
                     )
                     update_count += 1
