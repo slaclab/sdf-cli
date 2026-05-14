@@ -1076,7 +1076,6 @@ class FacilityUsage(GraphQlMixin):
                         )
 
 
-
 # For backwards compatibility, allow running this module directly
 if __name__ == '__main__':
     coact(obj={})

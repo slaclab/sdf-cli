@@ -404,7 +404,8 @@ class RepoRegistration(Registration):
         'RepoRemoveUser',
         'RepoChangeComputeRequirement',
         'RepoComputeAllocation',
-        'RepoUpdateFeature'
+        'RepoUpdateFeature',
+        'FacilityComputeAllocation'
     ]
 
     REPO_USERS_GQL = gql("""
@@ -449,6 +450,24 @@ class RepoRegistration(Registration):
           }
         }
         """)
+
+    REPOS_WITH_ALLOCATIONS_GQL = gql("""
+        query reposWithAllocations($facilityName: String!) {
+            repos(filter: {facility: $facilityName}) {
+                Id
+                name
+                facility
+                currentComputeAllocations {
+                    Id
+                    clustername
+                    percentOfFacility
+                    start
+                    end
+                    allocatedNodesCount
+                }
+            }
+        }
+    """)
 
     FACILITY_CURRENT_COMPUTE_CGL = gql("""
         query facility( $facility: String! ) {
@@ -514,6 +533,13 @@ class RepoRegistration(Registration):
 
             elif req_type == 'RepoUpdateFeature':
                 return self.do_feature(repo, facility)
+
+            elif req_type == 'FacilityComputeAllocation':
+                clustername = req.get('clustername', None)
+                assert facility and clustername
+                return self.do_facility_compute_allocation_cascade(
+                    facility, clustername, dry_run=dry_run
+                )
 
         return None
 
@@ -902,6 +928,103 @@ class RepoRegistration(Registration):
     def do_feature(self, repo, facility, dry_run: bool = False) -> bool:
         raise NotImplementedError("do_feature not yet implemented")
 
+    def do_facility_compute_allocation_cascade(
+        self,
+        facility: str,
+        clustername: str,
+        dry_run: bool = False
+    ) -> bool:
+        """
+        Handle facility-level compute allocation changes by updating all affected repo allocations.
+        Queries the facility record directly for the current purchased node count.
+        """
+        # Fetch current purchased nodes from the facility record
+        facility_resp = self.back_channel.execute(
+            self.FACILITY_CURRENT_COMPUTE_CGL,
+            {'facility': facility}
+        )
+        fac_data = facility_resp.get('facility', {})
+        new_purchased = None
+        for cp in fac_data.get('computepurchases', []):
+            if cp['clustername'].lower() == clustername.lower():
+                new_purchased = cp['purchased']
+                break
+
+        if new_purchased is None:
+            self.logger.error(f"No purchase record found for {facility}@{clustername} - cannot cascade")
+            return False
+
+        if new_purchased <= 0:
+            self.logger.error(f"Invalid purchased nodes: {new_purchased} for {facility}@{clustername} - cannot cascade")
+            return False
+
+        self.logger.info(
+            f"Processing facility compute allocation cascade: {facility}@{clustername} "
+            f"-> {new_purchased} purchased nodes"
+        )
+
+        try:
+            # Get all repositories with allocations on this facility/cluster
+            repos_resp = self.back_channel.execute(
+                self.REPOS_WITH_ALLOCATIONS_GQL,
+                {'facilityName': facility}
+            )
+
+            affected_repos = []
+            for repo in repos_resp['repos']:
+                for allocation in repo['currentComputeAllocations']:
+                    if allocation['clustername'].lower() == clustername.lower():
+                        affected_repos.append({
+                            'repo': repo,
+                            'allocation': allocation
+                        })
+
+            self.logger.info(f"Found {len(affected_repos)} repo allocations to update on {facility}@{clustername}")
+
+            # Process each affected repository allocation
+            update_count = 0
+            for item in affected_repos:
+                repo = item['repo']
+                allocation = item['allocation']
+
+                # Calculate new node allocation maintaining the same percentage
+                percent_of_facility = allocation['percentOfFacility']
+                new_allocated_nodes = (percent_of_facility / 100.0) * new_purchased
+
+                self.logger.info(
+                    f"Updating {repo['facility']}:{repo['name']} on {clustername}: "
+                    f"{percent_of_facility}% -> {new_allocated_nodes:.2f} nodes (was {allocation['allocatedNodesCount']})"
+                )
+
+                try:
+                    self.do_repo_compute_allocation(
+                        repo['name'],
+                        repo['facility'],
+                        clustername,
+                        percent_of_facility,
+                        new_allocated_nodes,
+                        pdl.parse(allocation['start'], timezone='UTC'),
+                        pdl.parse(allocation['end'], timezone='UTC') if allocation['end'] else None,
+                        dry_run=dry_run,
+                    )
+                    update_count += 1
+                    self.logger.info(f"Successfully updated {repo['facility']}:{repo['name']} allocation")
+
+                except Exception as e:
+                    self.logger.error(f"Failed to update {repo['facility']}:{repo['name']}: {e}")
+                    # Continue with other repos even if one fails
+                    continue
+
+            self.logger.info(
+                f"Facility cascade update completed: {update_count}/{len(affected_repos)} "
+                f"repo allocations updated on {facility}@{clustername}"
+            )
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Facility compute allocation cascade failed: {e}")
+            return False
+
 
 @coactd.command(name='reporegistration')
 @common_options
@@ -911,7 +1034,7 @@ def repo_registration(ctx, verbose, username, password_file, client_name, dry_ru
     """Workflow for repository maintenance.
 
     Handles NewRepo, RepoMembership, RepoRemoveUser, RepoChangeComputeRequirement,
-    RepoComputeAllocation, and RepoUpdateFeature request types.
+    RepoComputeAllocation, RepoUpdateFeature, and FacilityComputeAllocation request types.
     """
     configure_logging_from_verbose(verbose)
     ctx.obj['verbose'] = verbose
