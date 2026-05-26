@@ -872,7 +872,7 @@ def overage(
         lines = []
         for point in data:
             line = f"allocation_usage,facility={point['facility']},cluster={point['cluster']},qos={point['qos']},window_mins={point['window_mins']} "
-            line += f"held={str(point['held']).lower()},over={str(point['over']).lower()},change={str(point['change']).lower()},percent_used={float(point['percent_used'])},purchased_nodes={int(point['purchased_nodes']) if point.get('purchased_nodes') is not None else 0}i"
+            line += f"held={str(point['held']).lower()},over={str(point['over']).lower()},change={str(point['change']).lower()},percent_used={float(point['percent_used'])},purchased_nodes={float(point['purchased_nodes']) if point.get('purchased_nodes') is not None else 0.0}"
             lines.append(line)
 
         try:
