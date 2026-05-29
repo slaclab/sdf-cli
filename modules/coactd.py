@@ -532,9 +532,6 @@ class RepoRegistration(Registration):
         if repo_allocation_end_delta is None:
             repo_allocation_end_delta = pdl.duration(years=5)
 
-        # run the facility tasks for this repo
-        self.run_playbook("coact/add_repo.yaml", facility=facility, repo=repo)
-
         # For CryoEM repos (ct* / ce*), create a POSIX group via Grouper
         repo_gid = None
         repo_group_name = ""
@@ -563,6 +560,9 @@ class RepoRegistration(Registration):
                     self.logger.warning(f"No GID found in grouper playbook results for {facility}:{repo}")
             except Exception as e:
                 self.logger.warning(f"Failed to create grouper POSIX group for {facility}:{repo}: {e}")
+
+        # run the facility tasks for this repo
+        self.run_playbook("coact/add_repo.yaml", facility=facility, repo=repo)
 
         leaders = [principal]
         users = [principal]
