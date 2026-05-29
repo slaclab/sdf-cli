@@ -233,12 +233,6 @@ def registration_options(f):
         help='Basic auth password for graphql service'
     )(f)
     f = click.option(
-        '--grouper-password-file',
-        default=None,
-        type=click.Path(exists=True),
-        help='Path to file containing the Grouper service account password'
-    )(f)
-    f = click.option(
         '--client-name',
         default=None,
         help='Subscriber queue name to connect to'
@@ -970,6 +964,12 @@ class RepoRegistration(Registration):
 @coactd.command(name='reporegistration')
 @common_options
 @registration_options
+@click.option(
+    '--grouper-password-file',
+    default=None,
+    type=click.Path(exists=True),
+    help='Path to file containing the Grouper service account password'
+)
 @click.pass_context
 def repo_registration(ctx, verbose, username, password_file, client_name, dry_run, grouper_password_file):
     """Workflow for repository maintenance.
