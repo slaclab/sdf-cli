@@ -620,7 +620,7 @@ class RepoRegistration(Registration):
         # Create posixgroup feature if GID was obtained from grouper
         if repo_gid is not None:
             posixgroup_options = [json.dumps({
-                "name": repo_group_name,
+                "name": grouper_name,
                 "gidNumber": int(repo_gid)
             })]
 
