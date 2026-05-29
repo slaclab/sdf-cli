@@ -554,15 +554,23 @@ class RepoRegistration(Registration):
                 grouper_facts = self.playbook_task_res(grouper_runner, 'Grouper', 'Export grouper params')
                 if grouper_facts and 'ansible_facts' in grouper_facts:
                     repo_gid = grouper_facts['ansible_facts']['gid']
-                    repo_group_name = grouper_name
                     self.logger.info(f"Retrieved repo GID for {facility}:{repo}: {repo_gid}")
                 else:
                     self.logger.warning(f"No GID found in grouper playbook results for {facility}:{repo}")
             except Exception as e:
                 self.logger.warning(f"Failed to create grouper POSIX group for {facility}:{repo}: {e}")
 
+        repo_gid = repo_gid or None
+
         # run the facility tasks for this repo
-        self.run_playbook("coact/add_repo.yaml", facility=facility, repo=repo)
+        self.run_playbook(
+            "coact/add_repo.yaml",
+            facility=facility, 
+            repo=repo,
+            principal=principal,
+            gidNumber=repo_gid,
+            groupName=grouper_name
+        )
 
         leaders = [principal]
         users = [principal]
