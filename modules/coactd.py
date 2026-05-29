@@ -552,6 +552,7 @@ class RepoRegistration(Registration):
                 )
                 grouper_runner = self.run_playbook("coact/grouper.yml", **grouper_kwargs)
                 grouper_facts = self.playbook_task_res(grouper_runner, 'Grouper', 'Export grouper params')
+                self.logger.info(f"Grouper playbook facts for {facility}:{repo}: {grouper_facts}")
                 if grouper_facts and 'ansible_facts' in grouper_facts:
                     repo_gid = grouper_facts['ansible_facts']['gid']
                     self.logger.info(f"Retrieved repo GID for {facility}:{repo}: {repo_gid}")
