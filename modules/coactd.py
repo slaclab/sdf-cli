@@ -535,6 +535,7 @@ class RepoRegistration(Registration):
         # For CryoEM repos (ct* / ce*), create a POSIX group via Grouper
         repo_gid = None
         repo_group_name = ""
+        grouper_name = ""
         uses_grouper = (
             facility.lower() == 'cryoem'
             and (repo.lower().startswith('ct') or repo.lower().startswith('ce'))
@@ -551,10 +552,14 @@ class RepoRegistration(Registration):
                     grouper_password_file=self.grouper_password_file
                 )
                 grouper_runner = self.run_playbook("coact/grouper.yml", **grouper_kwargs)
-                grouper_facts = self.playbook_task_res(grouper_runner, 'Grouper', 'Export grouper params')
-                self.logger.info(f"Grouper playbook facts for {facility}:{repo}: {grouper_facts}")
-                if grouper_facts and 'ansible_facts' in grouper_facts:
-                    repo_gid = grouper_facts['ansible_facts']['gid']
+                repo_gid, repo_group_name = self.extract_grouper_values(
+                    grouper_runner,
+                    default_group_name=grouper_name
+                )
+                self.logger.info(
+                    f"Retrieved grouper values for {facility}:{repo}: gid={repo_gid}, group_name={repo_group_name}"
+                )
+                if repo_gid is not None:
                     self.logger.info(f"Retrieved repo GID for {facility}:{repo}: {repo_gid}")
                 else:
                     self.logger.warning(f"No GID found in grouper playbook results for {facility}:{repo}")
@@ -570,7 +575,7 @@ class RepoRegistration(Registration):
             repo=repo,
             principal=principal,
             gidNumber=repo_gid,
-            groupName=grouper_name
+            groupName=repo_group_name
         )
 
         leaders = [principal]
@@ -636,6 +641,65 @@ class RepoRegistration(Registration):
                 self.logger.warning(f"Failed to create posixgroup feature for {facility}:{repo}: {e}")
 
         return True
+
+    def extract_grouper_values(self, runner: ansible_runner.runner.Runner, default_group_name: str = ""):
+        """Extract gid and group name from grouper playbook events.
+
+        Ansible callbacks can emit task results in different shapes depending on
+        task type (`s3df_grouper`, `debug`, `set_fact`). This method scans all
+        events and picks the first non-empty gid and group name found.
+        """
+
+        def _clean(v):
+            if v is None:
+                return None
+            if isinstance(v, str):
+                v = v.strip()
+                return v if v else None
+            return str(v)
+
+        gid = None
+        group_name = _clean(default_group_name)
+
+        for event_data in self.playbook_events(runner):
+            res = event_data.get('res', None)
+            if not isinstance(res, dict):
+                continue
+
+            facts = res.get('ansible_facts', {})
+            facts = facts if isinstance(facts, dict) else {}
+            msg = res.get('msg', None)
+            msg = msg if isinstance(msg, dict) else {}
+
+            candidates_gid = [
+                res.get('gid', None),
+                facts.get('gid', None),
+                msg.get('gid', None),
+                (res.get('group', {}) if isinstance(res.get('group', {}), dict) else {}).get('idIndex', None),
+            ]
+            candidates_group_name = [
+                res.get('group_name', None),
+                facts.get('group_name', None),
+                msg.get('group_name', None),
+                (res.get('group', {}) if isinstance(res.get('group', {}), dict) else {}).get('name', None),
+            ]
+
+            for candidate in candidates_gid:
+                cleaned = _clean(candidate)
+                if cleaned is not None:
+                    gid = cleaned
+                    break
+
+            for candidate in candidates_group_name:
+                cleaned = _clean(candidate)
+                if cleaned is not None:
+                    group_name = cleaned
+                    break
+
+            if gid is not None and group_name is not None:
+                break
+
+        return gid, group_name or ""
 
     def upsert_repo_compute_allocation(
         self,
