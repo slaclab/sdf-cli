@@ -534,7 +534,6 @@ class RepoRegistration(Registration):
 
         # For CryoEM repos (ct* / ce*), create a POSIX group via Grouper
         repo_gid = None
-        repo_group_name = ""
         grouper_name = ""
         uses_grouper = (
             facility.lower() == 'cryoem'
@@ -552,12 +551,12 @@ class RepoRegistration(Registration):
                     grouper_password_file=self.grouper_password_file
                 )
                 grouper_runner = self.run_playbook("coact/grouper.yml", **grouper_kwargs)
-                repo_gid, repo_group_name = self.extract_grouper_values(
+                repo_gid, __dict__ = self.extract_grouper_values(
                     grouper_runner,
                     default_group_name=grouper_name
                 )
                 self.logger.info(
-                    f"Retrieved grouper values for {facility}:{repo}: gid={repo_gid}, group_name={repo_group_name}"
+                    f"Retrieved grouper values for {facility}:{repo}: gid={repo_gid}"
                 )
                 if repo_gid is not None:
                     self.logger.info(f"Retrieved repo GID for {facility}:{repo}: {repo_gid}")
@@ -575,7 +574,7 @@ class RepoRegistration(Registration):
             repo=repo,
             principal=principal,
             gidNumber=repo_gid,
-            groupName=repo_group_name
+            groupName=grouper_name
         )
 
         leaders = [principal]
