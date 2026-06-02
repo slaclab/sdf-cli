@@ -572,7 +572,7 @@ class RepoRegistration(Registration):
             "coact/add_repo.yaml",
             facility=facility, 
             repo=repo,
-            principal=principal,
+            repo_principal=principal,
             gidNumber=repo_gid,
             groupName=grouper_name
         )
