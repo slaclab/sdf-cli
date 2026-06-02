@@ -68,7 +68,7 @@ class TestRepoRegistrationGID:
         result = repo_registration.do_new_repo(
             repo='ct-test',
             facility='cryoem',
-            repo_principal='cryo-user'
+            principal='cryo-user'
         )
 
         # Verify
@@ -100,7 +100,7 @@ class TestRepoRegistrationGID:
         result = repo_registration.do_new_repo(
             repo='ct-repo',
             facility='cryoem',
-            repo_principal='test-user'
+            principal='test-user'
         )
 
         # Verify
@@ -124,7 +124,7 @@ class TestRepoRegistrationGID:
         result = repo_registration.do_new_repo(
             repo='test-repo',
             facility='OTHER',  # Not CryoEM
-            repo_principal='test-user'
+            principal='test-user'
         )
 
         # Verify
@@ -155,7 +155,7 @@ class TestRepoRegistrationGID:
         result = repo_registration.do_new_repo(
             repo='other-repo',
             facility='cryoem',
-            repo_principal='test-user'
+            principal='test-user'
         )
 
         # Verify
