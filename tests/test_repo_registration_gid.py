@@ -68,7 +68,7 @@ class TestRepoRegistrationGID:
         result = repo_registration.do_new_repo(
             repo='ct-test',
             facility='cryoem',
-            principal='cryo-user'
+            repo_principal='cryo-user'
         )
 
         # Verify
@@ -100,7 +100,7 @@ class TestRepoRegistrationGID:
         result = repo_registration.do_new_repo(
             repo='ct-repo',
             facility='cryoem',
-            principal='test-user'
+            repo_principal='test-user'
         )
 
         # Verify
@@ -124,16 +124,16 @@ class TestRepoRegistrationGID:
         result = repo_registration.do_new_repo(
             repo='test-repo',
             facility='OTHER',  # Not CryoEM
-            principal='test-user'
+            repo_principal='test-user'
         )
 
         # Verify
         assert result is True
 
         # Only add_repo.yaml should run — grouper.yml should NOT be called
-        # The new implementation passes principal, gidNumber=None, and groupName=''
+        # The new implementation passes repo_principal, gidNumber=None, and groupName=''
         repo_registration.run_playbook.assert_called_once_with(
-            'coact/add_repo.yaml', facility='OTHER', repo='test-repo', principal='test-user', gidNumber=None, groupName=''
+            'coact/add_repo.yaml', facility='OTHER', repo='test-repo', repo_principal='test-user', gidNumber=None, groupName=''
         )
         # extract_grouper_values should not be called for non-grouper facilities
         if hasattr(repo_registration, 'extract_grouper_values') and isinstance(repo_registration.extract_grouper_values, Mock):
@@ -155,14 +155,14 @@ class TestRepoRegistrationGID:
         result = repo_registration.do_new_repo(
             repo='other-repo',
             facility='cryoem',
-            principal='test-user'
+            repo_principal='test-user'
         )
 
         # Verify
         assert result is True
-        # The new implementation passes principal, gidNumber=None, and groupName=''
+        # The new implementation passes repo_principal, gidNumber=None, and groupName=''
         repo_registration.run_playbook.assert_called_once_with(
-            'coact/add_repo.yaml', facility='cryoem', repo='other-repo', principal='test-user', gidNumber=None, groupName=''
+            'coact/add_repo.yaml', facility='cryoem', repo='other-repo', repo_principal='test-user', gidNumber=None, groupName=''
         )
         # extract_grouper_values should not be called since this repo doesn't match the pattern
         if hasattr(repo_registration, 'extract_grouper_values') and isinstance(repo_registration.extract_grouper_values, Mock):
