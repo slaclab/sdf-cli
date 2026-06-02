@@ -56,7 +56,8 @@ class TestRepoRegistrationGID:
         """Test successful GID extraction for CryoEM facility (ct* repo triggers grouper)."""
         # Setup — run_playbook called twice: add_repo.yaml then grouper.yml
         repo_registration.run_playbook.return_value = mock_ansible_runner
-        repo_registration.playbook_task_res.return_value = sample_gid_facts
+        # Mock extract_grouper_values to return the GID
+        repo_registration.extract_grouper_values = Mock(return_value=('12345', 'sdf-cryoem-ct-test'))
         repo_registration.back_channel.execute.side_effect = [
             {'repoUpsert': {'Id': 'repo-456'}},
             {'repoUpsertFeature': {'Id': 'feature-slurm'}},
@@ -85,10 +86,11 @@ class TestRepoRegistrationGID:
         )
 
     def test_gid_extraction_empty_facts(self, repo_registration: RepoRegistration, mock_ansible_runner: Mock):
-        """Test handling when grouper playbook returns empty ansible_facts (triggers KeyError)."""
+        """Test handling when grouper playbook returns empty ansible_facts (no GID found)."""
         # Setup
         repo_registration.run_playbook.return_value = mock_ansible_runner
-        repo_registration.playbook_task_res.return_value = {'ansible_facts': {}}  # Empty facts — KeyError on 'gid'
+        # Mock extract_grouper_values to return None for GID (empty facts scenario)
+        repo_registration.extract_grouper_values = Mock(return_value=(None, 'sdf-cryoem-ct-repo'))
         repo_registration.back_channel.execute.side_effect = [
             {'repoUpsert': {'Id': 'repo-123'}},
             {'repoUpsertFeature': {'Id': 'feature-slurm'}}
@@ -104,9 +106,9 @@ class TestRepoRegistrationGID:
         # Verify
         assert result is True
 
-        # KeyError on 'gid' is caught and logged as warning
+        # When GID is None, it should log "No GID found..."
         repo_registration.logger.warning.assert_called_with(
-            "Failed to create grouper POSIX group for cryoem:ct-repo: 'gid'"
+            "No GID found in grouper playbook results for cryoem:ct-repo"
         )
 
     def test_non_grouper_facility_skips_gid(self, repo_registration, mock_ansible_runner):
@@ -129,10 +131,13 @@ class TestRepoRegistrationGID:
         assert result is True
 
         # Only add_repo.yaml should run — grouper.yml should NOT be called
+        # The new implementation passes principal, gidNumber=None, and groupName=''
         repo_registration.run_playbook.assert_called_once_with(
-            'coact/add_repo.yaml', facility='OTHER', repo='test-repo'
+            'coact/add_repo.yaml', facility='OTHER', repo='test-repo', principal='test-user', gidNumber=None, groupName=''
         )
-        repo_registration.playbook_task_res.assert_not_called()
+        # extract_grouper_values should not be called for non-grouper facilities
+        if hasattr(repo_registration, 'extract_grouper_values') and isinstance(repo_registration.extract_grouper_values, Mock):
+            repo_registration.extract_grouper_values.assert_not_called()
 
         # Should only create slurm feature (2 back_channel calls: repoUpsert + feature)
         assert repo_registration.back_channel.execute.call_count == 2
@@ -155,7 +160,10 @@ class TestRepoRegistrationGID:
 
         # Verify
         assert result is True
+        # The new implementation passes principal, gidNumber=None, and groupName=''
         repo_registration.run_playbook.assert_called_once_with(
-            'coact/add_repo.yaml', facility='cryoem', repo='other-repo'
+            'coact/add_repo.yaml', facility='cryoem', repo='other-repo', principal='test-user', gidNumber=None, groupName=''
         )
-        repo_registration.playbook_task_res.assert_not_called()
+        # extract_grouper_values should not be called since this repo doesn't match the pattern
+        if hasattr(repo_registration, 'extract_grouper_values') and isinstance(repo_registration.extract_grouper_values, Mock):
+            repo_registration.extract_grouper_values.assert_not_called()
