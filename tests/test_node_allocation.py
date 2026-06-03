@@ -106,16 +106,16 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
     assert overage_point['purchased_nodes'] == purchased_nodes, "OveragePoint should have purchasedNodes from format_data"
     
     # Mock sacctmgr toggle to set nodes to 0
-    with patch('modules.coact.ansible_runner.run') as mock_run:
+    with patch('modules.coact.AnsibleRunner.run_playbook') as mock_run:
         mock_run.return_value = MagicMock(rc=0, stats={})
         result = toggle_job_blocking(overage_point, execute=True)
 
         # Verify blocking command was issued
         assert result is True
-        extravars = mock_run.call_args[1]['extravars']
-        assert extravars['nodes'] == 0
-        assert extravars['facility'] == facility
-        assert extravars['cluster'] == cluster
+        call_kwargs = mock_run.call_args.kwargs
+        assert call_kwargs['nodes'] == 0
+        assert call_kwargs['facility'] == facility
+        assert call_kwargs['cluster'] == cluster
     
     # After blocking, sacctmgr shows GrpNodes=0 (but GraphQL still has purchasedNodes)
     sacctmgr_blocked = b"""lcls:_regular_@ada|0|1000|1000
@@ -158,17 +158,17 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
     assert recovery_point['change'] is True  # Need to unblock
     assert recovery_point['purchased_nodes'] == purchased_nodes, "OveragePoint should have purchasedNodes from coact-api"
     
-    with patch('modules.coact.ansible_runner.run') as mock_run:
+    with patch('modules.coact.AnsibleRunner.run_playbook') as mock_run:
         mock_run.return_value = MagicMock(rc=0, stats={})
         result = toggle_job_blocking(recovery_point, execute=True)
 
         # Verify unblocking command uses original purchased nodes from coact-api
         assert result is True
-        extravars = mock_run.call_args[1]['extravars']
-        assert extravars['nodes'] == purchased_nodes  # CRITICAL: restores 256, not -1
-        assert extravars['nodes'] != -1               # NOT unlimited
-        assert extravars['facility'] == facility
-        assert extravars['cluster'] == cluster
+        call_kwargs = mock_run.call_args.kwargs
+        assert call_kwargs['nodes'] == purchased_nodes  # CRITICAL: restores 256, not -1
+        assert call_kwargs['nodes'] != -1               # NOT unlimited
+        assert call_kwargs['facility'] == facility
+        assert call_kwargs['cluster'] == cluster
     
     # Verify final state: sacctmgr shows nodes restored
     sacctmgr_restored = b"""lcls:_regular_@ada|256|1000|1000

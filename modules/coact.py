@@ -13,7 +13,6 @@ import re
 import math
 import sys
 
-import ansible_runner
 import click
 import json
 import subprocess
@@ -26,15 +25,13 @@ import requests
 from urllib.parse import urlparse
 
 # Import base classes from modules.base
-from .base import GraphQlMixin, common_options, graphql_options, configure_logging_from_verbose
+from .base import AnsibleRunner, GraphQlMixin, common_options, graphql_options, configure_logging_from_verbose
 from .utils.graphql import GraphQlClient
 
 # get local timezone
 _now = pdl.now()
 
 # Using loguru logger
-
-COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
 
 # Define context settings to support -h for help
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
@@ -914,17 +911,14 @@ def toggle_job_blocking(point: OveragePoint, execute: bool = False) -> bool:
     logger.info(f"Job blocking toggle for {point['facility']}@{point['cluster']}: nodes={nodes} (over={point['over']}, execute={execute})")
 
     if execute:
-        r = ansible_runner.run(
-            private_data_dir=COACT_ANSIBLE_RUNNER_PATH,
+        runner = AnsibleRunner()
+        runner.ident = "toggle_job_blocking"
+
+        r = runner.run_playbook(
             playbook='coact/slurm/toggle-job-blocking.yaml',
-            extravars=dict(
-                facility=point['facility'],
-                cluster=point['cluster'],
-                nodes=nodes,
-            ),
-            suppress_env_files=True,
-            ident='toggle_job_blocking',
-            cancel_callback=lambda: None,
+            facility=point['facility'],
+            cluster=point['cluster'],
+            nodes=nodes,
         )
         logger.debug(r.stats)
         if r.rc != 0:
