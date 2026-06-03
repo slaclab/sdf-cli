@@ -25,7 +25,7 @@ import requests
 from urllib.parse import urlparse
 
 # Import base classes from modules.base
-from .base import GraphQlMixin, common_options, graphql_options, configure_logging_from_verbose
+from .base import AnsibleRunner, GraphQlMixin, common_options, graphql_options, configure_logging_from_verbose
 from .utils.graphql import GraphQlClient
 
 # get local timezone
@@ -48,11 +48,6 @@ class OveragePoint(TypedDict):
     over: bool
     change: bool
     purchased_nodes: int
-
-class FacilityNodeUsage(TypedDict):
-    facility: str
-    cluster: str
-    nodes: int
 
 
 def parse_datetime(value: Any, timezone=_now.timezone, force_tz: bool = False):
@@ -898,11 +893,8 @@ def overage(
 
 def toggle_job_blocking(point: OveragePoint, execute: bool = False) -> bool:
     """Enable/disable job blocking for overaged allocations."""
-    template = Template("sacctmgr modify -i account name=$facility:_regular_@$cluster set GrpTRES=node=$nodes")
-
     # Determine node count based on blocking state
     if point['over']:
-        # Blocking: set to 0
         nodes = 0
     else:
         # Unblocking: use purchased nodes or fallback to unlimited
@@ -916,24 +908,21 @@ def toggle_job_blocking(point: OveragePoint, execute: bool = False) -> bool:
             logger.warning(f"Invalid node count {nodes} for {point['facility']}@{point['cluster']}, using unlimited")
             nodes = -1
 
-    facility_usage = FacilityNodeUsage(
-        facility=point['facility'],
-        cluster=point['cluster'],
-        nodes=nodes
-    )
-
-    logger.info(f"Job blocking toggle for {facility_usage['facility']}@{facility_usage['cluster']}: nodes={nodes} (over={point['over']}, execute={execute})")
-    cmd = template.safe_substitute(**facility_usage)
-    logger.info(f"Command: {cmd}")
+    logger.info(f"Job blocking toggle for {point['facility']}@{point['cluster']}: nodes={nodes} (over={point['over']}, execute={execute})")
 
     if execute:
-        try:
-            result = subprocess.check_output(cmd.split())
-            for line in result.split(b"\n"):
-                if line.strip():
-                    logger.debug(f"sacctmgr output: {line.decode().strip()}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to toggle job blocking: {e}")
+        runner = AnsibleRunner()
+        runner.ident = "toggle_job_blocking"
+
+        r = runner.run_playbook(
+            playbook='coact/slurm/toggle-job-blocking.yaml',
+            facility=point['facility'],
+            cluster=point['cluster'],
+            nodes=nodes,
+        )
+        logger.debug(r.stats)
+        if r.rc != 0:
+            logger.error(f"Failed to toggle job blocking for {point['facility']}@{point['cluster']}")
             return False
 
     return True

@@ -16,6 +16,7 @@ dependencies = [
     "pendulum>=3.2.0",
     "tzlocal>=5.3.1",
     "loguru>=0.7.0",
+    "setuptools<70",  # Required by ansible-runner for pkg_resources (deprecated in v70+)
 ]
 
 [project.optional-dependencies]

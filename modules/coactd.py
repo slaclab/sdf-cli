@@ -16,7 +16,6 @@ from enum import Enum
 from typing import Any, Optional, List
 from math import ceil
 from timeit import default_timer as timer
-from pathlib import Path
 
 import click
 import pendulum as pdl
@@ -26,19 +25,14 @@ import jinja2
 import smtplib
 from email.message import EmailMessage
 
-import ansible_runner
-
 # Import base classes from modules.base
-from .base import GraphQlMixin, common_options, configure_logging_from_verbose
+from .base import AnsibleRunner, common_options, configure_logging_from_verbose
 from .utils.graphql import GraphQlSubscriber
 
 # Using loguru logger
 
 # Define context settings to support -h for help
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
-
-COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
-
 
 # Order of class inheritance important
 class RequestStatus(str, Enum):
@@ -47,49 +41,6 @@ class RequestStatus(str, Enum):
     REJECTED = 'Rejected'
     COMPLETED = 'Complete'
     INCOMPLETE = 'Incomplete'
-
-
-class AnsibleRunner:
-    """Mixin class for running Ansible playbooks."""
-    # Using loguru logger
-    ident = None
-
-    def run_playbook(
-        self,
-        playbook: str,
-        private_data_dir: str = COACT_ANSIBLE_RUNNER_PATH,
-        tags: str = 'all',
-        dry_run: bool = False,
-        **kwargs
-    ) -> Optional[ansible_runner.runner.Runner]:
-        name = Path(playbook).name
-        if not dry_run:
-            r = ansible_runner.run(
-                private_data_dir=private_data_dir,
-                playbook=playbook,
-                tags=tags,
-                extravars=kwargs,
-                suppress_env_files=True,
-                ident=f'{self.ident}_{name}:{tags}',
-                cancel_callback=lambda: None
-            )
-            self.logger.debug(r.stats)
-            if not r.rc == 0:
-                raise Exception("AnsibleRunner failed")
-            return r
-        else:
-            self.logger.warning(f"not running playbook {playbook}")
-            return None
-
-    def playbook_events(self, runner: ansible_runner.runner.Runner) -> dict:
-        for e in runner.events:
-            if 'event_data' in e:
-                yield e['event_data']
-
-    def playbook_task_res(self, runner: ansible_runner.runner.Runner, play: str, task: str) -> dict:
-        for e in self.playbook_events(runner):
-            if 'play' in e and play == e['play'] and 'task' in e and task == e['task'] and 'res' in e:
-                return e['res']
 
 
 class EmailRunner:

@@ -6,15 +6,63 @@ subcommand modules in the SDF CLI.
 """
 
 import sys
+from enum import Enum
+from pathlib import Path
+from typing import Optional
 
 import click
 from loguru import logger
+import ansible_runner
 
 from .utils.graphql import GraphQlClient
 
 # Define context settings to support -h for help across all commands
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
 
+COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
+
+
+class AnsibleRunner:
+    """Mixin class for running Ansible playbooks."""
+    # Using loguru logger
+    ident = None
+
+    def run_playbook(
+        self,
+        playbook: str,
+        private_data_dir: str = COACT_ANSIBLE_RUNNER_PATH,
+        tags: str = 'all',
+        dry_run: bool = False,
+        **kwargs
+    ) -> Optional[ansible_runner.runner.Runner]:
+        name = Path(playbook).name
+        if not dry_run:
+            r = ansible_runner.run(
+                private_data_dir=private_data_dir,
+                playbook=playbook,
+                tags=tags,
+                extravars=kwargs,
+                suppress_env_files=True,
+                ident=f'{self.ident}_{name}:{tags}',
+                cancel_callback=lambda: None
+            )
+            self.logger.debug(r.stats)
+            if not r.rc == 0:
+                raise Exception("AnsibleRunner failed")
+            return r
+        else:
+            self.logger.warning(f"not running playbook {playbook}")
+            return None
+
+    def playbook_events(self, runner: ansible_runner.runner.Runner) -> dict:
+        for e in runner.events:
+            if 'event_data' in e:
+                yield e['event_data']
+
+    def playbook_task_res(self, runner: ansible_runner.runner.Runner, play: str, task: str) -> dict:
+        for e in self.playbook_events(runner):
+            if 'play' in e and play == e['play'] and 'task' in e and task == e['task'] and 'res' in e:
+                return e['res']
 
 class GraphQlMixin:
     """
