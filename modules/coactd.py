@@ -565,7 +565,8 @@ class RepoRegistration(Registration):
             except Exception as e:
                 self.logger.warning(f"Failed to create grouper POSIX group for {facility}:{repo}: {e}")
 
-        repo_gid = repo_gid or None
+        if repo_gid is None:
+            raise RuntimeError("Unanable to fetch gid from grouper.")
 
         # run the facility tasks for this repo
         self.run_playbook(
