@@ -48,7 +48,7 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
     - When unblocking: GrpNodes restored to purchased amount (from GraphQL)
     """
     # Setup JWT token for REST client
-    os.environ["SLURM_JWT"] = "test_token"
+    os.environ["SLURMREST_JWT"] = "test_token"
 
     facility = "lcls"
     cluster = "ada"
@@ -205,7 +205,7 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
         assert result[facility][cluster]["purchasedNodes"] == purchased_nodes
 
     # Clean up JWT token
-    if "SLURM_JWT" in os.environ:
-        del os.environ["SLURM_JWT"]
+    if "SLURMREST_JWT" in os.environ:
+        del os.environ["SLURMREST_JWT"]
 
 

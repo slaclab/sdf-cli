@@ -29,9 +29,9 @@ from openapi_client.models.v0042_assoc_max_tres_group import V0042AssocMaxTresGr
 @pytest.fixture(autouse=True)
 def slurm_jwt():
     """Provide a dummy JWT so SlurmrestClient.__init__ doesn't raise."""
-    os.environ["SLURM_JWT"] = "test_token"
+    os.environ["SLURMREST_JWT"] = "test_token"
     yield
-    os.environ.pop("SLURM_JWT", None)
+    os.environ.pop("SLURMREST_JWT", None)
 
 
 def make_jobs_response(mem_mb: int = 256_000, cpus: int = 128, gpus: int = 0) -> V0042OpenapiSlurmdbdJobsResp:

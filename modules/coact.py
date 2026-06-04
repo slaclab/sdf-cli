@@ -725,7 +725,7 @@ class FacilityUsage(GraphQlMixin):
 
     @property
     def slurm_client(self) -> SlurmrestClient:
-        """Lazily construct SlurmrestClient so missing SLURM_JWT fails at call time, not startup."""
+        """Lazily construct SlurmrestClient so missing SLURMREST_JWT fails at call time, not startup."""
         if self._slurm_client is None:
             self._slurm_client = SlurmrestClient()
         return self._slurm_client

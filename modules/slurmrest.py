@@ -55,9 +55,9 @@ class SlurmrestClient:
             c.host = os.getenv("SLURMREST_URL", "http://sdf-slurmrest-dev.slac.stanford.edu")
 
         # Set JWT token for authentication
-        c.access_token = os.getenv("SLURM_JWT")
+        c.access_token = os.getenv("SLURMREST_JWT")
         if not c.access_token:
-            raise EnvironmentError("No SLURM_JWT set")
+            raise EnvironmentError("No SLURMREST_JWT set")
 
         self.slurmdb = SlurmdbApi(Client(c))
 
