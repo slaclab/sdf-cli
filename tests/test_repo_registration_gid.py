@@ -97,18 +97,17 @@ class TestRepoRegistrationGID:
         ]
 
         # Execute — repo starts with 'ct' to trigger grouper
-        result = repo_registration.do_new_repo(
-            repo='ct-repo',
-            facility='cryoem',
-            principal='test-user'
-        )
+        # This should now raise a RuntimeError when GID is None
+        with pytest.raises(RuntimeError, match="Unable to fetch gid from grouper"):
+            repo_registration.do_new_repo(
+                repo='ct-repo',
+                facility='cryoem',
+                principal='test-user'
+            )
 
-        # Verify
-        assert result is True
-
-        # When GID is None, it should log "No GID found..."
+        # Verify the exception was logged by the outer exception handler
         repo_registration.logger.warning.assert_called_with(
-            "No GID found in grouper playbook results for cryoem:ct-repo"
+            "Failed to create grouper POSIX group for cryoem:ct-repo: Unable to fetch gid from grouper."
         )
 
     def test_non_grouper_facility_skips_gid(self, repo_registration, mock_ansible_runner):
