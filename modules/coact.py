@@ -18,6 +18,8 @@ import json
 import subprocess
 from timeit import default_timer as timer
 
+from .slurmrest import SlurmrestClient
+
 import pendulum as pdl
 from gql import gql
 
@@ -115,353 +117,47 @@ def slurm_dump(ctx, verbose, date, starttime, endtime):
     configure_logging_from_verbose(verbose)
     ctx.obj['verbose'] = verbose
 
-    for line in run_sacct(
+    for job_data in run_sacct(
         date=date,
         start_time=starttime,
         end_time=endtime,
         verbose=verbose > 0
     ):
-        click.echo(line)
+        # Convert job object to a readable format for CLI output
+        job_line = json.dumps(job_data, default=str, separators=(',', ':'))
+        click.echo(job_line)
 
 
 def run_sacct(
-    sacct_bin_path: str = "sacct",
     date: str = "2023-10-12",
     start_time: str = "00:00:00",
     end_time: str = "23:59:59",
     verbose: bool = False
 ) -> Any:
-    """Run sacct command and yield output lines."""
-    commandstr = f"""SLURM_TIME_FORMAT=%s {sacct_bin_path} --allusers --duplicates --allclusters --allocations --starttime="{date}T{start_time}" --endtime="{date}T{end_time}" --truncate --parsable2 --format=JobID,User,UID,Account,Partition,QOS,Submit,Start,End,Elapsed,NCPUS,AllocNodes,AllocTRES,CPUTimeRAW,NodeList,Reservation,ReservationId,State"""
+    """Get job data from SLURM REST API - returns job objects for efficient processing."""
+    # Convert date and time to datetime format for REST API
+    start_datetime = f"{date}T{start_time}"
+    end_datetime = f"{date}T{end_time}"
 
     if verbose:
-        logger.info(f"cmd: {commandstr}")
+        logger.info(f"Using SLURM REST API with start_time={start_datetime}, end_time={end_datetime}")
 
-    index = 0
+    try:
+        client = SlurmrestClient()
+        jobs_response = client.get_jobs(
+            start_time=start_datetime,
+            end_time=end_datetime
+        )
 
-    process = subprocess.Popen(commandstr, shell=True, stdout=subprocess.PIPE)
-    for line in iter(process.stdout.readline, b""):
-        fields = line.decode("utf-8").split("|")
-        if index == 0 or len(fields) >= 10:
-            yield line.decode("utf-8").strip()
-            index += 1
-        else:
-            logger.warning(
-                f"skipping ({len(fields)}, {int(fields[7])} < {int(fields[8])}) {line}"
-            )
+        # Always return job objects for efficient processing
+        for job_data in client.process_jobs_for_import(jobs_response):
+            yield job_data
 
+    except Exception as e:
+        logger.error(f"Failed to get jobs from SLURM REST API: {e}")
+        # Re-raise to maintain error handling behavior
+        raise
 
-# ============================================================================
-# SlurmRemap Command
-# ============================================================================
-
-@coact.command(name='slurmremap')
-@common_options
-@click.option(
-    '--data',
-    type=click.File('r'),
-    default='-',
-    help='Data to read from (default: stdin)'
-)
-@click.pass_context
-def slurm_remap(ctx, verbose, data):
-    """Remaps/patches the slurm job data to prepare for import."""
-    configure_logging_from_verbose(verbose)
-    ctx.obj['verbose'] = verbose
-
-    remapper = SlurmRemapper(verbose=verbose > 0)
-    remapper.run(data)
-
-
-class SlurmRemapper:
-    """Handles the slurm remap logic."""
-
-    def __init__(self, verbose: bool = False):
-        self.verbose = verbose
-
-    def run(self, data):
-        """Run the remap process."""
-        first = True
-        index = {}
-        order = []
-        for line in data.readlines():
-            if line:
-                parts = line.split("|")
-                if first:
-                    index = {s: idx for idx, s in enumerate(parts)}
-                    order = parts
-                    first = False
-                    click.echo(f"{line.strip()}")
-                else:
-                    out = self.convert(index, parts, order)
-                    if out:
-                        click.echo(f"{out}")
-
-    def convert(self, index, parts, order) -> Optional[str]:
-        d = {field: parts[idx] for field, idx in index.items()}
-        d = self.remap_job(d)
-        if d:
-            out = []
-            for i in order:
-                out.append(d[i])
-            return "|".join(out).strip()
-        return None
-
-    def remap_job(self, d) -> Optional[dict]:
-        """Remap job data to fix account info."""
-        if (
-            d["Account"] in ("shared", "shared:default")
-            or d["Account"].startswith("shared")
-            or d["User"] in ("jonl", "vanilla", "yemi", "yangw", "pav", "root", "reranna", "ppascual", "renata",)
-            or d["Partition"] in ("fermi-transfer")
-        ):
-            return None
-
-        if "," in d["Partition"]:
-            a = d["Partition"].split(",")[0]
-            d["Partition"] = a
-
-        if "@" in d["Account"]:
-            d["Account"], _ = d["Account"].split("@")
-
-        if d["QOS"] in ("Unknown",):
-            d["QOS"] = "normal"
-
-        return d
-
-    def remap_job_pre2024(self, d):
-        """deal with old jobs with wrong account info"""
-        # self.logger.info(f"in: {d}")
-        if d["User"] in ("lsstsvc1") and d["Account"] in ("rubin", "shared", ""):
-            d["Account"] = "rubin:production"
-        elif d["Account"] in ("shared", "shared:default") or d["User"] in (
-            "jonl",
-            "vanilla",
-            "yemi",
-            "yangw",
-            "pav",
-            "root",
-            "reranna",
-            "ppascual",
-            "renata",
-        ):
-            return None
-        elif d["User"] in (
-            "csaunder",
-            "elhoward",
-            "mrawls",
-            "brycek",
-            "mfl",
-            "digel",
-            "wguan",
-            "laurenma",
-            "smau",
-            "bos",
-            "erykoff",
-            "ebellm",
-            "mccarthy",
-            "yesw",
-            "abrought",
-            "shuang92",
-            "aconnoll",
-            "daues",
-            "aheinze",
-            "zhaoyu",
-            "dagoret",
-            "kannawad",
-            "kherner",
-            "eske",
-            "cslater",
-            "sierrav",
-            "jmeyers3",
-            "lskelvin",
-            "jchiang",
-            "yanny",
-            "ktl",
-            "jneveu",
-            "hchiang2",
-            "snyder18",
-            "fred3m",
-            "brycek",
-            "eiger",
-            "esteves",
-            "mxk",
-            "yusra",
-            "mrabus",
-            "ryczano",
-            "mgower",
-            "yoachim",
-            "scichris",
-            "jcheval",
-            "richard",
-            "tguillem",
-        ) and d["Account"] in ("", "milano", "roma", "rubin"):
-            d["Account"] = "rubin:developers"
-            if d["Partition"] == "ampere":
-                d["Partition"] = "milano"
-        elif d["User"] == "kocevski" or (
-            d["User"]
-            in (
-                "burnett",
-                "horner",
-                "mdimauro",
-                "burnett",
-                "laviron",
-                "omodei",
-                "tyrelj",
-                "echarles",
-                "bruel",
-            )
-            and d["Account"] in ("", "latba", "ligo", "repository", "burnett")
-        ):
-            d["Account"] = "fermi:users"
-        elif d["User"] in ("glastraw",):
-            d["Account"] = "fermi:l1"
-        elif d["User"] in ("vossj",):
-            d["Partition"] = "roma"
-        elif d["User"] in (
-            "dcesar",
-            "jytang",
-            "rafimah",
-        ):
-            d["Account"] = "ad:beamphysics"
-        elif d["User"] in (
-            "kterao",
-            "kvtsang",
-            "anoronyo",
-            "bkroul",
-            "zhulcher",
-            "koh0207",
-            "drielsma",
-            "lkashur",
-            "dcarber",
-            "amogan",
-            "cyifan",
-            "yjwa",
-            "aj14",
-            "jdyer",
-            "sindhuk",
-            "justinjm",
-            "mrmooney",
-            "bearc",
-            "fuhaoji",
-            "sfogarty",
-            "carsmith",
-            "yuntse",
-        ) and not d["Account"] in (
-            "neutrino:ml-dev",
-            "neutrino:icarus-ml",
-            "neutrino:slacube",
-            "neutrino:dune-ml",
-        ):
-            d["Account"] = "neutrino:default"
-            d["Partition"] = "ampere"
-        elif d["User"] in (
-            "dougl215",
-            "zhezhang",
-        ):  # and d['Account'] in ('ampere:default',):
-            # self.logger.error("HERE")
-            d["Account"] = "mli:default"
-            d["Account"] = "neutrino:default"
-            d["Partition"] = "ampere"
-        elif d["User"] in (
-            "dougl215",
-            "zhezhang",
-        ):  # and d['Account'] in ('ampere:default',):
-            # self.logger.error("HERE")
-            d["Account"] = "mli:default"
-        elif d["User"] in (
-            "jfkern",
-            "taisgork",
-            "valmar",
-            "tgrant",
-            "arijit01",
-            "mmdoyle",
-            "fpoitevi",
-            "ashojaei",
-            "monarin",
-            "claussen",
-            "batyuk",
-            "kevinkgu",
-            "tfujit27",
-            "haoyuan",
-            "aliang",
-            "jshenoy",
-            "dorlhiac",
-            "xjql",
-        ):  # and d['Account'] in ('','milano', 'roma'):
-            d["Account"] = "lcls:default"
-        elif d["User"] in (
-            "psdatmgr",
-            "xiangli",
-            "sachsm",
-            "hekstra",
-            "snelson",
-            "cwang31",
-            "espov",
-            "thorsten",
-            "wilko",
-            "snelson",
-            "melchior",
-            "cpo",
-            "wilko",
-            "mshankar",
-        ) and d["Account"] in (
-            "",
-            "lcls:xpp",
-            "lcls:psmfx",
-            "lcls:data",
-            "ampere",
-            "roma",
-            "rubin",
-            "lcls-xpp1234",
-            "lcls:xpptut15",
-            "lcls:xpptut16",
-            "s3dfadmin",
-        ):
-            d["Account"] = "lcls:default"
-        elif d["User"] in ("lsstccs", "rubinmgr"):
-            d["Account"] = "rubin:commissioning"
-        elif d["User"] in (
-            "majernik",
-            "knetsch",
-        ):
-            d["Account"] = "facet:default"
-        elif d["User"] in ("jberger",):
-            d["Account"] = "epptheory:default"
-        elif d["User"] in ("tabel",):
-            d["Account"] = "kipac:kipac"
-        elif d["User"] in (
-            "vnovati",
-            "owwen",
-            "melwan",
-            "zatschls",
-            "yanliu",
-            "cartaro",
-            "aditi",
-            "emichiel",
-        ):
-            d["Account"] = "supercdms:default"
-
-        if d["Account"] == "":
-            raise Exception(f"could not determine account for {d}")
-
-        if "," in d["Partition"]:
-            a = d["Partition"].split(",")[0]
-            d["Partition"] = a
-        elif d["Partition"] in ("testweka",):
-            return None
-
-        if not ":" in d["Account"]:
-            d["Account"] = d["Account"] + ":default"
-
-        if d["QOS"] in ("Unknown",):
-            d["QOS"] = "preemptable"
-        elif d["QOS"] in ("expedite",):
-            d["QOS"] = "normal"
-
-        # self.logger.info(f"out: {d}")
-        return d
 
 
 # ============================================================================
@@ -522,7 +218,7 @@ class SlurmImporter(GraphQlMixin):
         self._clusters = {}
 
     def run(self, data, output_format: str, batch_size: int) -> None:
-        """Run the import process."""
+        """Run the import process using job objects."""
         self.back_channel = self.connect_graph_ql(
             username=self.username,
             password_file=self.password_file,
@@ -530,32 +226,224 @@ class SlurmImporter(GraphQlMixin):
         )
         self.get_metadata()
 
-        first = True
-        index = {}
         buffer = []
         s = timer()
 
-        for line in data.readlines():
+        # Process job objects directly (data is a file of newline-delimited JSON from slurmdump)
+        for line in data:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                job_data = json.loads(line)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON line: {e}")
+                if self.exit_on_error:
+                    sys.exit(1)
+                continue
             if self.verbose:
-                click.echo(f"\n{line.strip()}")
-            if line:
-                parts = line.split("|")
-                if first:
-                    index = {field: idx for idx, field in enumerate(parts)}
-                    first = False
-                else:
-                    job = self.convert(index, parts)
-                    if job:
-                        buffer.append(job)
-                        if len(buffer) >= batch_size:
-                            self.generate_output(buffer, output_format)
-                            buffer = []
+                logger.info(f"Processing job {job_data.get('job_id')}")
+
+            job = self.convert_slurmrest(job_data)
+
+            if job:
+                buffer.append(job)
+                if len(buffer) >= batch_size:
+                    self.generate_output(buffer, output_format)
+                    buffer = []
 
         if len(buffer) > 0:
             self.generate_output(buffer, output_format)
+        else:
+            logger.warning("No buffers to output")
 
         duration = timer() - s
-        logger.info(f"upload completed in {duration:,.02f}")
+        logger.info(f"import completed in {duration:,.02f}")
+
+    @staticmethod
+    def _kilos_to_int(s: str) -> int:
+        """Parse a Slurm TRES value string like '128', '4K', '32G' into an integer."""
+        m = re.match(r"(^[0-9.]+)([KMG])?", s.upper())
+        if m:
+            mul = 1
+            g = m.group(2)
+            if g:
+                p = "KMG".find(g)
+                if p >= 0:
+                    mul = math.pow(2, (p + 1) * 10)
+                else:
+                    raise ValueError(f"Can't handle multiplier={g!r} for value={s!r}")
+            return int(float(m.group(1)) * mul)
+        raise ValueError(f"Can't parse TRES value {s!r}")
+
+    @staticmethod
+    def _calc_resource_hours(
+        start_time,
+        end_time,
+        allocated_tres: str,
+        cluster: dict,
+        alloc_nodes: int,
+    ) -> float:
+        """
+        Calculate normalised resource-hours for a job.
+
+        Mirrors the original calc_resource_hours() from commands/coact.py:672.
+        The metric is: elapsed_secs * alloc_nodes * max_resource_ratio * cluster_cpus / 3600
+        where max_resource_ratio is the maximum fraction of per-node resources used
+        across cpu, gpu, and memory.
+        """
+        # Elapsed time in seconds; floor at 1s
+        elapsed_secs = (end_time - start_time).total_seconds()
+        if elapsed_secs <= 0:
+            elapsed_secs = 1.0
+
+        # Parse allocated TRES into per-node usage fractions
+        used = {}
+        if allocated_tres:
+            for x in allocated_tres.split(","):
+                k, v = x.split("=")
+                if "gpu" in k:
+                    k = "gpu"
+                if alloc_nodes > 0:
+                    used[k] = SlurmImporter._kilos_to_int(v) * 1.0 / alloc_nodes
+
+        # Find the maximum ratio of used/available for cpu, gpu, mem
+        max_ratio = 0.0
+        for resource in ("cpu", "gpu", "mem"):
+            if resource in used and resource in cluster:
+                ratio = used[resource] / cluster[resource]
+                if ratio > max_ratio:
+                    max_ratio = ratio
+                logger.debug(f"    {resource}: used {used[resource]} / {cluster[resource]} -> {ratio:.5f}")
+
+        return elapsed_secs * alloc_nodes * max_ratio * cluster["cpu"] / 3600.0
+
+    def convert_slurmrest(self, job_data: dict) -> Optional[dict]:
+        """Convert a JobData dict (from process_jobs_for_import) into a GQL Job input dict."""
+        try:
+            remapped_job = self.remap_job_slurmrest(job_data)
+            if not remapped_job:
+                logger.warning(f"Failed to remap job {job_data.get('job_id')}")
+                return None
+
+            account = remapped_job['account']
+            partition = remapped_job['partition']
+            start_time = remapped_job.get('start_time')
+            end_time = remapped_job.get('end_time')
+
+            # Require usable timestamps
+            if not start_time or not end_time:
+                logger.warning(f"Job {job_data.get('job_id')}: missing start/end time, skipping")
+                return None
+
+            # Convert to pendulum if they came in as isoformat strings (from JSON round-trip)
+            if isinstance(start_time, str):
+                start_time = parse_datetime(start_time)
+            if isinstance(end_time, str):
+                end_time = parse_datetime(end_time)
+
+            # Determine facility and repo from account ("facility:repo")
+            try:
+                facility, repo = account.split(":", 1)
+            except ValueError:
+                logger.warning(f"Job {job_data.get('job_id')}: cannot split account {account!r}, skipping")
+                return None
+
+            # Look up allocation ID matching this partition and start time
+            allocId = None
+            try:
+                allocId = self.get_alloc_id(
+                    facility.lower(), repo.lower(), partition.lower(), start_time
+                )
+            except Exception as e:
+                logger.warning(f"Job {job_data.get('job_id')}: {e}")
+                if self.exit_on_error:
+                    sys.exit(1)
+                return None
+
+            # Calculate resource hours (skip if partition unknown)
+            resource_hours = 0.0
+            if partition in self._clusters:
+                alloc_nodes = remapped_job.get('allocated_nodes', 0)
+                allocated_tres = remapped_job.get('allocated_tres', '')
+                resource_hours = self._calc_resource_hours(
+                    start_time=start_time,
+                    end_time=end_time,
+                    allocated_tres=allocated_tres,
+                    alloc_nodes=alloc_nodes,
+                    cluster=self._clusters[partition],
+                )
+            else:
+                logger.warning(f"Job {job_data.get('job_id')}: partition {partition!r} not in coact clusters, skipping")
+                return None
+
+            if resource_hours == 0.0:
+                return None
+
+            # Normalise QOS (mirrors commands/coact.py:773–783)
+            qos = remapped_job.get('qos', 'normal')
+            try:
+                # Strip Slurm internal QOS decoration e.g. "42^normal@roma" → "normal"
+                qos = qos.split("^")[1].split("@")[0]
+            except (IndexError, AttributeError):
+                pass
+            if qos not in ("scavenger", "preemptable", "normal"):
+                logger.warning(f"Job {job_data.get('job_id')}: unexpected qos {qos!r}")
+
+            return {
+                "jobId": str(remapped_job['job_id']),
+                "username": remapped_job['user'],
+                "allocationId": allocId,
+                "qos": qos,
+                "startTs": str(start_time.in_tz("UTC")).replace(" ", "T").replace("+00:00", ".000Z"),
+                "endTs": str(end_time.in_tz("UTC")).replace(" ", "T").replace("+00:00", ".000Z"),
+                "resourceHours": resource_hours,
+            }
+
+        except Exception as e:
+            logger.error(f"Error converting job {job_data.get('job_id', 'unknown')}: {e}")
+            if self.exit_on_error:
+                sys.exit(1)
+            return None
+
+    def remap_job_slurmrest(self, job_data: dict) -> Optional[dict]:
+        """Apply job remapping logic directly to job object."""
+        # Apply the same filtering logic as the original remap_job
+        account = job_data.get('account', '')
+        user = job_data.get('user', '')
+        partition = job_data.get('partition', '')
+
+        # Skip certain accounts and users (same logic as original)
+        if (
+            account in ("shared", "shared:default")
+            or account.startswith("shared")
+            or user in ("jonl", "vanilla", "yemi", "yangw", "pav", "root", "reranna", "ppascual", "renata")
+            or partition in ("fermi-transfer",)
+        ):
+            logger.info(f"Skipping a job {job_data.get('job_id')} due to specific account ({account}), user ({user}), or parition ({partition}).")
+            return None
+
+        # Clean up partition if it has commas
+        if "," in partition:
+            partition = partition.split(",")[0]
+
+        # Clean up account if it has @ symbol
+        if "@" in account:
+            account = account.split("@")[0]
+
+        # Fix QOS
+        qos = job_data.get('qos', 'Unknown')
+        if qos == "Unknown":
+            qos = "normal"
+
+        # Return the cleaned job data
+        return {
+            **job_data,
+            'account': account,
+            'partition': partition,
+            'qos': qos
+        }
+
 
     def get_metadata(self) -> bool:
         """Fetch repository and allocation metadata."""
@@ -672,116 +560,6 @@ class SlurmImporter(GraphQlMixin):
     def output_json(self, jobs: list, indent: int = 2):
         """Output jobs as JSON."""
         click.echo(json.dumps(jobs, indent=indent, default=datetime_converter))
-
-    def convert(self, index: dict, parts: list, default_facility: str = "shared", default_repo: str = "default") -> Optional[dict]:
-        """Convert a line of sacct output to a job dictionary."""
-
-        def conv(s, fx, default=None):
-            try:
-                return fx(s)
-            except:
-                return default
-
-        def kilos_to_int(s: str) -> int:
-            m = re.match(r"(^[0-9.]+)([KMG])?", s.upper())
-            if m:
-                mul = 1
-                g = m.group(2)
-                if g:
-                    p = "KMG".find(g)
-                    if p >= 0:
-                        mul = math.pow(2, (p + 1) * 10)
-                    else:
-                        raise Exception("Can't handle multiplier=%s for value=%s" % (g, s))
-                return int(float(m.group(1)) * mul)
-            else:
-                raise Exception("Can't parse %s" % s)
-
-        def calc_resource_hours(startTs, endTs, tres: str, cluster: dict, alloc_nodes: Optional[int], ncpus: Optional[int]) -> tuple:
-            elapsed_secs = (endTs - startTs).total_seconds()
-            # min time
-            if elapsed_secs <= 0:
-                elapsed_secs = 1.0
-            # determine maximal amounts
-            # if a single node, then divide all metrics by the number of nodes
-            used = {}
-            if tres != "":
-                for x in tres.split(","):
-                    k, v = x.split("=")
-                    if "gpu" in k:
-                        k = "gpu"
-                    if alloc_nodes > 0:
-                        used[k] = kilos_to_int(v) * 1.0 / alloc_nodes
-            # if node is exclusive
-            # max % of cpu, mem or gpu's for servers
-            ratios = {}
-            max_ratio = 0
-            for resource in ("cpu", "gpu", "mem"):
-                if resource in used:
-                    ratios[resource] = used[resource] / cluster[resource]
-                    if ratios[resource] > max_ratio:
-                        max_ratio = ratios[resource]
-                    logger.debug(f"    {resource}: used {used[resource]} / {cluster[resource]} -> {ratios[resource]:.5}")
-            compute_time = elapsed_secs * ncpus / 3600.0
-            resource_time = elapsed_secs * alloc_nodes * max_ratio * cluster["cpu"] / 3600.0
-            if self.verbose:
-                click.echo(f"  calc time: {elapsed_secs}s compute_hours: {resource_time:.5} core_hours: {compute_time:.5}")
-            return resource_time, elapsed_secs
-
-        d = {field: parts[idx] for field, idx in index.items()}
-        facility = default_facility
-        repo = default_repo
-        try:
-            facility, repo = d["Account"].split(":")
-        except Exception:
-            logger.warning(f"could not determine facility and repo from {d['Account']}")
-
-        startTs = parse_datetime(int(d["Start"]), force_tz=True)
-        endTs = parse_datetime(int(d["End"]), force_tz=True)
-
-        if d["Partition"] in self._clusters:
-            alloc_nodes = kilos_to_int(d["AllocNodes"])
-            ncpus = conv(d["NCPUS"], int, 0)
-            resource_hours, elapsed_secs = calc_resource_hours(
-                startTs=startTs, endTs=endTs, tres=d["AllocTRES"],
-                alloc_nodes=alloc_nodes, ncpus=ncpus, cluster=self._clusters[d["Partition"]],
-            )
-        else:
-            resource_hours = 0.0
-            logger.warning(f"partition {d['Partition']} not defined in coact, ignoring job")
-
-        if resource_hours == 0.0:
-            return None
-
-        allocId = None
-        try:
-            allocId = self.get_alloc_id(facility, repo, d["Partition"], startTs)
-        except Exception as e:
-            logger.warning(f"{e}: {d}")
-            if self.exit_on_error:
-                sys.exit(1)
-            return None
-
-        qos = d["QOS"]
-        try:
-            a = qos.split("^")
-            b = a[1].split("@")
-            qos = b[0]
-        except:
-            pass
-        if qos not in ("scavenger", "preemptable", "normal"):
-            logger.warning(f"could not determine appropriate qos '{d['QOS']}': line {d}")
-
-        out = {
-            "jobId": d["JobID"],
-            "username": d["User"],
-            "allocationId": allocId,
-            "qos": qos,
-            "startTs": str(startTs.in_tz("UTC")).replace(" ", "T").replace("+00:00", ".000Z"),
-            "endTs": str(endTs.in_tz("UTC")).replace(" ", "T").replace("+00:00", ".000Z"),
-            "resourceHours": resource_hours,
-        }
-        return out
 
 
 # ============================================================================
@@ -948,6 +726,14 @@ class FacilityUsage(GraphQlMixin):
         self.windows = windows
         self.threshold = threshold
         self.dry_run = dry_run
+        self._slurm_client: SlurmrestClient | None = None
+
+    @property
+    def slurm_client(self) -> SlurmrestClient:
+        """Lazily construct SlurmrestClient so missing SLURMREST_JWT fails at call time, not startup."""
+        if self._slurm_client is None:
+            self._slurm_client = SlurmrestClient()
+        return self._slurm_client
 
     def get(self, date: str) -> Iterator[OveragePoint]:
         """Run the overage calculation process."""
@@ -1016,25 +802,27 @@ class FacilityUsage(GraphQlMixin):
             for c in current[f].keys():
                 list_of_assoc.append(f"{f}:_regular_@{c}")
 
-        cmd = f"sacctmgr show assoc where account={','.join(list_of_assoc)} --noheader -P format=Account,GrpNodes,GrpJobs,MaxJobs"
-        logger.trace(f"Getting hold states using '{cmd}'...")
+        logger.trace(f"Getting hold states for accounts: {list_of_assoc}")
 
-        try:
-            for l in subprocess.check_output(cmd.split()).split(b"\n"):
-                this = str(l, encoding="utf-8").strip().split("|")
-                try:
-                    m = re.match(r"^(?P<f>\S+):(?P<r>\S+)@(?P<c>\S+)$", this[0])
-                    holding = True if this[1] == "0" else False
-                    if m:
-                        d = m.groupdict()
-                        f = d["f"]
-                        c = d["c"]
-                        current[f][c]["held"] = holding
-                        logger.trace(f"Set {f}@{c} to {holding}")
-                except Exception:
-                    pass
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to get hold states: {e}")
+        # Query each account individually to avoid bulk-request issues with slurmrest.
+        # list_of_assoc entries are "facility:_regular_@cluster"
+        for entry in list_of_assoc:
+            try:
+                associations_response = self.slurm_client.get_associations(account=entry)
+                hold_states = self.slurm_client.extract_association_hold_states(associations_response)
+                logger.debug(f"Retrieved hold state for {entry}: {hold_states}")
+
+                for (assoc_account, assoc_cluster), state_info in hold_states.items():
+                    # assoc_account is e.g. "lcls:_regular_", assoc_cluster is e.g. "ada"
+                    # Strip the ":_regular_" suffix to get the facility key used in current{}
+                    f = assoc_account.split(":")[0]
+                    c = assoc_cluster
+                    if f in current and c in current[f]:
+                        current[f][c]["held"] = state_info["held"]
+                        logger.trace(f"Set {f}@{c} to {state_info['held']}")
+
+            except Exception as e:
+                logger.warning(f"Failed to get hold state for {entry}: {e}")
 
         return current
 
