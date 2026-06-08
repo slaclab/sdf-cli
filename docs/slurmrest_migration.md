@@ -36,7 +36,7 @@ One remains difficult due to the un-migratable write operation:
 
 ## Possible Alternatives
 
-All potential workarounds within `slurmrest` hae significant disadvantages vs the current `GrpTRES=node=0` approach. `sacctmgr` appears to be the only reliable away to make modifications to account allocations. There is [a ticket](https://support.schedmd.com/show_bug.cgi?id=24356) with SLURM to support more `sacctmgr` features, however there is no activity on it other than the original post.
+All potential workarounds within `slurmrest` have significant disadvantages vs the current `GrpTRES=node=0` approach. `sacctmgr` appears to be the only reliable way to make modifications to account allocations. There is [a ticket](https://support.schedmd.com/show_bug.cgi?id=24356) with SLURM to support more `sacctmgr` features, however there is no activity on it other than the original post.
 
 ### Path Forward
 
