@@ -420,7 +420,7 @@ class SlurmImporter(GraphQlMixin):
             or user in ("jonl", "vanilla", "yemi", "yangw", "pav", "root", "reranna", "ppascual", "renata")
             or partition in ("fermi-transfer",)
         ):
-            logger.info(f"Skipping a job {job_data.get('job_id')} due to specific account ({account}), user ({user}), or parition ({parition}).")
+            logger.info(f"Skipping a job {job_data.get('job_id')} due to specific account ({account}), user ({user}), or parition ({partition}).")
             return None
 
         # Clean up partition if it has commas
