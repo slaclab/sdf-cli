@@ -9,13 +9,13 @@ There are currently three read operations and one write operations:
 ### Read Operations
 
 - `sacctmgr show assoc where account={','.join(list_of_assoc)} --noheader -P format=Account,GrpNodes,GrpJobs,MaxJobs`
-    - `cli/modules/coact.py:1015`
+    - `modules/coact.py`
     - Equivalent endpoint: `GET /slurmdb/v0.0.44/associations/`
 - `SLURM_TIME_FORMAT=%s sacct --allusers --duplicates --allclusters --allocations --starttime="{start}T00:00:00" --endtime="{start}T23:59:59" --truncate --parsable2 --format=JobID,User,UID,Account,Partition,QOS,Submit,Start,End,Elapsed,NCPUS,AllocNodes,AllocTRES,CPUTimeRAW,NodeList,Reservation,ReservationId,State`
     - `api/scripts/jobs2usage.py:37`
     - Equivalent endpoint: `GET /slurmdb/v0.0.44/jobs/`
 - `SLURM_TIME_FORMAT=%s {sacct_bin_path} --allusers --duplicates --allclusters --allocations --starttime="{date}T{start_time}" --endtime="{date}T{end_time}" --truncate --parsable2 --format=JobID,User,UID,Account,Partition,QOS,Submit,Start,End,Elapsed,NCPUS,AllocNodes,AllocTRES,CPUTimeRAW,NodeList,Reservation,ReservationId,State`
-    - `cli/modules/coact.py:135`
+    - `modules/coact.py`
     - Equivalent endpoint: `GET /slurmdb/v0.0.44/jobs/`
 
 ### Write Operations

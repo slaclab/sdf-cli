@@ -38,7 +38,7 @@ make apply
 
 ## OpenAPI Client Generation
 
-The CLI includes auto-generated Python client for the Slurm REST API. To generate the client locally:
+The CLI includes an auto-generated Python client for the Slurm REST API. To generate the client locally:
 
 **Prerequisites:**
 - Java runtime (required by OpenAPI Generator)
@@ -50,7 +50,7 @@ The CLI includes auto-generated Python client for the Slurm REST API. To generat
 make generate-client
 ```
 
-The client is automatically generated in CI/CD and included when installing dependencies with `uv sync`.
+In CI/CD the workflow generates the client before running `uv sync`; locally you must run `make generate-client` before syncing dependencies.
 
 
 # Usage

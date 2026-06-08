@@ -30,7 +30,8 @@ jobs:
           openapi-generator-cli generate \
             -i openapi-specs/slurmrest-api-v0.0.44.json \
             -g python \
-            -o slurmrest_client/ 
+            -o slurmrest_client/ \
+            --package-name openapi_client
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
