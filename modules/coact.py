@@ -245,6 +245,7 @@ class SlurmImporter(GraphQlMixin):
                 logger.info(f"Processing job {job_data.get('job_id')}")
 
             job = self.convert_slurmrest(job_data)
+
             if job:
                 buffer.append(job)
                 if len(buffer) >= batch_size:
@@ -253,6 +254,8 @@ class SlurmImporter(GraphQlMixin):
 
         if len(buffer) > 0:
             self.generate_output(buffer, output_format)
+        else:
+            logger.warning("No buffers to output")
 
         duration = timer() - s
         logger.info(f"import completed in {duration:,.02f}")
@@ -320,6 +323,7 @@ class SlurmImporter(GraphQlMixin):
         try:
             remapped_job = self.remap_job_slurmrest(job_data)
             if not remapped_job:
+                logger.warning(f"Failed to remap job {job_data.get('job_id')}")
                 return None
 
             account = remapped_job['account']
@@ -416,6 +420,7 @@ class SlurmImporter(GraphQlMixin):
             or user in ("jonl", "vanilla", "yemi", "yangw", "pav", "root", "reranna", "ppascual", "renata")
             or partition in ("fermi-transfer",)
         ):
+            logger.info(f"Skipping a job {job_data.get('job_id')} due to specific account ({account}), user ({user}), or parition ({parition}).")
             return None
 
         # Clean up partition if it has commas

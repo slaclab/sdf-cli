@@ -1,8 +1,8 @@
 import os
-import logging
 from typing import TypedDict
 
 import pendulum
+from loguru import logger
 from pendulum import DateTime
 
 from openapi_client import SlurmdbApi
@@ -10,8 +10,6 @@ from openapi_client import ApiClient as Client
 from openapi_client import Configuration as Config
 from openapi_client.models.v0042_openapi_slurmdbd_jobs_resp import V0042OpenapiSlurmdbdJobsResp
 from openapi_client.models.v0042_openapi_assocs_resp import V0042OpenapiAssocsResp
-
-logger = logging.getLogger(__name__)
 
 
 class JobData(TypedDict):
@@ -52,7 +50,7 @@ class SlurmrestClient:
         if host:
             c.host = host
         else:
-            c.host = os.getenv("SLURMREST_URL", "http://sdf-slurmrest-dev.slac.stanford.edu")
+            c.host = os.getenv("SLURMREST_URL", "https://sdf-slurmrest-dev.slac.stanford.edu")
 
         # Set JWT token for authentication
         c.access_token = os.getenv("SLURMREST_JWT")
@@ -97,6 +95,8 @@ class SlurmrestClient:
                     end_time = pendulum.from_timestamp(job.time.end)
                 if job.time.elapsed:
                     elapsed_seconds = job.time.elapsed
+            else:
+                logger.warning(f"No job.time")
 
             # Extract TRES information
             allocated_tres = None
