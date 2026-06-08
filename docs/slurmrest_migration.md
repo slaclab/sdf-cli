@@ -55,7 +55,7 @@ ansible [pattern] -m command -a 'sacctmgr ...'
 
 Any future updates to `slurmrest` should support previous endpoints, but any new endpoints will require regenerating the openapi spec, which requires a live `slurmrest` instance. 
 
-For local development, the client can be created via `make generate-client` (a Jave runtime is needed). For containerization, the client is built in CI/CD and will be packaged inside the container for usage. This was chosen to keep the client out of the git history, as it is large and not managed by SLAC, while still keeping it available for usage.
+For local development, the client can be created via `make generate-client` (a Java runtime is needed). For containerization, the client is built in CI/CD and will be packaged inside the container for usage. This was chosen to keep the client out of the git history, as it is large and not managed by SLAC, while still keeping it available for usage.
 
 ## Associations Fetching
 
