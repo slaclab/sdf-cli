@@ -916,6 +916,8 @@ def toggle_job_blocking(point: OveragePoint, execute: bool = False) -> bool:
             logger.warning(f"Invalid node count {nodes} for {point['facility']}@{point['cluster']}, using unlimited")
             nodes = -1
 
+    nodes = math.ceil(nodes)
+
     facility_usage = FacilityNodeUsage(
         facility=point['facility'],
         cluster=point['cluster'],
