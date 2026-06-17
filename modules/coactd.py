@@ -537,7 +537,6 @@ class RepoRegistration(Registration):
         grouper_name = ""
         uses_grouper = (
             facility.lower() == 'cryoem'
-            and (repo.lower().startswith('ct') or repo.lower().startswith('ce'))
         )
         if uses_grouper:
             grouper_name = f"sdf-{facility.lower()}-{repo.lower()}"
