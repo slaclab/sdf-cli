@@ -141,16 +141,19 @@ class TestRepoRegistrationGID:
         # Should only create slurm feature (2 back_channel calls: repoUpsert + feature)
         assert repo_registration.back_channel.execute.call_count == 2
 
-    def test_cryoem_non_ct_ce_repo_skips_grouper(self, repo_registration, mock_ansible_runner):
-        """Test that cryoem repos not starting with ct/ce skip grouper."""
+    def test_all_cryoem_repos_use_grouper(self, repo_registration, mock_ansible_runner):
+        """Test that ALL cryoem repos (not just ct/ce) unconditionally use grouper."""
         # Setup
         repo_registration.run_playbook.return_value = mock_ansible_runner
+        # Mock extract_grouper_values to return a valid GID for any CryoEM repo
+        repo_registration.extract_grouper_values = Mock(return_value=('54321', 'sdf-cryoem-other-repo'))
         repo_registration.back_channel.execute.side_effect = [
             {'repoUpsert': {'Id': 'repo-123'}},
-            {'repoUpsertFeature': {'Id': 'feature-slurm'}}
+            {'repoUpsertFeature': {'Id': 'feature-slurm'}},
+            {'repoUpsertFeature': {'Id': 'feature-posix'}}
         ]
 
-        # Execute — repo does not start with ct or ce
+        # Execute — repo does not start with ct or ce, but should still use grouper
         result = repo_registration.do_new_repo(
             repo='other-repo',
             facility='cryoem',
@@ -159,10 +162,19 @@ class TestRepoRegistrationGID:
 
         # Verify
         assert result is True
-        # The new implementation passes repo_principal, gidNumber=None, and groupName=''
-        repo_registration.run_playbook.assert_called_once_with(
-            'coact/add_repo.yaml', facility='cryoem', repo='other-repo', repo_principal='test-user', gidNumber=None, groupName=''
+        # grouper.yml should be called for ALL CryoEM repos
+        repo_registration.run_playbook.assert_any_call(
+            'coact/grouper.yml',
+            grouper_name='sdf-cryoem-other-repo',
+            state='present',
+            grouper_description='POSIX group for cryoem other-repo repository access',
+            grouper_password_file='/tmp/test-grouper-password',
         )
-        # extract_grouper_values should not be called since this repo doesn't match the pattern
-        if hasattr(repo_registration, 'extract_grouper_values') and isinstance(repo_registration.extract_grouper_values, Mock):
-            repo_registration.extract_grouper_values.assert_not_called()
+        # extract_grouper_values SHOULD be called for all CryoEM repos
+        repo_registration.extract_grouper_values.assert_called_once()
+        # Verify GID was logged
+        repo_registration.logger.info.assert_any_call(
+            "Retrieved repo GID for cryoem:other-repo: 54321"
+        )
+        # Should create both slurm and posixgroup features (3 back_channel calls total)
+        assert repo_registration.back_channel.execute.call_count == 3
