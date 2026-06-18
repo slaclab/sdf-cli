@@ -566,53 +566,18 @@ class RepoRegistration(Registration):
                 self.logger.warning(f"Failed to create grouper POSIX group for {facility}:{repo}: {e}")
                 raise
 
-        # Query current users and leaders from database if repo already exists
-        repo_users = [principal]  # Default to just principal for new repos
-        repo_leaders = [principal]  # Default to principal as leader for new repos
-        repo_req = {'facility': facility, 'name': repo}
-        REPO_USERS_GQL = gql("""
-            query repo($facility: String!, $name: String!) {
-                repo(filter: {facility: $facility, name: $name}) {
-                    users
-                    leaders
-                }
-            }
-            """)
-        try:
-            repo_data = self.back_channel.execute(REPO_USERS_GQL, repo_req)
-            if repo_data.get('repo'):
-                # Preserve existing users
-                if repo_data['repo'].get('users'):
-                    repo_users = repo_data['repo']['users']
-                    self.logger.info(f"Found existing repo {facility}:{repo} with {len(repo_users)} users: {repo_users}")
-                    # Ensure principal is in the list
-                    if principal not in repo_users:
-                        repo_users.append(principal)
-
-                # Preserve existing leaders
-                if repo_data['repo'].get('leaders'):
-                    repo_leaders = repo_data['repo']['leaders']
-                    self.logger.info(f"Found existing repo {facility}:{repo} with {len(repo_leaders)} leaders: {repo_leaders}")
-                    # Ensure principal is in the leaders list
-                    if principal not in repo_leaders:
-                        repo_leaders.append(principal)
-        except Exception as e:
-            # Repo doesn't exist yet, use defaults
-            self.logger.info(f"Repo {facility}:{repo} not found in database, using principal only: {e}")
-
         # run the facility tasks for this repo
         self.run_playbook(
             "coact/add_repo.yaml",
-            facility=facility,
+            facility=facility, 
             repo=repo,
             repo_principal=principal,
-            repo_users=repo_users,
             gidNumber=repo_gid,
             groupName=grouper_name
         )
 
-        leaders = repo_leaders
-        users = repo_users
+        leaders = [principal]
+        users = [principal]
 
         # write back to coact the repo information
         repo_create_req = {
