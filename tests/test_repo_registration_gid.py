@@ -59,7 +59,7 @@ class TestRepoRegistrationGID:
         # Mock extract_grouper_values to return the GID
         repo_registration.extract_grouper_values = Mock(return_value=('12345', 'sdf-cryoem-ct-test'))
         repo_registration.back_channel.execute.side_effect = [
-            Exception("Repo not found"),  # Query for existing users (repo doesn't exist yet)
+            {'repo': None},  # Query returns null (repo not found)
             {'repoUpsert': {'Id': 'repo-456'}},
             {'repoUpsertFeature': {'Id': 'feature-slurm'}},
             {'repoUpsertFeature': {'Id': 'feature-posix'}}
@@ -116,7 +116,7 @@ class TestRepoRegistrationGID:
         # Setup
         repo_registration.run_playbook.return_value = mock_ansible_runner
         repo_registration.back_channel.execute.side_effect = [
-            Exception("Repo not found"),  # Query for existing users (repo doesn't exist yet)
+            {'repo': None},  # Query returns null (repo not found)
             {'repoUpsert': {'Id': 'repo-123'}},
             {'repoUpsertFeature': {'Id': 'feature-slurm'}}
         ]
@@ -156,7 +156,7 @@ class TestRepoRegistrationGID:
         # Mock extract_grouper_values to return a valid GID for any CryoEM repo
         repo_registration.extract_grouper_values = Mock(return_value=('54321', 'sdf-cryoem-other-repo'))
         repo_registration.back_channel.execute.side_effect = [
-            Exception("Repo not found"),  # Query for existing users (repo doesn't exist yet)
+            {'repo': None},  # Query returns null (repo not found)
             {'repoUpsert': {'Id': 'repo-123'}},
             {'repoUpsertFeature': {'Id': 'feature-slurm'}},
             {'repoUpsertFeature': {'Id': 'feature-posix'}}
@@ -224,7 +224,7 @@ class TestRepoIdempotency:
         # Setup - repo doesn't exist in database
         repo_registration.run_playbook.return_value = mock_ansible_runner
         repo_registration.back_channel.execute.side_effect = [
-            Exception("Repo not found"),  # Query fails - repo doesn't exist
+            {'repo': None},  # Normal "not found"
             {'repoUpsert': {'Id': 'repo-123'}},  # Repo creation succeeds
             {'repoUpsertFeature': {'Id': 'feature-slurm'}},
             {'repoUpsertFeature': {'Id': 'feature-posix'}}

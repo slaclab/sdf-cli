@@ -580,8 +580,12 @@ class RepoRegistration(Registration):
             """)
         try:
             repo_data = self.back_channel.execute(REPO_USERS_GQL, repo_req)
-            if repo_data.get('repo'):
-                # Preserve existing users
+
+            # repo: null means "not found" - use defaults
+            if repo_data.get('repo') is None:
+                self.logger.info(f"Repo {facility}:{repo} not found in database, creating new with principal only")
+            elif repo_data.get('repo'):
+                # Repo exists - preserve existing users and leaders
                 if repo_data['repo'].get('users'):
                     repo_users = repo_data['repo']['users']
                     self.logger.info(f"Found existing repo {facility}:{repo} with {len(repo_users)} users: {repo_users}")
@@ -597,8 +601,14 @@ class RepoRegistration(Registration):
                     if principal not in repo_leaders:
                         repo_leaders.append(principal)
         except Exception as e:
-            # Repo doesn't exist yet, use defaults
-            self.logger.info(f"Repo {facility}:{repo} not found in database, using principal only: {e}")
+            # Query failed due to other error - do not proceed
+            error_msg = f"Failed to query existing repo data for {facility}:{repo}: {e}"
+            self.logger.error(error_msg)
+            raise RuntimeError(
+                f"Cannot safely proceed with NewRepo: database query failed. "
+                f"Proceeding with defaults could overwrite existing users/leaders. "
+                f"Original error: {e}"
+            ) from e
 
         # run the facility tasks for this repo
         self.run_playbook(
