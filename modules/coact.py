@@ -518,10 +518,10 @@ class SlurmImporter(GraphQlMixin):
     # These are currently an exception as most nodes have the same resources
     # as others within their cluster.
     HIGH_MEMORY_NODES = {
-        "sdfmilan0269": 1920,
-        "sdfmilan0270": 1920,
-        "sdfmilan0271": 1920,
-        "sdfmilan0272": 1920,
+        "sdfmilan269": 1920,
+        "sdfmilan270": 1920,
+        "sdfmilan271": 1920,
+        "sdfmilan272": 1920,
     }
 
     def __init__(self, username: str, password_file: str, verbose: bool = False, exit_on_error: bool = False):
@@ -698,9 +698,9 @@ class SlurmImporter(GraphQlMixin):
             if '-' in part:
                 start, end = map(int, part.split('-'))
                 for num in range(start, end + 1):
-                    nodes.append(f"{prefix}{num:04d}")
+                    nodes.append(f"{prefix}{num:03d}")
             else:
-                nodes.append(f"{prefix}{int(part):04d}")
+                nodes.append(f"{prefix}{int(part):03d}")
         return nodes
 
     def convert(self, index: dict, parts: list, default_facility: str = "shared", default_repo: str = "default") -> Optional[dict]:
