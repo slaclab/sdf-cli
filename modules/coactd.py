@@ -600,6 +600,8 @@ class RepoRegistration(Registration):
                     # Ensure principal is in the leaders list
                     if principal not in repo_leaders:
                         repo_leaders.append(principal)
+        except RuntimeError as e:
+            self.logger.info(f"Repo {facility}:{repo} not found in database, creating new with principal only")
         except Exception as e:
             # Query failed due to other error - do not proceed
             error_msg = f"Failed to query existing repo data for {facility}:{repo}: {e}"
