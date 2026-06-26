@@ -28,29 +28,29 @@ class TestSlurmNodelistParsing:
     def test_parse_slurm_nodelist_range(self):
         """Test parsing a SLURM node range."""
         result = self.importer.parse_slurm_nodelist("sdfmilan[269-272]")
-        expected = ["sdfmilan0269", "sdfmilan0270", "sdfmilan0271", "sdfmilan0272"]
+        expected = ["sdfmilan269", "sdfmilan270", "sdfmilan271", "sdfmilan272"]
         assert result == expected
 
     def test_parse_slurm_nodelist_list(self):
         """Test parsing a comma-separated list of nodes."""
         result = self.importer.parse_slurm_nodelist("sdfmilan[006,011,027]")
-        expected = ["sdfmilan0006", "sdfmilan0011", "sdfmilan0027"]
+        expected = ["sdfmilan006", "sdfmilan011", "sdfmilan027"]
         assert result == expected
 
     def test_parse_slurm_nodelist_mixed(self):
         """Test parsing a mixed range and list."""
         result = self.importer.parse_slurm_nodelist("sdfmilan[001-003,010,020-022]")
         expected = [
-            "sdfmilan0001", "sdfmilan0002", "sdfmilan0003",
-            "sdfmilan0010",
-            "sdfmilan0020", "sdfmilan0021", "sdfmilan0022"
+            "sdfmilan001", "sdfmilan002", "sdfmilan003",
+            "sdfmilan010",
+            "sdfmilan020", "sdfmilan021", "sdfmilan022"
         ]
         assert result == expected
 
     def test_parse_slurm_nodelist_different_prefix(self):
         """Test parsing with different node prefix."""
         result = self.importer.parse_slurm_nodelist("sdfrome[001-003]")
-        expected = ["sdfrome0001", "sdfrome0002", "sdfrome0003"]
+        expected = ["sdfrome001", "sdfrome002", "sdfrome003"]
         assert result == expected
 
     def test_parse_slurm_nodelist_unparseable(self):

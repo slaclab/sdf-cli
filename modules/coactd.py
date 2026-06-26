@@ -601,14 +601,21 @@ class RepoRegistration(Registration):
                     if principal not in repo_leaders:
                         repo_leaders.append(principal)
         except Exception as e:
-            # Query failed due to other error - do not proceed
-            error_msg = f"Failed to query existing repo data for {facility}:{repo}: {e}"
-            self.logger.error(error_msg)
-            raise RuntimeError(
-                f"Cannot safely proceed with NewRepo: database query failed. "
-                f"Proceeding with defaults could overwrite existing users/leaders. "
-                f"Original error: {e}"
-            ) from e
+            # Check if this is the specific "repo does not exist" message from API
+            error_str = str(e)
+            if "does not exist" in error_str:
+                # This is the repo-not-found case - treat as normal
+                self.logger.info(f"Repo {facility}:{repo} not found in database, creating new with principal only")
+                # Fall through with defaults: repo_users = [principal], repo_leaders = [principal]
+            else:
+                # Query failed due to other error - do not proceed
+                error_msg = f"Failed to query existing repo data for {facility}:{repo}: {e}"
+                self.logger.error(error_msg)
+                raise RuntimeError(
+                    f"Cannot safely proceed with NewRepo: database query failed. "
+                    f"Proceeding with defaults could overwrite existing users/leaders. "
+                    f"Original error: {e}"
+                ) from e
 
         # run the facility tasks for this repo
         self.run_playbook(
