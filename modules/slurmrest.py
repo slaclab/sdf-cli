@@ -59,11 +59,32 @@ class SlurmrestClient:
 
         self.slurmdb = SlurmdbApi(Client(c))
 
-    def get_jobs(self, start_time: str | None = None, end_time: str | None = None, **filters):
-        """Get jobs using SlurmdbApi.slurmdb_v0042_get_jobs()"""
+    def get_jobs(
+        self,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        show_duplicates: bool = True,
+        skip_steps: bool = True,
+        users: str | None = None,
+        cluster: str | None = None,
+        **filters
+    ):
+        """
+        Get jobs using SlurmdbApi.slurmdb_v0042_get_jobs()
+
+        Defaults match sacct behavior:
+        - show_duplicates=True (--duplicates): Include duplicate job entries
+        - skip_steps=True (--allocations): Exclude job step details, only show allocations
+        - users=None (--allusers): Get all users when None
+        - cluster=None (--allclusters): Get all clusters when None
+        """
         response = self.slurmdb.slurmdb_v0042_get_jobs(
             start_time=start_time,
             end_time=end_time,
+            show_duplicates=show_duplicates,
+            skip_steps=skip_steps,
+            users=users,
+            cluster=cluster,
             **filters
         )
         return response
