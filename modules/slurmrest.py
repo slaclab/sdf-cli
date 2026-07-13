@@ -63,8 +63,8 @@ class SlurmrestClient:
         self,
         start_time: str | None = None,
         end_time: str | None = None,
-        show_duplicates: bool = True,
-        skip_steps: bool = True,
+        show_duplicates: bool | None = None,
+        skip_steps: bool | None = None,
         users: str | None = None,
         cluster: str | None = None,
         **filters
@@ -78,6 +78,10 @@ class SlurmrestClient:
         - users=None (--allusers): Get all users when None
         - cluster=None (--allclusters): Get all clusters when None
         """
+        # slurmrest API only accepts strs
+        show_duplicates = str(show_duplicates).lower() if show_duplicates is not None else None
+        skip_steps = str(skip_steps).lower() if skip_steps is not None else None
+
         response = self.slurmdb.slurmdb_v0042_get_jobs(
             start_time=start_time,
             end_time=end_time,
