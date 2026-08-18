@@ -75,6 +75,14 @@ def datetime_converter(o: Any) -> Optional[str]:
     return None
 
 
+def parse_account(account: str, default_facility: str = "shared", default_repo: str = "default") -> tuple:
+    """Split a slurm account of the form <facility>:<repo>[@<partition>][^<qos>] into (facility, repo)."""
+    facility, sep, repo = account.partition(":")
+    if not sep or not repo:
+        return default_facility, default_repo
+    return facility, re.split(r"[@^]", repo, maxsplit=1)[0]
+
+
 def time_function(level="INFO"):
     """Decorator to time function execution and log the duration."""
     def decorator(func):
@@ -770,11 +778,8 @@ class SlurmImporter(GraphQlMixin):
             return resource_time, elapsed_secs
 
         d = {field: parts[idx] for field, idx in index.items()}
-        facility = default_facility
-        repo = default_repo
-        try:
-            facility, repo = d["Account"].split(":")
-        except Exception:
+        facility, repo = parse_account(d["Account"], default_facility, default_repo)
+        if (facility, repo) == (default_facility, default_repo) and ":" not in d["Account"]:
             logger.warning(f"could not determine facility and repo from {d['Account']}")
 
         startTs = parse_datetime(int(d["Start"]), force_tz=True)
