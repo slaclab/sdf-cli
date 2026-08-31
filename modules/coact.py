@@ -513,6 +513,17 @@ def slurm_import(ctx, print_output, debug, username, password_file, batch, data,
 class SlurmImporter(GraphQlMixin):
     """Handles the slurm import logic."""
 
+    # High-memory node specifications (GB)
+    # sdfmilan[269-272] have 4x standard milan memory (480GB * 4 = 1920GB)
+    # These are currently an exception as most nodes have the same resources
+    # as others within their cluster.
+    HIGH_MEMORY_NODES = {
+        "sdfmilan269": 1920,
+        "sdfmilan270": 1920,
+        "sdfmilan271": 1920,
+        "sdfmilan272": 1920,
+    }
+
     def __init__(self, username: str, password_file: str, verbose: bool = False, exit_on_error: bool = False):
         self.username = username
         self.password_file = password_file
@@ -673,6 +684,25 @@ class SlurmImporter(GraphQlMixin):
         """Output jobs as JSON."""
         click.echo(json.dumps(jobs, indent=indent, default=datetime_converter))
 
+    def parse_slurm_nodelist(self, nodelist: str) -> list[str]:
+        """Parse SLURM compressed node list format into individual node names."""
+        if '[' not in nodelist:
+            return [nodelist]
+        match = re.match(r'([a-z]+)(\[[\d,\-]+\])', nodelist)
+        if not match:
+            return [nodelist]
+        prefix = match.group(1)
+        ranges_str = match.group(2).strip('[]')
+        nodes = []
+        for part in ranges_str.split(','):
+            if '-' in part:
+                start, end = map(int, part.split('-'))
+                for num in range(start, end + 1):
+                    nodes.append(f"{prefix}{num:03d}")
+            else:
+                nodes.append(f"{prefix}{int(part):03d}")
+        return nodes
+
     def convert(self, index: dict, parts: list, default_facility: str = "shared", default_repo: str = "default") -> Optional[dict]:
         """Convert a line of sacct output to a job dictionary."""
 
@@ -697,7 +727,7 @@ class SlurmImporter(GraphQlMixin):
             else:
                 raise Exception("Can't parse %s" % s)
 
-        def calc_resource_hours(startTs, endTs, tres: str, cluster: dict, alloc_nodes: Optional[int], ncpus: Optional[int]) -> tuple:
+        def calc_resource_hours(startTs, endTs, tres: str, cluster: dict, alloc_nodes: Optional[int], ncpus: Optional[int], nodelist: Optional[str]) -> tuple:
             elapsed_secs = (endTs - startTs).total_seconds()
             # min time
             if elapsed_secs <= 0:
@@ -712,18 +742,29 @@ class SlurmImporter(GraphQlMixin):
                         k = "gpu"
                     if alloc_nodes > 0:
                         used[k] = kilos_to_int(v) * 1.0 / alloc_nodes
+
+            # Adjust cluster memory for high-memory nodes
+            adjusted_cluster = cluster.copy()
+            if nodelist:
+                parsed_nodes = self.parse_slurm_nodelist(nodelist)
+                high_mem_nodes = [n for n in parsed_nodes if n in self.HIGH_MEMORY_NODES]
+                if high_mem_nodes:
+                    mem_gb = self.HIGH_MEMORY_NODES[high_mem_nodes[0]]
+                    adjusted_cluster["mem"] = mem_gb * 1073741824
+                    logger.info(f"    Adjusted memory for high-mem node {high_mem_nodes[0]}: {mem_gb}GB")
+
             # if node is exclusive
             # max % of cpu, mem or gpu's for servers
             ratios = {}
             max_ratio = 0
             for resource in ("cpu", "gpu", "mem"):
                 if resource in used:
-                    ratios[resource] = used[resource] / cluster[resource]
+                    ratios[resource] = used[resource] / adjusted_cluster[resource]
                     if ratios[resource] > max_ratio:
                         max_ratio = ratios[resource]
-                    logger.debug(f"    {resource}: used {used[resource]} / {cluster[resource]} -> {ratios[resource]:.5}")
+                    logger.debug(f"    {resource}: used {used[resource]} / {adjusted_cluster[resource]} -> {ratios[resource]:.5}")
             compute_time = elapsed_secs * ncpus / 3600.0
-            resource_time = elapsed_secs * alloc_nodes * max_ratio * cluster["cpu"] / 3600.0
+            resource_time = elapsed_secs * alloc_nodes * max_ratio * adjusted_cluster["cpu"] / 3600.0
             if self.verbose:
                 click.echo(f"  calc time: {elapsed_secs}s compute_hours: {resource_time:.5} core_hours: {compute_time:.5}")
             return resource_time, elapsed_secs
@@ -745,6 +786,7 @@ class SlurmImporter(GraphQlMixin):
             resource_hours, elapsed_secs = calc_resource_hours(
                 startTs=startTs, endTs=endTs, tres=d["AllocTRES"],
                 alloc_nodes=alloc_nodes, ncpus=ncpus, cluster=self._clusters[d["Partition"]],
+                nodelist=d.get("NodeList")
             )
         else:
             resource_hours = 0.0
@@ -872,7 +914,7 @@ def overage(
         lines = []
         for point in data:
             line = f"allocation_usage,facility={point['facility']},cluster={point['cluster']},qos={point['qos']},window_mins={point['window_mins']} "
-            line += f"held={str(point['held']).lower()},over={str(point['over']).lower()},change={str(point['change']).lower()},percent_used={float(point['percent_used'])}"
+            line += f"held={str(point['held']).lower()},over={str(point['over']).lower()},change={str(point['change']).lower()},percent_used={float(point['percent_used'])},purchased_nodes={float(point['purchased_nodes']) if point.get('purchased_nodes') is not None else 0.0}"
             lines.append(line)
 
         try:
@@ -915,6 +957,8 @@ def toggle_job_blocking(point: OveragePoint, execute: bool = False) -> bool:
         else:
             logger.warning(f"Invalid node count {nodes} for {point['facility']}@{point['cluster']}, using unlimited")
             nodes = -1
+
+    nodes = math.ceil(nodes)
 
     facility_usage = FacilityNodeUsage(
         facility=point['facility'],
