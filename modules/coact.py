@@ -229,8 +229,11 @@ class SlurmRemapper:
             a = d["Partition"].split(",")[0]
             d["Partition"] = a
 
-        if "@" in d["Account"]:
-            d["Account"], _ = d["Account"].split("@")
+        if "^preemptable" in d["Account"]:
+            d["QOS"] = "preemptable"
+
+        if "@" in d["Account"] or "^" in d["Account"]:
+            d["Account"] = re.split(r"[@^]", d["Account"])[0]
 
         if d["QOS"] in ("Unknown",):
             d["QOS"] = "normal"
@@ -809,14 +812,21 @@ class SlurmImporter(GraphQlMixin):
                 sys.exit(1)
             return None
 
-        qos = d["QOS"]
+        raw_qos = d.get("QOS", "")
+        clean_qos = raw_qos
         try:
-            a = qos.split("^")
+            a = raw_qos.split("^")
             b = a[1].split("@")
-            qos = b[0]
-        except:
-            pass
-        if qos not in ("scavenger", "preemptable", "normal"):
+            clean_qos = b[0]
+        except Exception:
+            clean_qos = raw_qos.split("@")[0].split("^")[0]
+
+        if "^preemptable" in d["Account"] or repo == "default" or clean_qos == "preemptable":
+            qos = "preemptable"
+        elif clean_qos in ("preemptable", "normal"):
+            qos = clean_qos
+        else:
+            qos = "normal"
             logger.warning(f"could not determine appropriate qos '{d['QOS']}': line {d}")
 
         out = {
