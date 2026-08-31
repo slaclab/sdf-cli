@@ -7,6 +7,8 @@ import sys
 import os
 from unittest.mock import Mock
 
+import pytest
+
 # Mock the ansible modules imported by s3df_posixgroup
 sys.modules['ansible.module_utils.basic'] = Mock()
 sys.modules['ansible.module_utils.common.text.converters'] = Mock()
@@ -16,6 +18,13 @@ LIBRARY_PATH = os.path.join(
 )
 if LIBRARY_PATH not in sys.path:
     sys.path.insert(0, LIBRARY_PATH)
+
+# sdf-ansible not available in CI
+if not os.path.isfile(os.path.join(LIBRARY_PATH, 's3df_posixgroup.py')):
+    pytest.skip(
+        "sdf-ansible submodule not checked out; run `git submodule update --init`",
+        allow_module_level=True,
+    )
 
 from s3df_posixgroup import _change_membership_template  # noqa: E402
 
