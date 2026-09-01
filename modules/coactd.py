@@ -14,7 +14,7 @@ import json
 from loguru import logger
 from enum import Enum
 from typing import Any, Optional, List
-from math import ceil
+from math import ceil, isclose
 from timeit import default_timer as timer
 from pathlib import Path
 
@@ -148,6 +148,8 @@ class Registration(GraphQlSubscriber, AnsibleRunner):
                     end
                     percentOfFacility
                     allocated
+                    burstPercentOfFacility
+                    burstAllocated
                 }
                 operationType
             }
@@ -416,14 +418,6 @@ class RepoRegistration(Registration):
         }
       }""")
 
-    COMPUTE_ALLOCATION_UPSERT_GQL = gql("""
-        mutation repoComputeAllocationUpsert($repo: RepoInput!, $repocompute: RepoComputeAllocationInput!, $qosinputs: [QosInput!]!) {
-            repoComputeAllocationUpsert(repo: $repo, repocompute: $repocompute, qosinputs: $qosinputs) {
-                Id
-            }
-        }
-        """)
-
     REPO_CURRENT_COMPUTE_REQUIREMENT_GQL = gql("""
         query repo( $repo: RepoInput! ) {
           repo(filter: $repo) {
@@ -443,6 +437,8 @@ class RepoRegistration(Registration):
               start
               end
               percentOfFacility
+              burstPercentOfFacility
+              burstAllocated
               cpus: allocatedCpusCount
               memory: allocatedMemGb
               nodes: allocatedNodesCount
@@ -462,6 +458,8 @@ class RepoRegistration(Registration):
                     Id
                     clustername
                     percentOfFacility
+                    burstPercentOfFacility
+                    burstAllocated
                     start
                     end
                     allocatedNodesCount
@@ -474,9 +472,6 @@ class RepoRegistration(Registration):
         query facility( $facility: String! ) {
           facility(filter: {name: $facility}) {
             name
-            computeallocations {
-              clustername
-            }
             computepurchases {
               clustername
               purchased
@@ -524,7 +519,10 @@ class RepoRegistration(Registration):
                 if end is not None:
                     end = pdl.parse(end, timezone='UTC')
                 return self.do_repo_compute_allocation(
-                    repo, facility, clustername, percent, allocated, start, end, dry_run=dry_run
+                    repo, facility, clustername, percent, allocated, start, end,
+                    burst_percent=req.get('burstPercentOfFacility', None),
+                    burst_allocated=req.get('burstAllocated', None),
+                    dry_run=dry_run
                 )
 
             elif req_type == 'RepoChangeComputeRequirement':
@@ -778,6 +776,9 @@ class RepoRegistration(Registration):
         allocated_resource: float,
         start: pdl.DateTime,
         end: Optional[str],
+        burst_percent: float = 0.0,
+        burst_allocated: float = 0.0,
+        allocation_id: Optional[str] = None,
         default_end_delta=None,
         dry_run: bool = False
     ):
@@ -802,10 +803,16 @@ class RepoRegistration(Registration):
                 'clustername': cluster,
                 'percentOfFacility': percent,
                 'allocated': allocated_resource,
+                'burstPercentOfFacility': burst_percent,
+                'burstAllocated': burst_allocated,
                 'start': format_datetime(start),
                 'end': format_datetime(end)
             },
         }
+        # repoComputeAllocationUpsert replaces the whole document; without the id it matches
+        # on (repoid, clustername, start) and would insert a duplicate on any datetime skew.
+        if allocation_id:
+            compute_allocation_req['repocompute']['Id'] = allocation_id
         self.logger.info(f'upserting {compute_allocation_req}')
         REPO_COMPUTE_ALLOCATION_UPSERT_GQL = gql("""
             mutation repo( $repo: RepoInput!, $repocompute: RepoComputeAllocationInput! ) {
@@ -843,9 +850,18 @@ class RepoRegistration(Registration):
         allocated_resource: float,
         start: pdl.DateTime,
         end: Optional[str],
+        burst_percent: Optional[float] = None,
+        burst_allocated: Optional[float] = None,
+        allocation_id: Optional[str] = None,
         dry_run: bool = False
     ):
-        """Does all the necessary tasks to setup a new or existing Repo."""
+        """Does all the necessary tasks to setup a new or existing Repo.
+
+        burst_percent/burst_allocated default to None meaning "keep whatever is stored";
+        the upsert replaces the whole document, so they must always be sent explicitly.
+        allocation_id targets an existing allocation row; without it the upsert matches on
+        (repoid, clustername, start) and so may open a new allocation period.
+        """
         self.logger.info(f"set repo compute allocation {facility}:{repo} at {cluster} to {percent}% ({allocated_resource} nodes) between {start} - {end}")
 
         def _get_allocation_info():
@@ -884,9 +900,22 @@ class RepoRegistration(Registration):
             )
             return True
         else:
+            if burst_percent is None or burst_allocated is None:
+                existing = next(
+                    (a for a in repo_obj['currentComputeAllocations'] if a.get('clustername') == cluster),
+                    {}
+                )
+                if burst_percent is None:
+                    burst_percent = existing.get('burstPercentOfFacility') or 0.0
+                if burst_allocated is None:
+                    burst_allocated = existing.get('burstAllocated') or 0.0
+
             # upsert the record
             resp = self.upsert_repo_compute_allocation(
-                repo_obj['Id'], cluster, percent, allocated_resource, start, end
+                repo_obj['Id'], cluster, percent, allocated_resource, start, end,
+                burst_percent=burst_percent,
+                burst_allocated=burst_allocated,
+                allocation_id=allocation_id,
             )
 
             # fetch it again to obtain the correct resources with the new percentage
@@ -1111,6 +1140,10 @@ class RepoRegistration(Registration):
         """
         Handle facility-level compute allocation changes by updating all affected repo allocations.
         Queries the facility record directly for the current purchased node count.
+
+        Each repo keeps its percentage share of the facility, so absolute node counts move
+        with the purchase. Only allocations that are current (start <= now < end) are
+        cascaded; future-dated allocations keep the values they were created with.
         """
         # Fetch current purchased nodes from the facility record
         facility_resp = self.back_channel.execute(
@@ -1125,79 +1158,107 @@ class RepoRegistration(Registration):
                 break
 
         if new_purchased is None:
-            self.logger.error(f"No purchase record found for {facility}@{clustername} - cannot cascade")
-            return False
+            raise RuntimeError(f"No purchase record found for {facility}@{clustername} - cannot cascade")
 
-        if new_purchased <= 0:
-            self.logger.error(f"Invalid purchased nodes: {new_purchased} for {facility}@{clustername} - cannot cascade")
-            return False
+        if new_purchased < 0:
+            raise RuntimeError(f"Invalid purchased nodes: {new_purchased} for {facility}@{clustername} - cannot cascade")
 
         self.logger.info(
             f"Processing facility compute allocation cascade: {facility}@{clustername} "
             f"-> {new_purchased} purchased nodes"
         )
 
-        try:
-            # Get all repositories with allocations on this facility/cluster
-            repos_resp = self.back_channel.execute(
-                self.REPOS_WITH_ALLOCATIONS_GQL,
-                {'facilityName': facility}
+        # Get all repositories with allocations on this facility/cluster
+        repos_resp = self.back_channel.execute(
+            self.REPOS_WITH_ALLOCATIONS_GQL,
+            {'facilityName': facility}
+        )
+
+        affected_repos = []
+        for repo in repos_resp['repos']:
+            for allocation in repo['currentComputeAllocations']:
+                if allocation['clustername'].lower() == clustername.lower():
+                    affected_repos.append({
+                        'repo': repo,
+                        'allocation': allocation
+                    })
+
+        self.logger.info(f"Found {len(affected_repos)} repo allocations to update on {facility}@{clustername}")
+
+        total_percent = sum(item['allocation']['percentOfFacility'] or 0.0 for item in affected_repos)
+        if total_percent > 100.0:
+            self.logger.warning(
+                f"{facility}@{clustername} is oversubscribed: repo allocations total "
+                f"{total_percent}% of the facility. Node counts are rounded up per repo, "
+                f"so the sum may exceed the {new_purchased} purchased nodes."
             )
 
-            affected_repos = []
-            for repo in repos_resp['repos']:
-                for allocation in repo['currentComputeAllocations']:
-                    if allocation['clustername'].lower() == clustername.lower():
-                        affected_repos.append({
-                            'repo': repo,
-                            'allocation': allocation
-                        })
+        update_count = 0
+        skipped_count = 0
+        failures = []
+        for item in affected_repos:
+            repo = item['repo']
+            allocation = item['allocation']
 
-            self.logger.info(f"Found {len(affected_repos)} repo allocations to update on {facility}@{clustername}")
+            # Calculate new node allocation maintaining the same percentage
+            percent_of_facility = allocation['percentOfFacility']
+            burst_percent = allocation.get('burstPercentOfFacility') or 0.0
+            new_allocated_nodes = (percent_of_facility / 100.0) * new_purchased
+            new_burst_allocated = (burst_percent / 100.0) * new_purchased
 
-            # Process each affected repository allocation
-            update_count = 0
-            for item in affected_repos:
-                repo = item['repo']
-                allocation = item['allocation']
-
-                # Calculate new node allocation maintaining the same percentage
-                percent_of_facility = allocation['percentOfFacility']
-                new_allocated_nodes = (percent_of_facility / 100.0) * new_purchased
-
-                self.logger.info(
-                    f"Updating {repo['facility']}:{repo['name']} on {clustername}: "
-                    f"{percent_of_facility}% -> {new_allocated_nodes:.2f} nodes (was {allocation['allocatedNodesCount']})"
+            current_allocated = allocation.get('allocatedNodesCount') or 0.0
+            current_burst = allocation.get('burstAllocated') or 0.0
+            if (isclose(current_allocated, new_allocated_nodes)
+                    and isclose(current_burst, new_burst_allocated)):
+                # Each update runs two Ansible playbooks, so do not touch untouched repos.
+                self.logger.debug(
+                    f"Skipping {repo['facility']}:{repo['name']} on {clustername}: "
+                    f"already at {new_allocated_nodes:.2f} nodes"
                 )
-
-                try:
-                    self.do_repo_compute_allocation(
-                        repo['name'],
-                        repo['facility'],
-                        clustername,
-                        percent_of_facility,
-                        new_allocated_nodes,
-                        pdl.parse(allocation['start'], timezone='UTC'),
-                        pdl.parse(allocation['end'], timezone='UTC') if allocation['end'] else None,
-                        dry_run=dry_run,
-                    )
-                    update_count += 1
-                    self.logger.info(f"Successfully updated {repo['facility']}:{repo['name']} allocation")
-
-                except Exception as e:
-                    self.logger.error(f"Failed to update {repo['facility']}:{repo['name']}: {e}")
-                    # Continue with other repos even if one fails
-                    continue
+                skipped_count += 1
+                continue
 
             self.logger.info(
-                f"Facility cascade update completed: {update_count}/{len(affected_repos)} "
-                f"repo allocations updated on {facility}@{clustername}"
+                f"Updating {repo['facility']}:{repo['name']} on {clustername}: "
+                f"{percent_of_facility}% -> {new_allocated_nodes:.2f} nodes (was {current_allocated}), "
+                f"burst {burst_percent}% -> {new_burst_allocated:.2f} nodes"
             )
-            return True
 
-        except Exception as e:
-            self.logger.error(f"Facility compute allocation cascade failed: {e}")
-            return False
+            try:
+                self.do_repo_compute_allocation(
+                    repo['name'],
+                    repo['facility'],
+                    clustername,
+                    percent_of_facility,
+                    new_allocated_nodes,
+                    pdl.parse(allocation['start'], timezone='UTC'),
+                    pdl.parse(allocation['end'], timezone='UTC') if allocation['end'] else None,
+                    burst_percent=burst_percent,
+                    burst_allocated=new_burst_allocated,
+                    allocation_id=allocation['Id'],
+                    dry_run=dry_run,
+                )
+                update_count += 1
+                self.logger.info(f"Successfully updated {repo['facility']}:{repo['name']} allocation")
+
+            except Exception as e:
+                # Keep going so one bad repo does not strand the rest, but fail the request below.
+                self.logger.error(f"Failed to update {repo['facility']}:{repo['name']}: {e}")
+                failures.append(f"{repo['facility']}:{repo['name']} ({e})")
+
+        self.logger.info(
+            f"Facility cascade update completed on {facility}@{clustername}: "
+            f"{update_count} updated, {skipped_count} unchanged, {len(failures)} failed "
+            f"of {len(affected_repos)} repo allocations"
+        )
+
+        if failures:
+            raise RuntimeError(
+                f"Facility compute allocation cascade for {facility}@{clustername} failed for "
+                f"{len(failures)}/{len(affected_repos)} repos: {'; '.join(failures)}"
+            )
+
+        return True
 
 
 @coactd.command(name='reporegistration')
