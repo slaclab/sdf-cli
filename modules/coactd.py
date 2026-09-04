@@ -408,6 +408,9 @@ class RepoRegistration(Registration):
         'RepoUpdateFeature'
     ]
 
+    # facilities whose repos get a POSIX group minted in Grouper at creation time
+    GROUPER_FACILITIES = ('cryoem', 'lsstsci')
+
     REPO_USERS_GQL = gql("""
       query getRepoUsers ( $repo: RepoInput! ) {
         repo( filter: $repo ) {
@@ -532,17 +535,15 @@ class RepoRegistration(Registration):
         if repo_allocation_end_delta is None:
             repo_allocation_end_delta = pdl.duration(years=5)
 
-        # For CryoEM repos (ct* / ce*), create a POSIX group via Grouper
+        # for qualifying facilities, create a POSIX group via Grouper
         repo_gid = None
         grouper_name = ""
-        uses_grouper = (
-            facility.lower() == 'cryoem'
-        )
+        uses_grouper = facility.lower() in self.GROUPER_FACILITIES
         if uses_grouper:
             grouper_name = f"sdf-{facility.lower()}-{repo.lower()}"
             try:
                 if not self.grouper_password_file:
-                    raise ValueError("Grouper password file must be provided for CryoEM ct/ce repos")
+                    raise ValueError(f"Grouper password file must be provided for {facility} repos")
                 grouper_kwargs = dict(
                     grouper_name=grouper_name,
                     state="present",
