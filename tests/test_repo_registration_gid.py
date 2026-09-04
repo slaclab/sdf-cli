@@ -188,6 +188,46 @@ class TestRepoRegistrationGID:
         # Should create both slurm and posixgroup features (4 back_channel calls: user query + repoUpsert + 2 features)
         assert repo_registration.back_channel.execute.call_count == 4
 
+    def test_lsstsci_repos_use_grouper(self, repo_registration, mock_ansible_runner):
+        """Test that lsstsci repos use grouper and pass the gid through to add_repo.yaml."""
+        # Setup
+        repo_registration.run_playbook.return_value = mock_ansible_runner
+        repo_registration.extract_grouper_values = Mock(return_value=('67890', 'sdf-lsstsci-dp1'))
+        repo_registration.back_channel.execute.side_effect = [
+            {'repo': None},  # Query returns null (repo not found)
+            {'repoUpsert': {'Id': 'repo-789'}},
+            {'repoUpsertFeature': {'Id': 'feature-slurm'}},
+            {'repoUpsertFeature': {'Id': 'feature-posix'}}
+        ]
+
+        # Execute
+        result = repo_registration.do_new_repo(
+            repo='dp1',
+            facility='lsstsci',
+            principal='test-user'
+        )
+
+        # Verify
+        assert result is True
+        repo_registration.run_playbook.assert_any_call(
+            'coact/grouper.yml',
+            grouper_name='sdf-lsstsci-dp1',
+            state='present',
+            grouper_description='POSIX group for lsstsci dp1 repository access',
+            grouper_password_file='/tmp/test-grouper-password',
+        )
+        # the gid drives the repo directory ownership in ansible-role-s3df-repo
+        repo_registration.run_playbook.assert_any_call(
+            'coact/add_repo.yaml',
+            facility='lsstsci',
+            repo='dp1',
+            repo_principal='test-user',
+            repo_users=['test-user'],
+            gidNumber='67890',
+            groupName='sdf-lsstsci-dp1'
+        )
+        assert repo_registration.back_channel.execute.call_count == 4
+
 
 class TestRepoIdempotency:
     """Test idempotency fixes for NewRepo request workflow."""
