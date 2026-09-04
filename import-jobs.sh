@@ -3,6 +3,8 @@
 export PATH=$PATH:/opt/slurm/slurm-curr/bin
 export SDF_COACT_URI=coact.slac.stanford.edu:443/graphql-service
 
+export PYTHON_BIN=./old_venv/bin/python3
+
 PASSWORD_FILE=./etc/.secrets/password
 
 if [ ! -z $1 ]; then
@@ -22,11 +24,11 @@ fi
 echo ">" $DATE" ("$(date)")"
 
 # full
-./venv/bin/python3 ./sdf_click.py coact slurmdump --date $DATE \
+$PYTHON_BIN ./sdf_click.py coact slurmdump --date $DATE \
     | tee ../slurm-job-history/$DATE \
-    | ./venv/bin/python3 ./sdf_click.py coact slurmremap \
+    | $PYTHON_BIN ./sdf_click.py coact slurmremap \
     | tee ../slurm-job-remapped/$DATE \
-    | ./venv/bin/python3 ./sdf_click.py coact slurmimport --password-file $PASSWORD_FILE --output=upload >/dev/null
+    | $PYTHON_BIN ./sdf_click.py coact slurmimport --password-file $PASSWORD_FILE --output=upload >/dev/null
 
 # just for 2023 imports
 #cat ../slurm-job-remapped/$DATE | ./sdf.py coact slurmimport --password-file $PASSWORD_FILE --output=upload >/dev/null
@@ -37,4 +39,4 @@ echo ">" $DATE" ("$(date)")"
 ###
 # recalculate summaries
 ###
-./venv/bin/python3  ./sdf_click.py coact slurmrecalculate --password-file=$PASSWORD_FILE --date=$DATE
+$PYTHON_BIN  ./sdf_click.py coact slurmrecalculate --password-file=$PASSWORD_FILE --date=$DATE
