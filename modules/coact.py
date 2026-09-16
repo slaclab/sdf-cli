@@ -75,6 +75,14 @@ def datetime_converter(o: Any) -> Optional[str]:
     return None
 
 
+def parse_account(account: str, default_facility: str = "shared", default_repo: str = "default") -> tuple:
+    """Split a slurm account of the form <facility>:<repo>[@<partition>][^<qos>] into (facility, repo)."""
+    facility, sep, repo = account.partition(":")
+    if not sep or not repo:
+        return default_facility, default_repo
+    return facility, re.split(r"[@^]", repo, maxsplit=1)[0]
+
+
 def time_function(level="INFO"):
     """Decorator to time function execution and log the duration."""
     def decorator(func):
@@ -221,8 +229,11 @@ class SlurmRemapper:
             a = d["Partition"].split(",")[0]
             d["Partition"] = a
 
-        if "@" in d["Account"]:
-            d["Account"], _ = d["Account"].split("@")
+        if "^preemptable" in d["Account"]:
+            d["QOS"] = "preemptable"
+
+        if "@" in d["Account"] or "^" in d["Account"]:
+            d["Account"] = re.split(r"[@^]", d["Account"])[0]
 
         if d["QOS"] in ("Unknown",):
             d["QOS"] = "normal"
@@ -770,11 +781,8 @@ class SlurmImporter(GraphQlMixin):
             return resource_time, elapsed_secs
 
         d = {field: parts[idx] for field, idx in index.items()}
-        facility = default_facility
-        repo = default_repo
-        try:
-            facility, repo = d["Account"].split(":")
-        except Exception:
+        facility, repo = parse_account(d["Account"], default_facility, default_repo)
+        if (facility, repo) == (default_facility, default_repo) and ":" not in d["Account"]:
             logger.warning(f"could not determine facility and repo from {d['Account']}")
 
         startTs = parse_datetime(int(d["Start"]), force_tz=True)
@@ -804,14 +812,21 @@ class SlurmImporter(GraphQlMixin):
                 sys.exit(1)
             return None
 
-        qos = d["QOS"]
+        raw_qos = d.get("QOS", "")
+        clean_qos = raw_qos
         try:
-            a = qos.split("^")
+            a = raw_qos.split("^")
             b = a[1].split("@")
-            qos = b[0]
-        except:
-            pass
-        if qos not in ("scavenger", "preemptable", "normal"):
+            clean_qos = b[0]
+        except Exception:
+            clean_qos = raw_qos.split("@")[0].split("^")[0]
+
+        if "^preemptable" in d["Account"] or repo == "default" or clean_qos == "preemptable":
+            qos = "preemptable"
+        elif clean_qos in ("preemptable", "normal"):
+            qos = clean_qos
+        else:
+            qos = "normal"
             logger.warning(f"could not determine appropriate qos '{d['QOS']}': line {d}")
 
         out = {
