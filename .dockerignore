@@ -1,0 +1,18 @@
+# Never bake credentials into the image.
+etc/.secrets
+etc/.secrets/**
+
+# Local development artefacts.
+.venv
+venv
+.git
+.github
+.claude
+.pytest_cache
+.ruff_cache
+__pycache__
+**/__pycache__
+*.egg-info
+sdf_cli.egg-info
+.vscode
+.DS_Store

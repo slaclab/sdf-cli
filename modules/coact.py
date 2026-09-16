@@ -158,6 +158,12 @@ def run_sacct(
                 f"skipping ({len(fields)}, {int(fields[7])} < {int(fields[8])}) {line}"
             )
 
+    process.wait()
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"sacct exited {process.returncode}; refusing to report an empty job set"
+        )
+
 
 # ============================================================================
 # SlurmRemap Command

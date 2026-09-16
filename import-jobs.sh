@@ -1,40 +1,107 @@
 #!/bin/bash
+#
+# Single-shot Slurm job accounting import.
+#
+#   sacct -> slurmdump | slurmremap | slurmimport   (then slurmrecalculate)
+#
+# Usage:
+#   ./import-jobs.sh              # today (or yesterday just after midnight)
+#   ./import-jobs.sh 2026-08-31   # explicit date, for replay/backfill
+set -euo pipefail
 
-export PATH=$PATH:/opt/slurm/slurm-curr/bin
-export SDF_COACT_URI=coact.slac.stanford.edu:443/graphql-service
+: "${SDF_COACT_URI:?SDF_COACT_URI must be set, e.g. coact.slac.stanford.edu:443/graphql-service (no scheme)}"
+export SDF_COACT_URI
 
-PASSWORD_FILE=./etc/.secrets/password
+SLURM_BIN_DIR="${SLURM_BIN_DIR:-/opt/slurm/slurm-curr/bin}"
+case ":$PATH:" in
+  *":$SLURM_BIN_DIR:"*) ;;
+  *) PATH="$PATH:$SLURM_BIN_DIR" ;;
+esac
+export PATH
 
-if [ ! -z $1 ]; then
-  DATE=$@
+COACT_USERNAME="${COACT_USERNAME:-sdf-bot}"
+COACT_PASSWORD_FILE="${COACT_PASSWORD_FILE:-/etc/coact/secrets/password}"
+
+JOB_HISTORY_DIR="${JOB_HISTORY_DIR:-/data/slurm-job-history}"
+JOB_REMAPPED_DIR="${JOB_REMAPPED_DIR:-/data/slurm-job-remapped}"
+
+PYTHON="${PYTHON:-python3}"
+SDF_CLICK="${SDF_CLICK:-$(dirname "$0")/sdf_click.py}"
+
+if [ ! -r "$COACT_PASSWORD_FILE" ]; then
+  echo "error: GraphQL password file not readable: $COACT_PASSWORD_FILE" >&2
+  exit 1
+fi
+
+# --------------------------------------------------------------------------
+# Which day to import
+# --------------------------------------------------------------------------
+if [ -n "${1:-}" ]; then
+  DATE="$*"
 else
   DATE=$(date +"%Y-%m-%d")
+
+  # Deal with the first few minutes of a new day: the previous day needs a
+  # full import before today's partial import is meaningful.  This is local
+  # time, which is why the container pins TZ (America/Los_Angeles).
+  MIDNIGHT=$(date -d 'today 00:00:00' "+%s")
+  NOW=$(date "+%s")
+  DIFF=$(( NOW - MIDNIGHT ))
+  if [ "$DIFF" -lt 300 ]; then
+    DATE=$(date -d 'yesterday' +"%Y-%m-%d")
+  fi
 fi
 
-# deal with first few minutes of new day; need to do full import of previous day before running it
-MIDNIGHT=$(date -d 'today 00:00:00' "+%s")
-NOW=$(date "+%s")
-DIFF=$(( ($NOW - $MIDNIGHT) ))
-if [[ $DIFF -lt 300 ]]; then
-  DATE=$(date -d 'yesterday' +"%Y-%m-%d")
+mkdir -p "$JOB_HISTORY_DIR" "$JOB_REMAPPED_DIR"
+
+RAW_ARCHIVE="$JOB_HISTORY_DIR/$DATE"
+REMAPPED_ARCHIVE="$JOB_REMAPPED_DIR/$DATE"
+RAW_PARTIAL="$RAW_ARCHIVE.partial"
+REMAPPED_PARTIAL="$REMAPPED_ARCHIVE.partial"
+
+# Any exit before the promotion step below leaves the previous good archive
+# for this date untouched.
+trap 'rm -f "$RAW_PARTIAL" "$REMAPPED_PARTIAL"' EXIT
+
+echo "> $DATE ($(date))"
+
+# --------------------------------------------------------------------------
+# Full pipeline.
+#
+# The dumps are teed to `.partial` files and only moved into place once the
+# whole pipeline has succeeded.
+#
+# `--output-error=warn-nopipe` keeps tee writing after a
+# downstream stage closes the pipe, instead of dying on SIGPIPE with its
+# buffered writes unflushed.
+# --------------------------------------------------------------------------
+"$PYTHON" "$SDF_CLICK" coact slurmdump --date "$DATE" \
+    | tee --output-error=warn-nopipe "$RAW_PARTIAL" \
+    | "$PYTHON" "$SDF_CLICK" coact slurmremap \
+    | tee --output-error=warn-nopipe "$REMAPPED_PARTIAL" \
+    | "$PYTHON" "$SDF_CLICK" coact slurmimport \
+        --username "$COACT_USERNAME" \
+        --password-file "$COACT_PASSWORD_FILE" \
+        --output=upload >/dev/null
+
+# A successful sacct always emits at least the header row, so an empty dump
+# here means something went wrong that the exit codes did not surface.
+if [ ! -s "$RAW_PARTIAL" ]; then
+  echo "error: raw sacct dump for $DATE is empty; keeping the existing archive" >&2
+  exit 1
+fi
+if [ ! -s "$REMAPPED_PARTIAL" ]; then
+  echo "error: remapped dump for $DATE is empty; keeping the existing archive" >&2
+  exit 1
 fi
 
-echo ">" $DATE" ("$(date)")"
+mv -f "$RAW_PARTIAL" "$RAW_ARCHIVE"
+mv -f "$REMAPPED_PARTIAL" "$REMAPPED_ARCHIVE"
 
-# full
-./venv/bin/python3 ./sdf_click.py coact slurmdump --date $DATE \
-    | tee ../slurm-job-history/$DATE \
-    | ./venv/bin/python3 ./sdf_click.py coact slurmremap \
-    | tee ../slurm-job-remapped/$DATE \
-    | ./venv/bin/python3 ./sdf_click.py coact slurmimport --password-file $PASSWORD_FILE --output=upload >/dev/null
-
-# just for 2023 imports
-#cat ../slurm-job-remapped/$DATE | ./sdf.py coact slurmimport --password-file $PASSWORD_FILE --output=upload >/dev/null
-
-# don't pull data from slurm
-#cat ../slurm-job-history/$DATE | ./sdf.py coact slurmremap | tee ../slurm-job-remapped/$DATE | ./sdf.py coact slurmimport --password-file $PASSWORD_FILE --output=upload >/dev/null
-
-###
-# recalculate summaries
-###
-./venv/bin/python3  ./sdf_click.py coact slurmrecalculate --password-file=$PASSWORD_FILE --date=$DATE
+# --------------------------------------------------------------------------
+# Recalculate usage summaries
+# --------------------------------------------------------------------------
+"$PYTHON" "$SDF_CLICK" coact slurmrecalculate \
+    --username "$COACT_USERNAME" \
+    --password-file "$COACT_PASSWORD_FILE" \
+    --date "$DATE"
