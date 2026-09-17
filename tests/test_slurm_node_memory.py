@@ -15,7 +15,7 @@ class TestSlurmNodelistParsing:
         """Create a SlurmImporter instance for testing."""
         self.importer = SlurmImporter(
             username="test",
-            password_file="test",
+            password="test",
             verbose=False,
             exit_on_error=False
         )
