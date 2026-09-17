@@ -81,7 +81,7 @@ RUN chmod 0600 /etc/sssd/sssd.conf \
  && install -d -m 0755 /data
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh /app/import-jobs.sh /app/run-overage.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh /app/import-jobs.sh
 
 # tini reaps sssd and forwards signals; the entrypoint execs the CronJob
 # command so the container exits with the job's own exit code.

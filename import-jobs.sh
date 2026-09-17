@@ -20,18 +20,17 @@ esac
 export PATH
 
 COACT_USERNAME="${COACT_USERNAME:-sdf-bot}"
-COACT_PASSWORD_FILE="${COACT_PASSWORD_FILE:-/etc/coact/secrets/password}"
+
+# Sourced from Vault via the coact-daemon secret; see
+# deploy/kubernetes/overlays/dev/daemon/externalsecret.yaml.
+: "${COACT_PASSWORD:?COACT_PASSWORD must be set (Vault secret/scs/coact-dev/service-account field 'password')}"
+export COACT_PASSWORD
 
 JOB_HISTORY_DIR="${JOB_HISTORY_DIR:-/data/slurm-job-history}"
 JOB_REMAPPED_DIR="${JOB_REMAPPED_DIR:-/data/slurm-job-remapped}"
 
 PYTHON="${PYTHON:-python3}"
 SDF_CLICK="${SDF_CLICK:-$(dirname "$0")/sdf_click.py}"
-
-if [ ! -r "$COACT_PASSWORD_FILE" ]; then
-  echo "error: GraphQL password file not readable: $COACT_PASSWORD_FILE" >&2
-  exit 1
-fi
 
 # --------------------------------------------------------------------------
 # Which day to import
@@ -81,7 +80,6 @@ echo "> $DATE ($(date))"
     | tee --output-error=warn-nopipe "$REMAPPED_PARTIAL" \
     | "$PYTHON" "$SDF_CLICK" coact slurmimport \
         --username "$COACT_USERNAME" \
-        --password-file "$COACT_PASSWORD_FILE" \
         --output=upload >/dev/null
 
 # A successful sacct always emits at least the header row, so an empty dump
@@ -103,5 +101,4 @@ mv -f "$REMAPPED_PARTIAL" "$REMAPPED_ARCHIVE"
 # --------------------------------------------------------------------------
 "$PYTHON" "$SDF_CLICK" coact slurmrecalculate \
     --username "$COACT_USERNAME" \
-    --password-file "$COACT_PASSWORD_FILE" \
     --date "$DATE"

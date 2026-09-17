@@ -9,7 +9,7 @@ IMAGE        ?= sdf-cli
 TAG          ?= $(shell date +"%Y%m%d-%H%M")
 
 # --- vault -----------------------------------------------------------------
-VAULT_SECRET_PATH     ?= secret/tid/coact
+VAULT_SECRET_PATH     ?= secret/scs/coact
 GROUPER_SECRET_PATH   ?= secret/tid/scs/osmaint
 GROUPER_SECRET_FIELD  ?= password
 
