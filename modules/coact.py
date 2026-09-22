@@ -48,6 +48,8 @@ class OveragePoint(TypedDict):
     over: bool
     change: bool
     purchased_nodes: int
+    burst_nodes: float
+    effective_threshold: float
 
 class FacilityNodeUsage(TypedDict):
     facility: str
@@ -926,11 +928,7 @@ def overage(
     # Bulk send all points to InfluxDB using raw requests
     if influxdb_url is not None and len(data) > 0:
 
-        lines = []
-        for point in data:
-            line = f"allocation_usage,facility={point['facility']},cluster={point['cluster']},qos={point['qos']},window_mins={point['window_mins']} "
-            line += f"held={str(point['held']).lower()},over={str(point['over']).lower()},change={str(point['change']).lower()},percent_used={float(point['percent_used'])},purchased_nodes={float(point['purchased_nodes']) if point.get('purchased_nodes') is not None else 0.0}"
-            lines.append(line)
+        lines = [influx_line(point) for point in data]
 
         try:
             # Parse URL
@@ -953,6 +951,21 @@ def overage(
             logger.error(f"Failed to send data to InfluxDB: {e}")
 
 
+def influx_line(point: OveragePoint) -> str:
+    """Render one overage point as an InfluxDB line-protocol record."""
+    tags = f"allocation_usage,facility={point['facility']},cluster={point['cluster']},qos={point['qos']},window_mins={point['window_mins']}"
+    fields = ",".join([
+        f"held={str(point['held']).lower()}",
+        f"over={str(point['over']).lower()}",
+        f"change={str(point['change']).lower()}",
+        f"percent_used={float(point['percent_used'])}",
+        f"purchased_nodes={float(point['purchased_nodes']) if point.get('purchased_nodes') is not None else 0.0}",
+        f"burst_nodes={float(point.get('burst_nodes') or 0.0)}",
+        f"effective_threshold={float(point.get('effective_threshold') or 0.0)}",
+    ])
+    return f"{tags} {fields}"
+
+
 def toggle_job_blocking(point: OveragePoint, execute: bool = False) -> bool:
     """Enable/disable job blocking for overaged allocations."""
     template = Template("sacctmgr modify -i account name=$facility:_regular_@$cluster set GrpTRES=node=$nodes")
@@ -962,15 +975,17 @@ def toggle_job_blocking(point: OveragePoint, execute: bool = False) -> bool:
         # Blocking: set to 0
         nodes = 0
     else:
-        # Unblocking: use purchased nodes or fallback to unlimited
-        nodes = point.get('purchased_nodes', -1)
-        if nodes is None:
+        # Unblocking: restore the burst ceiling
+        purchased = point.get('purchased_nodes')
+        burst = point.get('burst_nodes') or 0
+        if purchased is None:
             nodes = -1
             logger.warning(f"No purchased node count available for {point['facility']}@{point['cluster']}, using unlimited")
-        elif nodes > 0:
-            logger.info(f"Restoring {nodes} nodes for {point['facility']}@{point['cluster']}")
+        elif purchased > 0:
+            nodes = purchased + burst
+            logger.info(f"Restoring {nodes} nodes ({purchased} purchased + {burst} burst) for {point['facility']}@{point['cluster']}")
         else:
-            logger.warning(f"Invalid node count {nodes} for {point['facility']}@{point['cluster']}, using unlimited")
+            logger.warning(f"Invalid node count {purchased} for {point['facility']}@{point['cluster']}, using unlimited")
             nodes = -1
 
     nodes = math.ceil(nodes)
@@ -1033,7 +1048,7 @@ class FacilityUsage(GraphQlMixin):
 
         query = "query usage {"
         query += "\n".join(all_windows) + ",\n"
-        query += "facilities(filter:{}) { name, computepurchases { clustername, purchased } },\n"
+        query += "facilities(filter:{}) { name, computepurchases { clustername, purchased, burstNodes } },\n"
         query += "repos { facility, allocs: currentComputeAllocations { cluster: clustername, start, end } }"
         query += "\n}"
 
@@ -1046,9 +1061,12 @@ class FacilityUsage(GraphQlMixin):
         """Format the raw data for processing."""
         # Build purchased nodes lookup from Facility.computepurchases
         fac_purchases = {}
+        fac_bursts = {}
         for fac in result.pop("facilities", []):
             for cp in fac.get("computepurchases") or []:
-                fac_purchases[(fac["name"].lower(), cp["clustername"].lower())] = cp["purchased"]
+                key = (fac["name"].lower(), cp["clustername"].lower())
+                fac_purchases[key] = cp["purchased"]
+                fac_bursts[key] = cp.get("burstNodes") or 0
 
         current = {}
         for k in result["repos"]:
@@ -1057,7 +1075,7 @@ class FacilityUsage(GraphQlMixin):
                 current[f] = {}
             for item in k["allocs"]:
                 c = item["cluster"].lower()
-                current[f][c] = {"held": None, "percentUsed": [], "purchasedNodes": fac_purchases.get((f, c))}
+                current[f][c] = {"held": None, "percentUsed": [], "purchasedNodes": fac_purchases.get((f, c)), "burstNodes": fac_bursts.get((f, c), 0)}
         del result["repos"]
 
         for time, array in result.items():
@@ -1066,7 +1084,7 @@ class FacilityUsage(GraphQlMixin):
                 f = a["facility"].lower()
                 c = a["cluster"].lower()
                 logger.trace(f"Setting {f} {c} to {a['percentUsed']}")
-                current[f][c]["percentUsed"].append(int(a["percentUsed"]))
+                current[f][c]["percentUsed"].append(float(a["percentUsed"]))
 
         logger.trace(f"Overages: {current}")
 
@@ -1105,18 +1123,24 @@ class FacilityUsage(GraphQlMixin):
             for clust, m in d.items():
                 percentages = m["percentUsed"]
                 purchased_nodes = m.get("purchasedNodes")
-                logger.trace(f"Sublooping {clust}, {percentages}, purchased_nodes: {purchased_nodes}")
+                burst_nodes = m.get("burstNodes") or 0
+                # percentUsed is measured against the purchase, so the facility's burst
+                # headroom raises the bar instead of the measurement. It applies to every
+                # window: a facility is never held for using capacity its own slurm limit
+                # permits.
+                effective_threshold = self.effective_threshold(threshold, purchased_nodes, burst_nodes)
+                logger.trace(f"Sublooping {clust}, {percentages}, purchased_nodes: {purchased_nodes}, burst_nodes: {burst_nodes}")
                 over = False
                 for p in percentages:
-                    if p >= threshold:
+                    if p >= effective_threshold:
                         over = True
-                values = ",".join([f"{i:>3}" for i in percentages])
+                values = ",".join([f"{i:>6.1f}" for i in percentages])
                 logger.trace(f"Looking at {fac}@{clust} over: {over}, {m}")
                 change = not m["held"] == over
                 if m["held"] is None:
                     change = False
                 if len(percentages) > 0:
-                    logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1} nodes={purchased_nodes or 'N/A':>5}   {values}")
+                    logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1} nodes={purchased_nodes or 'N/A':>5} burst={burst_nodes:>5} thresh={effective_threshold:>6.1f}   {values}")
 
                     # Yield a point for each window
                     for idx, pct in enumerate(percentages):
@@ -1131,8 +1155,23 @@ class FacilityUsage(GraphQlMixin):
                             held=bool(m["held"]) if m["held"] is not None else None,
                             over=bool(over),
                             change=bool(change),
-                            purchased_nodes=purchased_nodes
+                            purchased_nodes=purchased_nodes,
+                            burst_nodes=burst_nodes,
+                            effective_threshold=effective_threshold
                         )
+
+    @staticmethod
+    def effective_threshold(threshold: float, purchased_nodes: Optional[float], burst_nodes: float) -> float:
+        """The percentage at which a window counts as an overage.
+
+        Usage is reported as a percentage of the purchase, so a facility allowed to burst
+        burst_nodes above its purchase may run up to (purchase + burst) / purchase of it.
+        Without a usable purchase there is nothing to burst from, so the bare threshold
+        stands.
+        """
+        if not purchased_nodes or purchased_nodes <= 0:
+            return threshold
+        return threshold * (purchased_nodes + (burst_nodes or 0)) / purchased_nodes
 
 
 

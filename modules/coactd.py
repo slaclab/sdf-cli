@@ -464,6 +464,7 @@ class RepoRegistration(Registration):
             computepurchases {
               clustername
               purchased
+              burstNodes
             }
           }
         }
@@ -799,6 +800,20 @@ class RepoRegistration(Registration):
         self.logger.info(f'modified {resp}')
         return resp
 
+    def facility_compute_ceiling(self, facility: str, cluster: str) -> tuple:
+        """The facility's purchased node count and its absolute burst headroom on this cluster.
+
+        Burst is an absolute number of nodes the facility may run above its purchase.
+        Returns (None, 0.0) when the facility has no purchase on the cluster; there is
+        nothing to burst from in that case.
+        """
+        resp = self.back_channel.execute(self.FACILITY_CURRENT_COMPUTE_CGL, {'facility': facility})
+        for purchase in resp['facility'].get('computepurchases') or []:
+            if purchase.get('clustername', '').lower() == cluster.lower():
+                return purchase.get('purchased'), purchase.get('burstNodes') or 0.0
+        self.logger.warning(f"No compute purchase for {facility}@{cluster}; not applying any burst")
+        return None, 0.0
+
     def get_feature(self, repo_obj, name):
         state = None
         feature = None
@@ -877,6 +892,26 @@ class RepoRegistration(Registration):
                 raise Exception("Could not determine allocation resources")
             r = resources.pop(0)
 
+            # the facility may burst an absolute number of nodes above its purchase; every
+            # repo's regular node limit is scaled by that same ratio so the shares still add
+            # up to the facility ceiling.
+            purchased, burst_nodes = self.facility_compute_ceiling(facility, cluster)
+            if purchased and purchased > 0:
+                ceiling = purchased + burst_nodes
+                ratio = ceiling / purchased
+            else:
+                ceiling, ratio = None, 1.0
+
+            repo_nodes = int(ceil(round(r['nodes'] * ratio, 6)))
+            self.logger.info(
+                f"{facility}:{repo}@{cluster} node limit {repo_nodes} "
+                f"({r['nodes']} allocated x {ratio:.4f} burst ratio); facility ceiling {ceiling}"
+            )
+
+            extravars = {}
+            if ceiling is not None:
+                extravars['facility_nodes'] = int(ceil(ceiling))
+
             # enact it through slurm
             ensure_repos = self.run_playbook(
                 'coact/slurm/ensure-repo.yaml',
@@ -885,10 +920,11 @@ class RepoRegistration(Registration):
                 partition=cluster,
                 cpus=int(r['cpus']),
                 memory=int(r['memory']) * 1024,
-                nodes=int(ceil(r['nodes'])),
+                nodes=repo_nodes,
                 gpus=int(r['gpus']),
                 state='present',
-                dry_run=dry_run
+                dry_run=dry_run,
+                **extravars
             )
 
             # sync users
