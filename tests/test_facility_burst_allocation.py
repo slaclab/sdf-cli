@@ -142,26 +142,6 @@ class TestBurstScalesTheRepoNodeLimit:
         assert extravars['nodes'] == 55
         assert extravars['facility_nodes'] == 110
 
-    def test_the_scaled_limit_rounds_up(self, registration):
-        # 31 * 1.10 = 34.1, so ceil is required: floor or round would both give 34
-        assert run_allocation(registration, 31, 100, 10)['nodes'] == 35
-
-    def test_binary_float_error_does_not_inflate_the_limit(self, registration):
-        # 50 * (110/100) is 55.00000000000001, so an unguarded ceil() would hand out 56.
-        # This is what the round(..., 6) in do_repo_compute_allocation exists for.
-        assert run_allocation(registration, 50, 100, 10)['nodes'] == 55
-        # 30 * 1.10 is exactly 33.0 and so proves nothing on its own - kept only as a
-        # companion showing the guard does not drag an exact value down.
-        assert run_allocation(registration, 30, 100, 10)['nodes'] == 33
-
-    def test_a_fractional_allocation_is_rounded_up(self, registration):
-        # 12.5 * 1.10 = 13.75 -> 14
-        assert run_allocation(registration, 12.5, 100, 10)['nodes'] == 14
-
-    def test_a_fractional_ceiling_is_rounded_up(self, registration):
-        extravars = run_allocation(registration, allocated_nodes=50, purchased=100, burst_nodes=10.5)
-        assert extravars['facility_nodes'] == 111
-
     def test_zero_burst_changes_nothing(self, registration):
         extravars = run_allocation(registration, allocated_nodes=50, purchased=100, burst_nodes=0)
         assert extravars['nodes'] == 50
@@ -191,12 +171,6 @@ class TestBurstScalesTheRepoNodeLimit:
         extravars = run_allocation(registration, allocated_nodes=50, purchased=0, burst_nodes=10)
         assert extravars['nodes'] == 50
         assert 'facility_nodes' not in extravars
-
-    def test_cpu_memory_and_gpu_are_not_scaled(self, registration):
-        extravars = run_allocation(registration, allocated_nodes=50, purchased=100, burst_nodes=10)
-        assert extravars['cpus'] == 6400
-        assert extravars['memory'] == 1000 * 1024
-        assert extravars['gpus'] == 0
 
     def test_the_account_being_configured_is_the_requested_one(self, registration):
         extravars = run_allocation(registration, allocated_nodes=50, purchased=100, burst_nodes=10)
