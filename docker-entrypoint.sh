@@ -2,13 +2,15 @@
 #
 # Runtime bootstrap for the coact-daemon image.
 #
-# Starts sssd for NSS/LDAP resolution, then execs the command it was given.
+# Starts sssd for NSS/LDAP resolution, waits for the munged sidecar's socket,
+# then execs the command it was given.
 
 set -euo pipefail
 
 START_SSSD="${START_SSSD:-true}"
 SSSD_WAIT_SECONDS="${SSSD_WAIT_SECONDS:-15}"
-MUNGE_SOCKET="${MUNGE_SOCKET:-/var/run/munge/munge.socket.2}"
+MUNGE_SOCKET="${MUNGE_SOCKET:-/run/munge/munge.socket.2}"
+MUNGE_WAIT_SECONDS="${MUNGE_WAIT_SECONDS:-30}"
 
 log()  { printf '[entrypoint] %s\n' "$*" >&2; }
 warn() { printf '[entrypoint] WARNING: %s\n' "$*" >&2; }
@@ -63,25 +65,35 @@ else
     log "START_SSSD=${START_SSSD}; not starting sssd"
 fi
 
-# Mount diagnostics
-if [ -S "$MUNGE_SOCKET" ]; then
-    log "munge socket present at ${MUNGE_SOCKET}"
-else
-    warn "no munge socket at ${MUNGE_SOCKET}; is the host /var/run/munge mounted?"
-    warn "Slurm commands will fail to authenticate to slurmdbd."
-fi
+# --------------------------------------------------------------------------
+# Slurm client
+#
+# munged runs in the pod's munge sidecar; wait for its socket rather than
+# letting sacct fail to authenticate.
+# --------------------------------------------------------------------------
+waited=0
+while ! [ -S "$MUNGE_SOCKET" ]; do
+    if [ "$waited" -ge "$MUNGE_WAIT_SECONDS" ]; then
+        warn "no munge socket at ${MUNGE_SOCKET} after ${MUNGE_WAIT_SECONDS}s; is the munged sidecar running?"
+        exit 1
+    fi
+    sleep 1
+    waited=$(( waited + 1 ))
+done
+log "munge socket present at ${MUNGE_SOCKET}"
 
-if [ -x "${SLURM_BIN_DIR:-/opt/slurm/slurm-curr/bin}/sacct" ]; then
-    log "slurm client found at ${SLURM_BIN_DIR:-/opt/slurm/slurm-curr/bin}"
-else
-    warn "no sacct in ${SLURM_BIN_DIR:-/opt/slurm/slurm-curr/bin}; is /opt/slurm mounted?"
+if [ ! -r "${SLURM_CONF:-/run/slurm/conf/slurm.conf}" ]; then
+    warn "no readable slurm.conf at ${SLURM_CONF:-/run/slurm/conf/slurm.conf}; is the slurm-conf ConfigMap mounted?"
+    exit 1
 fi
+log "slurm.conf found at ${SLURM_CONF:-/run/slurm/conf/slurm.conf}"
 
-if [ -r "${SLURM_CONF:-/run/slurm/conf/slurm.conf}" ]; then
-    log "slurm.conf found at ${SLURM_CONF:-/run/slurm/conf/slurm.conf}"
-else
-    warn "no readable slurm.conf at ${SLURM_CONF:-/run/slurm/conf/slurm.conf}; is /run/slurm/conf mounted?"
+if ! command -v sacct >/dev/null 2>&1; then
+    warn "sacct not on PATH (${PATH})"
+    exit 1
 fi
+# After the conf check: even `sacct -V` parses slurm.conf.
+log "slurm client: $(sacct -V)"
 
 # `exec` with no arguments is a silent no-op that would exit 0 -- a green
 # CronJob run that did nothing at all.

@@ -1,8 +1,58 @@
 # Container image for the Coact batch daemons
+
+# ---------------------------------------------------------------------------
+# Slurm client build
+#
+# The Slurm client ships in the image rather than being mounted from the
+# node's /opt/slurm, so the pod needs no hostPath.  SLURM_VERSION must track
+# the S3DF slurmctld/slurmdbd: a client newer than the servers is unsupported.
+# ---------------------------------------------------------------------------
+FROM rockylinux:9 AS slurm-build
+
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
+ARG SLURM_VERSION=25.11.8
+ARG SLURM_SHA256=34ace13f81011add6094569d13bfc4006ad8868201c2236e2905443c7e526393
+
+# munge-devel and readline-devel live in CRB.
+RUN dnf -y install epel-release dnf-plugins-core \
+ && dnf config-manager --set-enabled crb \
+ && dnf -y --setopt=install_weak_deps=False install \
+      gcc make bzip2 perl python3 \
+      munge-devel readline-devel \
+ && dnf clean all
+
+WORKDIR /build
+RUN curl -fsSLo slurm.tar.bz2 "https://download.schedmd.com/slurm/slurm-${SLURM_VERSION}.tar.bz2" \
+ && echo "${SLURM_SHA256}  slurm.tar.bz2" | sha256sum -c - \
+ && tar xjf slurm.tar.bz2 --strip-components=1 \
+ && rm slurm.tar.bz2
+
+# Same prefix as the S3DF RPMs (/opt/slurm/slurm-<ver>, with slurm-curr
+# symlinked to it), so PATH and SLURM_BIN_DIR are unchanged from bare metal.
+RUN ./configure \
+      --prefix=/opt/slurm/slurm-${SLURM_VERSION} \
+      --libdir=/opt/slurm/slurm-${SLURM_VERSION}/lib64 \
+      --sysconfdir=/etc/slurm \
+      --disable-slurmrestd \
+ && make -j"$(nproc)" \
+ && make install \
+ && rm -rf /opt/slurm/slurm-${SLURM_VERSION}/share /opt/slurm/slurm-${SLURM_VERSION}/include \
+ && test -e /opt/slurm/slurm-${SLURM_VERSION}/lib64/slurm/auth_munge.so \
+ && test -e /opt/slurm/slurm-${SLURM_VERSION}/lib64/slurm/accounting_storage_slurmdbd.so
+
+# ---------------------------------------------------------------------------
+# Runtime image
+# ---------------------------------------------------------------------------
 FROM rockylinux:9
+
+ARG SLURM_VERSION=25.11.8
 
 LABEL org.opencontainers.image.source=https://github.com/slaclab/sdf-cli
 LABEL org.opencontainers.image.description="Coact batch daemons (slurm job import, facility overage)"
+LABEL edu.stanford.slac.slurm.version="${SLURM_VERSION}"
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
@@ -18,6 +68,7 @@ ARG no_proxy
 RUN dnf -y install epel-release \
  && dnf -y --setopt=install_weak_deps=False --setopt=tsflags=nodocs install \
       munge \
+      readline \
       sssd \
       sssd-client \
       nss-pam-ldapd \
@@ -38,8 +89,16 @@ RUN dnf -y install epel-release \
 # Align the munge uid/gid with the SDF hosts
 ARG MUNGE_UID=16952
 ARG MUNGE_GID=3761
+# usermod only re-owns the home directory, so the rest of munge's tree is
+# re-owned explicitly -- munged refuses directories it does not own.
 RUN groupmod -g $MUNGE_GID munge \
- && usermod  -u $MUNGE_UID -g $MUNGE_GID munge
+ && usermod  -u $MUNGE_UID -g $MUNGE_GID munge \
+ && chown -R munge:munge /etc/munge /var/lib/munge /var/log/munge /run/munge
+
+COPY --from=slurm-build /opt/slurm /opt/slurm
+RUN ln -s slurm-${SLURM_VERSION} /opt/slurm/slurm-curr \
+ && echo /opt/slurm/slurm-curr/lib64 > /etc/ld.so.conf.d/slurm.conf \
+ && ldconfig
 
 # ---------------------------------------------------------------------------
 # Runtime environment
@@ -81,7 +140,8 @@ RUN chmod 0600 /etc/sssd/sssd.conf \
  && install -d -m 0755 /data
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh /app/import-jobs.sh
+COPY munge-sidecar.sh     /usr/local/bin/munge-sidecar.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/bin/munge-sidecar.sh /app/import-jobs.sh
 
 # tini reaps sssd and forwards signals; the entrypoint execs the CronJob
 # command so the container exits with the job's own exit code.
