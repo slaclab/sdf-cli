@@ -41,6 +41,12 @@ class GraphQlClient:
             password = f.read()
         return password
 
+    @staticmethod
+    def _normalize_password(password):
+        """Strip surrounding whitespace so a file with a trailing newline and an
+        environment variable holding the same secret produce the same header."""
+        return password.strip() if password else password
+
     def get_basic_auth_headers(self, username=None, password=None):
         headers = {}
         if username and password:
@@ -50,10 +56,12 @@ class GraphQlClient:
 
     def connect_graph_ql(self, graphql_uri='https://'+SDF_COACT_URI, get_schema=False, username=None, password_file=None, password=None, timeout=30):
         logger.trace(f"GraphQL connect: uri={graphql_uri}, username={username}, timeout={timeout}s")
-        logger.trace(f"GraphQL connect: password_file={password_file}, get_schema={get_schema}")
+        logger.trace(f"GraphQL connect: get_schema={get_schema}")
         if password_file:
             password = self.get_password(password_file=password_file)
-            logger.trace(f"GraphQL connect: loaded password from file (length={len(password.strip()) if password else 0})")
+            logger.trace(f"GraphQL connect: loaded password from {password_file}")
+        password = self._normalize_password(password)
+        logger.trace(f"GraphQL connect: password length={len(password) if password else 0}")
         logger.trace(f"GraphQL connect: creating AIOHTTPTransport to {graphql_uri}")
         self.transport = AIOHTTPTransport(url=graphql_uri, headers=self.get_basic_auth_headers(username=username, password=password))
         logger.trace(f"GraphQL connect: creating Client with execute_timeout={timeout}")
@@ -104,6 +112,7 @@ class GraphQlSubscriber(GraphQlClient):
         if password_file:
             password = self.get_password(password_file=password_file)
             logger.trace("GraphQL subscriber connect: loaded password from file")
+        password = self._normalize_password(password)
         logger.trace(f"GraphQL subscriber connect: creating WebsocketsTransport to {graphql_uri}")
         self.subscription_transport = WebsocketsTransport(
             url=graphql_uri,

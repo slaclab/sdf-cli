@@ -54,7 +54,7 @@ def test_slurm_remapper(account_in, qos_in, account_out, qos_out):
 
 def test_slurm_importer_convert_dual_hierarchy(monkeypatch):
     from modules.coact import parse_datetime
-    importer = SlurmImporter(username="test", password_file="dummy")
+    importer = SlurmImporter(username="test", password="dummy")
     importer._clusters = {"milano": {"cpu": 64, "gpu": 0, "mem": 256 * 1073741824}}
 
     # Mock allocid lookup
