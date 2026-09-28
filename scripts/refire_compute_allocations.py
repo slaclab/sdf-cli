@@ -16,10 +16,11 @@ from os import getenv
 import click
 import pendulum as pdl
 from gql import Client, gql
+from gql.transport.exceptions import TransportProtocolError
 from gql.transport.requests import RequestsHTTPTransport
 from loguru import logger
 
-SDF_COACT_URI = getenv("SDF_COACT_URI", "coact-dev.slac.stanford.edu:443/graphql-service")
+SDF_COACT_URI = getenv("SDF_COACT_URI", "coact-dev.slac.stanford.edu:443/graphql-service-dev")
 COACT_USERNAME = getenv("COACT_USERNAME", "sdf-bot")
 COACT_PASSWORD_FILE = getenv("COACT_PASSWORD_FILE", "./etc/.secrets/password")
 REFIRE_TIMEOUT = int(getenv("REFIRE_TIMEOUT", "900"))
@@ -169,7 +170,13 @@ def main(facility, continue_on_error, dry_run):
     """Refire the latest RepoComputeAllocation for each repo/partition in FACILITY."""
     client = connect()
 
-    repos = client.execute(REPOS_GQL, variable_values={"filter": {"facility": facility}}).get("repos") or []
+    try:
+        repos = client.execute(REPOS_GQL, variable_values={"filter": {"facility": facility}}).get("repos") or []
+    except TransportProtocolError as e:
+        raise click.ClickException(
+            f"https://{SDF_COACT_URI} did not return GraphQL; check SDF_COACT_URI points at the basic auth "
+            f"graphql-service endpoint ({str(e)[:120]}...)"
+        )
     requests = client.execute(REQUESTS_GQL, variable_values={
         "filter": {"reqtype": "RepoComputeAllocation", "facilityname": facility}
     }).get("requests") or []
