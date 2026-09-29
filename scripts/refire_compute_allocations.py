@@ -13,6 +13,10 @@ the existing allocation is generated and approved instead, which coactd services
 Before anything is changed the whole facility is checked: every request must match its current Coact
 allocation, and every slurm leaf must carry the limits Coact would enact. Any discrepancy aborts the
 run without changing anything so it can be resolved by hand.
+
+--override lets slurm mismatches through so the refire enacts Coact's limits onto slurm. It never goes
+the other way: discrepancies that would change Coact (drift, coact-mismatch, pending-request) still
+abort the run.
 """
 
 import base64
@@ -72,6 +76,12 @@ REPOS_GQL = gql("""
           gpus: allocatedGpusCount
         }
       }
+    }
+""")
+
+FACILITY_NAMES_GQL = gql("""
+    query facilityNames {
+      facilityNames
     }
 """)
 
@@ -346,20 +356,28 @@ def generate_request(client: Client, facility: str, repo: str, alloc: dict) -> t
 @click.command()
 @click.option("--facility", required=True, help="Facility whose repos should be migrated")
 @click.option("--continue-on-error", is_flag=True, help="Keep going after a refire ends Incomplete or times out")
+@click.option("--override", is_flag=True, help="Enforce Coact's limits onto slurm where they differ, instead of aborting")
 @click.option("--dry-run", is_flag=True, help="Show what would be refired without refiring")
-def main(facility, continue_on_error, dry_run):
+def main(facility, continue_on_error, override, dry_run):
     """Refire the latest RepoComputeAllocation for each repo/partition in FACILITY."""
     # dev and prod have separate databases and daemons, so make the target obvious before anything is refired
     logger.info(f"using https://{SDF_COACT_URI} as {COACT_USERNAME}")
     client = connect()
 
     try:
-        repos = client.execute(REPOS_GQL, variable_values={"filter": {"facility": facility}}).get("repos") or []
+        facility_names = client.execute(FACILITY_NAMES_GQL).get("facilityNames") or []
     except TransportProtocolError as e:
         raise click.ClickException(
             f"https://{SDF_COACT_URI} did not return GraphQL; check SDF_COACT_URI points at the basic auth "
             f"graphql-service endpoint ({str(e)[:120]}...)"
         )
+    # facility lookups are exact matches, and an unknown name fails deep inside the facility query
+    if facility not in facility_names:
+        similar = [name for name in facility_names if name.lower() == facility.lower()]
+        hint = f"; did you mean {', '.join(similar)}?" if similar else f"; known facilities: {', '.join(sorted(facility_names))}"
+        raise click.ClickException(f"facility {facility} does not exist in Coact{hint}")
+
+    repos = client.execute(REPOS_GQL, variable_values={"filter": {"facility": facility}}).get("repos") or []
     requests = client.execute(REQUESTS_GQL, variable_values={
         "filter": {"reqtype": "RepoComputeAllocation", "facilityname": facility}
     }).get("requests") or []
@@ -380,7 +398,11 @@ def main(facility, continue_on_error, dry_run):
             if outcome in ("ok", "generate"):
                 account = slurm_account(facility, r["name"], alloc["clustername"])
                 found = slurm_discrepancy(expected_slurm_limits(r["name"], alloc), slurm_limits(account))
-                if found:
+                if found and override:
+                    # coactd enacts slurm from coact, so proceeding overwrites slurm with coact's values
+                    logger.warning(f"overriding {found[0]} on {account} with coact's limits: {found[1]}")
+                    detail = f"{account}: {found[1]}"
+                elif found:
                     outcome, detail = found[0], f"{account}: {found[1]}"
             targets.append((r["name"], alloc, req["Id"] if req else "-", outcome, detail))
 
@@ -402,8 +424,9 @@ def main(facility, continue_on_error, dry_run):
             continue
         if dry_run:
             action = "refire" if outcome == "ok" else "generate"
-            logger.info(f"would {action} {facility}:{name}@{cluster} request {req_id}")
-            results.append((name, cluster, req_id, f"would-{action}"))
+            suffix = " (override)" if detail else ""
+            logger.info(f"would {action} {facility}:{name}@{cluster} request {req_id}{suffix}")
+            results.append((name, cluster, req_id, f"would-{action}{suffix}"))
             continue
         if failed and not continue_on_error:
             results.append((name, cluster, req_id, "not-attempted"))
