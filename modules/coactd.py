@@ -470,6 +470,17 @@ class RepoRegistration(Registration):
         }
     """)
 
+    CLUSTER_NODE_RESOURCES_CGL = gql("""
+        query clusters( $cluster: String! ) {
+          clusters(filter: {name: $cluster}) {
+            name
+            nodecpucount
+            nodememgb
+            nodegpucount
+          }
+        }
+    """)
+
     REPO_CURRENT_COMPUTE_ALLOCATIONS_CGL = gql("""
         query repo( $facility: String!, $repo: String! ) {
           repo(filter: {facility: $facility, name: $repo}) {
@@ -814,6 +825,15 @@ class RepoRegistration(Registration):
         self.logger.warning(f"No compute purchase for {facility}@{cluster}; not applying any burst")
         return None, 0.0
 
+    def cluster_node_resources(self, cluster: str) -> Optional[dict]:
+        """The cluster's per node cpus, memory (GB) and gpus; None when the cluster is unknown."""
+        resp = self.back_channel.execute(self.CLUSTER_NODE_RESOURCES_CGL, {'cluster': cluster})
+        for c in resp.get('clusters') or []:
+            if c.get('name', '').lower() == cluster.lower():
+                return c
+        self.logger.warning(f"No cluster definition for {cluster}; not applying a facility resource ceiling")
+        return None
+
     def get_feature(self, repo_obj, name):
         state = None
         feature = None
@@ -892,9 +912,9 @@ class RepoRegistration(Registration):
                 raise Exception("Could not determine allocation resources")
             r = resources.pop(0)
 
-            # the facility may burst an absolute number of nodes above its purchase; every
-            # repo's regular node limit is scaled by that same ratio so the shares still add
-            # up to the facility ceiling.
+            # the facility may burst an absolute number of nodes above its purchase. Node limits only
+            # apply facility wide on <fac>:_regular_@<part>; each repo gets raw resources scaled by the
+            # burst ratio so the shares still add up to the facility ceiling.
             purchased, burst_nodes = self.facility_compute_ceiling(facility, cluster)
             if purchased and purchased > 0:
                 ceiling = purchased + burst_nodes
@@ -902,15 +922,27 @@ class RepoRegistration(Registration):
             else:
                 ceiling, ratio = None, 1.0
 
-            repo_nodes = int(ceil(round(r['nodes'] * ratio, 6)))
-            self.logger.info(
-                f"{facility}:{repo}@{cluster} node limit {repo_nodes} "
-                f"({r['nodes']} allocated x {ratio:.4f} burst ratio); facility ceiling {ceiling}"
-            )
+            def scaled(value) -> int:
+                return int(round(float(value) * ratio))
+
+            cpus = scaled(r['cpus'])
+            memory = scaled(int(r['memory']) * 1024)
+            gpus = scaled(r['gpus'])
 
             extravars = {}
             if ceiling is not None:
                 extravars['facility_nodes'] = int(ceil(ceiling))
+                per_node = self.cluster_node_resources(cluster)
+                if per_node:
+                    # zero means the cluster has none of that resource, so leave it unlimited
+                    extravars['facility_cpus'] = int(round(ceiling * (per_node.get('nodecpucount') or 0))) or -1
+                    extravars['facility_memory'] = int(round(ceiling * (per_node.get('nodememgb') or 0) * 1024)) or -1
+                    extravars['facility_gpus'] = int(round(ceiling * (per_node.get('nodegpucount') or 0))) or -1
+
+            self.logger.info(
+                f"{facility}:{repo}@{cluster} limits cpus={cpus} memory={memory}M gpus={gpus} "
+                f"({r['nodes']} nodes allocated x {ratio:.4f} burst ratio); facility ceiling {extravars or None}"
+            )
 
             # enact it through slurm
             ensure_repos = self.run_playbook(
@@ -918,10 +950,11 @@ class RepoRegistration(Registration):
                 facility=facility,
                 repo=repo,
                 partition=cluster,
-                cpus=int(r['cpus']),
-                memory=int(r['memory']) * 1024,
-                nodes=repo_nodes,
-                gpus=int(r['gpus']),
+                cpus=cpus,
+                memory=memory,
+                # unscaled; the role only uses it to tell whether the repo has an allocation
+                nodes=r['nodes'],
+                gpus=gpus,
                 state='present',
                 dry_run=dry_run,
                 **extravars

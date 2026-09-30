@@ -1075,7 +1075,7 @@ class FacilityUsage(GraphQlMixin):
                 current[f] = {}
             for item in k["allocs"]:
                 c = item["cluster"].lower()
-                current[f][c] = {"held": None, "percentUsed": [], "purchasedNodes": fac_purchases.get((f, c)), "burstNodes": fac_bursts.get((f, c), 0)}
+                current[f][c] = {"held": None, "nodes": None, "percentUsed": [], "purchasedNodes": fac_purchases.get((f, c)), "burstNodes": fac_bursts.get((f, c), 0)}
         del result["repos"]
 
         for time, array in result.items():
@@ -1107,6 +1107,7 @@ class FacilityUsage(GraphQlMixin):
                         f = d["f"]
                         c = d["c"]
                         current[f][c]["held"] = holding
+                        current[f][c]["nodes"] = int(this[1]) if this[1] else -1
                         logger.trace(f"Set {f}@{c} to {holding}")
                 except Exception:
                     pass
@@ -1139,6 +1140,11 @@ class FacilityUsage(GraphQlMixin):
                 change = not m["held"] == over
                 if m["held"] is None:
                     change = False
+                # an unheld partition should sit at the burst ceiling; re-apply it when it was never
+                # set or the purchase changed since
+                if m["held"] is False and not over and purchased_nodes and purchased_nodes > 0:
+                    if m.get("nodes") != math.ceil(purchased_nodes + burst_nodes):
+                        change = True
                 if len(percentages) > 0:
                     logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1} nodes={purchased_nodes or 'N/A':>5} burst={burst_nodes:>5} thresh={effective_threshold:>6.1f}   {values}")
 

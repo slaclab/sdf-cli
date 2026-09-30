@@ -2,9 +2,9 @@
 Unit tests for propagating a facility's absolute burst node headroom into the slurm
 limits set by RepoRegistration.do_repo_compute_allocation.
 
-The facility ceiling is its purchase plus its burst nodes; every repo's regular node
-limit is scaled by that same ratio so the shares still add up to the ceiling. Only nodes
-are scaled - cpus, memory and gpus are passed through untouched.
+The facility ceiling is its purchase plus its burst nodes and is the only node limit, set
+on <fac>:_regular_@<part>. Every repo's raw cpus, memory and gpus are scaled by that same
+ratio so the shares still add up to the ceiling; nodes is passed through unscaled.
 """
 
 import sys
@@ -54,6 +54,12 @@ def facility_obj(purchased, burst_nodes, clustername=CLUSTER):
     ]}}
 
 
+def cluster_obj(nodecpucount=128, nodememgb=512, nodegpucount=0, name=CLUSTER):
+    return {'clusters': [
+        {'name': name, 'nodecpucount': nodecpucount, 'nodememgb': nodememgb, 'nodegpucount': nodegpucount}
+    ]}
+
+
 def no_purchase_facility():
     """A facility with no purchase row matching the cluster."""
     return {'facility': {'name': FACILITY, 'computepurchases': []}}
@@ -74,7 +80,7 @@ def registration() -> RepoRegistration:
         return reg
 
 
-def drive(registration, allocated_nodes, purchased=100, burst_nodes=0, facility=None, slurm=True):
+def drive(registration, allocated_nodes, purchased=100, burst_nodes=0, facility=None, slurm=True, cluster=None):
     """Drive do_repo_compute_allocation; return the playbook calls it made."""
     registration.run_playbook.reset_mock()
     repo = repo_obj(allocated_nodes, slurm=slurm)
@@ -84,6 +90,7 @@ def drive(registration, allocated_nodes, purchased=100, burst_nodes=0, facility=
             {'repoComputeAllocationUpsert': {'Id': 'repo-1'}},  # upsert
             {'repo': repo},                                     # _get_allocation_info again
             facility if facility is not None else facility_obj(purchased, burst_nodes),
+            cluster if cluster is not None else cluster_obj(),      # only read with a purchase
         ]
     registration.back_channel.execute.side_effect = responses
     registration.do_repo_compute_allocation(
@@ -134,43 +141,60 @@ class TestFacilityComputeCeiling:
         assert registration.facility_compute_ceiling(FACILITY, CLUSTER) == (256, 0.0)
 
 
-class TestBurstScalesTheRepoNodeLimit:
+class TestBurstScalesTheRepoResources:
 
-    def test_repo_limit_and_facility_ceiling_include_the_burst(self, registration):
-        # 100 purchased + 10 burst -> ratio 1.10; a 50 node allocation becomes 55
+    def test_repo_resources_and_facility_ceiling_include_the_burst(self, registration):
+        # 100 purchased + 10 burst -> ratio 1.10 on the repo's 6400 cpus and 1000 GB
         extravars = run_allocation(registration, allocated_nodes=50, purchased=100, burst_nodes=10)
-        assert extravars['nodes'] == 55
+        assert extravars['cpus'] == 7040
+        assert extravars['memory'] == 1126400
+        assert extravars['gpus'] == 0
         assert extravars['facility_nodes'] == 110
+        assert extravars['facility_cpus'] == 110 * 128
+        assert extravars['facility_memory'] == 110 * 512 * 1024
+
+    def test_nodes_are_passed_through_unscaled(self, registration):
+        # the role only uses nodes to spot an empty allocation; leaves never get a node limit
+        extravars = run_allocation(registration, allocated_nodes=0.5, purchased=100, burst_nodes=10)
+        assert extravars['nodes'] == 0.5
 
     def test_zero_burst_changes_nothing(self, registration):
         extravars = run_allocation(registration, allocated_nodes=50, purchased=100, burst_nodes=0)
-        assert extravars['nodes'] == 50
+        assert (extravars['cpus'], extravars['memory']) == (6400, 1024000)
         assert extravars['facility_nodes'] == 100
+        assert extravars['facility_cpus'] == 100 * 128
+
+    def test_a_fractional_ceiling_rounds_the_node_limit_up(self, registration):
+        extravars = run_allocation(registration, allocated_nodes=50, purchased=100, burst_nodes=0.5)
+        assert extravars['facility_nodes'] == 101
+        assert extravars['facility_cpus'] == round(100.5 * 128)
 
     def test_a_repo_with_no_allocation_stays_at_zero(self, registration):
-        # the role turns nodes=0 into a hold on the regular leaf, so it must survive scaling
+        # the role turns nodes=0 into a cpu=0 hold on the regular leaf, so it must survive scaling
         extravars = run_allocation(registration, allocated_nodes=0, purchased=100, burst_nodes=10)
         assert extravars['nodes'] == 0
 
-    def test_no_purchase_row_means_no_burst_and_no_facility_ceiling(self, registration):
-        extravars = ensure_repo_kwargs(drive(registration, 50, facility=no_purchase_facility()))
-        assert extravars['nodes'] == 50
-        assert 'facility_nodes' not in extravars
+    def test_a_cluster_without_gpus_leaves_the_facility_gpus_unlimited(self, registration):
+        extravars = run_allocation(registration, allocated_nodes=50, purchased=100, burst_nodes=10)
+        assert extravars['facility_gpus'] == -1
 
-    def test_a_null_purchase_means_no_burst_and_no_facility_ceiling(self, registration):
-        extravars = ensure_repo_kwargs(drive(registration, 50, facility=facility_obj(None, 10)))
-        assert extravars['nodes'] == 50
-        assert 'facility_nodes' not in extravars
+    def test_a_gpu_cluster_caps_the_facility_gpus(self, registration):
+        extravars = ensure_repo_kwargs(drive(registration, 50, purchased=100, burst_nodes=10,
+                                             cluster=cluster_obj(nodegpucount=4)))
+        assert extravars['facility_gpus'] == 440
 
-    def test_an_unlimited_purchase_means_no_burst(self, registration):
-        extravars = run_allocation(registration, allocated_nodes=50, purchased=-1, burst_nodes=10)
-        assert extravars['nodes'] == 50
-        assert 'facility_nodes' not in extravars
+    def test_an_unknown_cluster_writes_only_the_node_ceiling(self, registration):
+        extravars = ensure_repo_kwargs(drive(registration, 50, purchased=100, burst_nodes=10,
+                                             cluster={'clusters': []}))
+        assert extravars['facility_nodes'] == 110
+        assert not {'facility_cpus', 'facility_memory', 'facility_gpus'} & extravars.keys()
 
-    def test_a_zero_purchase_does_not_divide_by_zero(self, registration):
-        extravars = run_allocation(registration, allocated_nodes=50, purchased=0, burst_nodes=10)
-        assert extravars['nodes'] == 50
-        assert 'facility_nodes' not in extravars
+    @pytest.mark.parametrize('facility', [no_purchase_facility(), facility_obj(None, 10), facility_obj(-1, 10), facility_obj(0, 10)],
+                             ids=['no-row', 'null', 'unlimited', 'zero'])
+    def test_no_usable_purchase_means_no_burst_and_no_facility_ceiling(self, registration, facility):
+        extravars = ensure_repo_kwargs(drive(registration, 50, facility=facility))
+        assert (extravars['cpus'], extravars['memory'], extravars['nodes']) == (6400, 1024000, 50)
+        assert not {'facility_nodes', 'facility_cpus', 'facility_memory', 'facility_gpus'} & extravars.keys()
 
     def test_the_account_being_configured_is_the_requested_one(self, registration):
         extravars = run_allocation(registration, allocated_nodes=50, purchased=100, burst_nodes=10)
@@ -204,3 +228,10 @@ class TestFacilityQuery:
         assert "burstNodes" in query, "do_repo_compute_allocation must ask for burst headroom"
         assert "purchased" in query
         assert "computepurchases" in query
+
+    def test_the_cluster_query_requests_per_node_resources(self, registration):
+        registration.back_channel.execute.return_value = cluster_obj()
+        assert registration.cluster_node_resources(CLUSTER.upper())['nodecpucount'] == 128
+        query = print_ast(registration.back_channel.execute.call_args[0][0])
+        for field in ("nodecpucount", "nodememgb", "nodegpucount"):
+            assert field in query
