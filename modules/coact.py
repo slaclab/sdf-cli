@@ -1125,11 +1125,9 @@ class FacilityUsage(GraphQlMixin):
                 percentages = m["percentUsed"]
                 purchased_nodes = m.get("purchasedNodes")
                 burst_nodes = m.get("burstNodes") or 0
-                # percentUsed is measured against the purchase, so the facility's burst
-                # headroom raises the bar instead of the measurement. It applies to every
-                # window: a facility is never held for using capacity its own slurm limit
-                # permits.
-                effective_threshold = self.effective_threshold(threshold, purchased_nodes, burst_nodes)
+                # percentUsed is measured against the purchase. Burst only lets the facility spread
+                # its purchased cpu and memory over more nodes, so it does not move the threshold.
+                effective_threshold = threshold
                 logger.trace(f"Sublooping {clust}, {percentages}, purchased_nodes: {purchased_nodes}, burst_nodes: {burst_nodes}")
                 over = False
                 for p in percentages:
@@ -1165,19 +1163,6 @@ class FacilityUsage(GraphQlMixin):
                             burst_nodes=burst_nodes,
                             effective_threshold=effective_threshold
                         )
-
-    @staticmethod
-    def effective_threshold(threshold: float, purchased_nodes: Optional[float], burst_nodes: float) -> float:
-        """The percentage at which a window counts as an overage.
-
-        Usage is reported as a percentage of the purchase, so a facility allowed to burst
-        burst_nodes above its purchase may run up to (purchase + burst) / purchase of it.
-        Without a usable purchase there is nothing to burst from, so the bare threshold
-        stands.
-        """
-        if not purchased_nodes or purchased_nodes <= 0:
-            return threshold
-        return threshold * (purchased_nodes + (burst_nodes or 0)) / purchased_nodes
 
 
 

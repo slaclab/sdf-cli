@@ -197,13 +197,12 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
 
 # --------------------------------------------------------------------------------
 # Facility burst nodes: a facility may run burst_nodes above its purchase, which
-# raises the overage threshold and the node count restored when a hold is lifted.
+# raises the node count restored when a hold is lifted but not the overage threshold.
 # --------------------------------------------------------------------------------
 
 PURCHASED = 256
 BURST = 26
-# 256 purchased + 26 burst = 282 nodes, which is 110.15625% of the purchase
-CEILING_PCT = 110.15625
+# 256 purchased + 26 burst = 282 nodes
 
 
 def make_usage(windows=None, threshold=100.0):
@@ -255,77 +254,37 @@ def make_point(**overrides):
     point = OveragePoint(
         facility="lcls", cluster="ada", qos="regular", window_mins=60,
         percentages=[95.0], percent_used=95.0, held=True, over=False, change=True,
-        purchased_nodes=PURCHASED, burst_nodes=BURST, effective_threshold=CEILING_PCT,
+        purchased_nodes=PURCHASED, burst_nodes=BURST, effective_threshold=100.0,
     )
     point.update(overrides)
     return point
 
 
-class TestEffectiveThreshold:
-    """Burst headroom raises the bar rather than changing the measurement."""
+class TestBurstDoesNotRaiseTheThreshold:
+    """Burst only raises the node limit; usage is still held at the plain threshold of the purchase."""
 
-    def test_burst_raises_the_threshold_proportionally(self):
-        assert FacilityUsage.effective_threshold(100.0, PURCHASED, BURST) == pytest.approx(CEILING_PCT)
-
-    def test_zero_burst_leaves_the_threshold_alone(self):
-        assert FacilityUsage.effective_threshold(100.0, PURCHASED, 0) == 100.0
-
-    def test_a_null_burst_is_treated_as_zero(self):
-        assert FacilityUsage.effective_threshold(100.0, PURCHASED, None) == 100.0
-
-    def test_a_fractional_purchase_still_scales(self):
-        # 100.5 purchased + 10 burst -> 110.5/100.5
-        assert FacilityUsage.effective_threshold(100.0, 100.5, 10) == pytest.approx(109.9502487, rel=1e-6)
-
-    def test_burst_larger_than_the_purchase_is_not_capped(self):
-        # deliberate: there is no sanity ceiling, so a 2x burst permits 300%
-        assert FacilityUsage.effective_threshold(100.0, 100, 200) == 300.0
-
-    def test_a_negative_burst_lowers_the_threshold(self):
-        # the mutation rejects negatives; nothing downstream does, so pin the behaviour
-        assert FacilityUsage.effective_threshold(100.0, 100, -40) == 60.0
-
-    def test_a_non_positive_or_missing_purchase_has_nothing_to_burst_from(self):
-        assert FacilityUsage.effective_threshold(100.0, None, BURST) == 100.0
-        assert FacilityUsage.effective_threshold(100.0, 0, BURST) == 100.0
-        assert FacilityUsage.effective_threshold(100.0, -1, BURST) == 100.0
-
-    def test_a_non_default_base_threshold_is_scaled_too(self):
-        assert FacilityUsage.effective_threshold(90.0, PURCHASED, BURST) == pytest.approx(99.140625)
-
-
-class TestBurstAccommodatesSporadicOverage:
-
-    def test_a_spike_within_the_burst_is_not_an_overage(self):
+    def test_usage_over_the_purchase_is_an_overage_despite_the_burst(self):
         point = single_point(105)
-        assert point["over"] is False
-        assert point["burst_nodes"] == BURST
-        assert point["effective_threshold"] == pytest.approx(CEILING_PCT)
-
-    def test_without_burst_the_same_spike_is_an_overage(self):
-        point = single_point(105, burst_nodes=0)
         assert point["over"] is True
+        assert point["burst_nodes"] == BURST
         assert point["effective_threshold"] == 100.0
 
-    def test_a_spike_beyond_the_burst_is_still_an_overage(self):
-        assert single_point(115)["over"] is True
+    def test_usage_under_the_purchase_is_not_an_overage(self):
+        assert single_point(95)["over"] is False
 
     def test_usage_exactly_on_the_threshold_counts_as_over(self):
         # pins >= rather than >; nothing else in the suite sits on the boundary
-        assert single_point(CEILING_PCT)["over"] is True
+        assert single_point(100.0)["over"] is True
 
     def test_usage_just_under_the_threshold_is_not_over(self):
-        assert single_point(CEILING_PCT - 0.01)["over"] is False
+        assert single_point(99.99)["over"] is False
 
     def test_fractional_usage_above_the_threshold_is_not_truncated_away(self):
-        # 110.9 sits above the 110.15625 ceiling; truncating it to 110 would let a
-        # genuinely over-ceiling facility escape the hold
-        assert single_point(110.9)["over"] is True
-        assert single_point(110.9)["percent_used"] == pytest.approx(110.9)
+        # truncating 100.9 to 100 would still be over, but 100.9 must be reported as-is
+        assert single_point(100.9)["percent_used"] == pytest.approx(100.9)
 
     def test_the_same_verdict_is_reported_for_every_window(self):
-        # `over` is computed per facility/cluster and stamped onto each window point,
-        # so this pins the window labelling and that burst is not window-dependent
+        # `over` is computed per facility/cluster and stamped onto each window point
         windows = [5, 15, 60, 180, 1440]
         usage = make_usage(windows=windows)
         data = format_with_sacctmgr(
@@ -333,9 +292,17 @@ class TestBurstAccommodatesSporadicOverage:
         )
         points = list(usage.overaged(data, threshold=100.0))
         assert [p["window_mins"] for p in points] == windows
-        assert all(p["over"] is False for p in points)
+        assert all(p["over"] is True for p in points)
+        assert all(p["effective_threshold"] == 100.0 for p in points)
 
-    def test_a_facility_with_no_purchase_falls_back_to_the_bare_threshold(self):
+    def test_a_non_default_threshold_is_used_as_is(self):
+        usage = make_usage(threshold=90.0)
+        data = format_with_sacctmgr(usage, create_graphql_response(95, PURCHASED, burst_nodes=BURST))
+        point = list(usage.overaged(data, threshold=90.0))[0]
+        assert point["effective_threshold"] == 90.0
+        assert point["over"] is True
+
+    def test_a_facility_with_no_purchase_uses_the_same_threshold(self):
         usage = make_usage()
         response = create_graphql_response(105, PURCHASED, burst_nodes=BURST)
         response["facilities"] = [{"name": "LCLS", "computepurchases": []}]
@@ -354,25 +321,24 @@ class TestBurstAccommodatesSporadicOverage:
         data = format_with_sacctmgr(usage, response)
         point = list(usage.overaged(data, threshold=100.0))[0]
         assert point["burst_nodes"] == 0
-        assert point["effective_threshold"] == 100.0
         assert point["over"] is True
 
 
-class TestHoldIsLiftedWhenBurstCoversTheUsage:
+class TestHoldAndReleaseAroundTheBurst:
     """The two halves of the feature, joined: overaged() -> toggle_job_blocking()."""
 
-    def test_a_held_facility_inside_its_burst_is_released_to_the_ceiling(self):
+    def test_a_held_facility_back_under_its_purchase_is_released_to_the_ceiling(self):
         # sacctmgr reports GrpNodes=0, i.e. the daemon is currently holding it
-        point = single_point(105, held_grpnodes=b"0")
+        point = single_point(95, held_grpnodes=b"0")
         assert (point["held"], point["over"], point["change"]) == (True, False, True)
         assert written_node_count(point) == "282"
 
-    def test_a_held_facility_beyond_its_burst_stays_held(self):
-        point = single_point(115, held_grpnodes=b"0")
+    def test_a_held_facility_still_over_its_purchase_stays_held(self):
+        point = single_point(105, held_grpnodes=b"0")
         assert (point["held"], point["over"], point["change"]) == (True, True, False)
 
-    def test_an_unheld_facility_beyond_its_burst_is_blocked(self):
-        point = single_point(115)
+    def test_an_unheld_facility_over_its_purchase_is_blocked(self):
+        point = single_point(105)
         assert (point["held"], point["over"], point["change"]) == (False, True, True)
         assert written_node_count(point) == "0"
 
@@ -428,7 +394,7 @@ class TestInfluxLine:
         tags, fields = line.split(" ", 1)
         assert tags == "allocation_usage,facility=lcls,cluster=ada,qos=regular,window_mins=60"
         assert "burst_nodes=26.0" in fields
-        assert "effective_threshold=110.15625" in fields
+        assert "effective_threshold=100.0" in fields
 
     def test_a_missing_burst_is_emitted_as_zero_not_omitted(self):
         fields = influx_line(make_point(burst_nodes=None, effective_threshold=None)).split(" ", 1)[1]

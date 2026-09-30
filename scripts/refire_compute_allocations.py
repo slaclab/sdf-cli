@@ -92,7 +92,6 @@ FACILITY_GQL = gql("""
         computepurchases {
           clustername
           purchased
-          burstNodes
         }
       }
     }
@@ -247,15 +246,7 @@ def slurm_account(facility: str, repo: str, cluster: str) -> str:
     return f"{facility}:{repo}@{cluster}".lower()
 
 
-def burst_ratio(purchase: Optional[dict]) -> float:
-    """(purchased + burstNodes) / purchased, the factor coactd scales each repo's resources by."""
-    purchased = (purchase or {}).get("purchased")
-    if not purchased or purchased <= 0:
-        return 1.0
-    return (purchased + ((purchase or {}).get("burstNodes") or 0)) / purchased
-
-
-def expected_slurm_limits(repo: str, alloc: dict, ratio: float = 1.0) -> dict:
+def expected_slurm_limits(repo: str, alloc: dict) -> dict:
     """Limits ensure-repo.yaml sets on slurm_account() from coactd's inputs; -1 is unlimited and None is 0 or unlimited.
 
     node is left out on purpose: existing leaves still carry the old per repo node limit and
@@ -263,9 +254,9 @@ def expected_slurm_limits(repo: str, alloc: dict, ratio: float = 1.0) -> dict:
     """
     if repo.lower() == "default":
         return {tres: -1 for tres in SLURM_TRES if tres != "node"}
-    cpus = int(round(float(alloc.get("cpus") or 0) * ratio))
-    memory = int(round(int(alloc.get("memory") or 0) * 1024 * ratio))
-    gpus = int(round(float(alloc.get("gpus") or 0) * ratio))
+    cpus = int(alloc.get("cpus") or 0)
+    memory = int(alloc.get("memory") or 0) * 1024
+    gpus = int(alloc.get("gpus") or 0)
     if not alloc.get("nodes") or not cpus:
         # a repo with no allocation was unlimited on the old leaf and is held at cpu=0 on the new one
         return {"cpu": None, "mem": -1, "gres/gpu": -1}
@@ -397,11 +388,10 @@ def main(facility, continue_on_error, override, dry_run):
     }).get("requests") or []
     latest = pick_latest_requests(requests)
     pending = pick_pending_requests(requests)
-    purchase_rows = {
-        p["clustername"]: p
+    purchases = {
+        p["clustername"]: p["purchased"]
         for p in client.execute(FACILITY_GQL, variable_values={"facility": facility})["facility"].get("computepurchases") or []
     }
-    purchases = {cluster: p["purchased"] for cluster, p in purchase_rows.items()}
 
     # check everything up front so a discrepancy anywhere leaves the whole facility untouched
     targets = []
@@ -412,7 +402,7 @@ def main(facility, continue_on_error, override, dry_run):
             outcome, detail = classify(r, alloc, req, pending.get(key), purchases.get(alloc["clustername"]))
             if outcome in ("ok", "generate"):
                 account = slurm_account(facility, r["name"], alloc["clustername"])
-                expected = expected_slurm_limits(r["name"], alloc, burst_ratio(purchase_rows.get(alloc["clustername"])))
+                expected = expected_slurm_limits(r["name"], alloc)
                 found = slurm_discrepancy(expected, slurm_limits(account))
                 if found and override:
                     # coactd enacts slurm from coact, so proceeding overwrites slurm with coact's values
