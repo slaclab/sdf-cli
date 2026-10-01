@@ -1,8 +1,8 @@
 """
 Click-based implementation of the Coactd command group.
 
-This module provides a click.Group-based CommandManager replacement that
-registers subcommands using click decorators instead of cliff's CommandManager.
+This module defines a click.Group whose subcommands are registered with
+click decorators; sdf_click.py attaches it to the root CLI.
 
 The Coactd commands handle:
 - User registration workflows (account creation, shell changes)

@@ -1,46 +1,43 @@
 # SDF-CLI
 
-This repo contains command line tools for the SDF to provide a single resource from which all user and administrative tools can be accessed from.
-
-# Features
-
-- TBD
-
-
+This repo contains command line tools for the SDF: the CoactD daemons that enact approved Coact requests, and the Slurm job accounting importer.
 
 # Development
 
-This is based upon the [cliff](https://docs.openstack.org/cliff/latest/index.html) command line frameworkwhich provides a clean separation of Command classes from which we can create a hierarchy of commands ala git etc. so that we may provide a logical noun-verb syntax to our utilities.
-
-We create a high level abstration for the cliff App class such that provide one more level of command in this command tree. This is implemented as a MultiApp class that should be instantiated with a List of command_managers - their `__name__` should be unique.
+The CLI is built on [click](https://click.palletsprojects.com/). `sdf_click.py` is the root command group; the `coact` (Slurm job accounting) and `coactd` (request daemons) groups are defined in `modules/coact.py` and `modules/coactd.py` and registered onto it, giving a noun-verb syntax ala git.
 
 
 # Installation
 
-We probably want to containerize this, but in lieu:
-
-run from host that can download stuff from the web, or use a proxy
+Dependencies are managed with [uv](https://docs.astral.sh/uv/):
 
 ```
-sudo make deps
+uv sync --all-extras
 ```
 
-then install the main app
+The Ansible playbooks live in the `ansible-runner/project` git submodule, which must be checked out before any playbook-running command works:
 
 ```
-export HTTPS_PROXY=http://sdfproxy.sdf.slac.stanford.edu:3128
+make update-sdf-ansible
 ```
 
-then run 
+Secrets are pulled from Vault into `etc/.secrets/`:
+
 ```
-make apply
+make secrets
+```
+
+Tests:
+
+```
+uv run pytest tests/ -v
 ```
 
 
 # Usage
 
 ```
-./sdf.py
+uv run ./sdf_click.py --help
 ```
 
 
@@ -51,6 +48,6 @@ to provide the microservice abstration of user and disk requests from coact, we 
 
 to run, do
 
-    ❯ SDF_COACT_URI=wss://coact-dev.slac.stanford.edu/graphql-service  ./sdf.py coactd get
+    ❯ SDF_COACT_URI=wss://coact-dev.slac.stanford.edu/graphql-service  uv run ./sdf_click.py coactd get
 
 note that the uri scheme is wss.
