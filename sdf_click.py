@@ -2,8 +2,8 @@
 """
 Click-based implementation of the SDF Command Line Tools.
 
-This module provides a click-based replacement for the cliff-based sdf.py,
-using click groups instead of cliff's App and CommandManager pattern.
+This is the root click group; the coact and coactd command groups are
+registered from modules/.
 """
 
 import sys
@@ -41,8 +41,7 @@ class MultiGroup(click.Group):
     """
     A custom click Group that manages multiple command groups.
 
-    This is analogous to the MultiApp class in the cliff-based implementation,
-    providing a way to organize multiple command namespaces under a single CLI.
+    Provides a way to organize multiple command namespaces under a single CLI.
     """
 
     def __init__(self, name=None, commands=None, **attrs):
@@ -82,8 +81,8 @@ class MultiGroup(click.Group):
 def cli(ctx, debug, quiet):
     """S3DF Command Line Tools
 
-    A collection of utilities for managing S3DF resources including
-    users, repositories, and compute allocations.
+    Utilities for Slurm job accounting against Coact and for enacting
+    approved Coact requests.
     """
     ctx.ensure_object(dict)
     ctx.obj['debug'] = debug
@@ -130,73 +129,6 @@ cli.add_command(coact)
 # Import the coactd command group (daemon/workflow processing)
 from modules.coactd import coactd
 cli.add_command(coactd)
-
-
-# =============================================================================
-# Placeholder groups for other command managers (to be migrated)
-# =============================================================================
-
-@cli.group(context_settings=CONTEXT_SETTINGS)
-@click.pass_context
-def user(ctx):
-    """Manage Users"""
-    pass
-
-
-@user.command(name='list')
-@click.pass_context
-def user_list(ctx):
-    """Show all users"""
-    click.echo("User list command - to be implemented")
-
-
-@user.command(name='add')
-@click.option('--uid', '-u', required=True, help='uid/username')
-@click.option('--uidnumber', '-n', help='uid number')
-@click.option('--eppns', multiple=True, help='authenticated eppns/email addresses')
-@click.pass_context
-def user_add(ctx, uid, uidnumber, eppns):
-    """Add a User"""
-    click.echo(f"Adding user {uid} - to be implemented")
-
-
-@user.command(name='delete')
-@click.option('--uid', '-u', required=True, help='uid/username')
-@click.pass_context
-def user_delete(ctx, uid):
-    """Delete a User"""
-    click.echo(f"Deleting user {uid} - to be implemented")
-
-
-@user.command(name='update')
-@click.option('--uid', '-u', required=True, help='uid/username')
-@click.option('--uidnumber', '-n', help='uid number')
-@click.option('--eppns', multiple=True, help='authenticated eppns/email addresses')
-@click.pass_context
-def user_update(ctx, uid, uidnumber, eppns):
-    """Modify a User record"""
-    click.echo(f"Updating user {uid} - to be implemented")
-
-
-@cli.group(context_settings=CONTEXT_SETTINGS)
-@click.pass_context
-def repo(ctx):
-    """Manage Repositories"""
-    pass
-
-
-@repo.command(name='list')
-@click.pass_context
-def repo_list(ctx):
-    """Show all repositories"""
-    click.echo("Repo list command - to be implemented")
-
-
-@cli.group(context_settings=CONTEXT_SETTINGS)
-@click.pass_context
-def menu(ctx):
-    """Menu-based interface"""
-    pass
 
 
 # =============================================================================
