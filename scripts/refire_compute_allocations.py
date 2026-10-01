@@ -12,12 +12,22 @@ Allocations that predate the request model have no request to refire; for those 
 the existing allocation is generated and approved instead, which coactd services the same way.
 
 Before anything is changed the whole facility is checked: every request must match its current Coact
-allocation, and every slurm leaf must carry the limits Coact would enact. Any discrepancy aborts the
-run without changing anything so it can be resolved by hand.
+allocation, and every slurm account the refire touches is compared, TRES by TRES (cpu, mem, gres/gpu,
+node), against the limits the refire will leave behind. That covers both trees:
 
---override lets slurm mismatches through so the refire enacts Coact's limits onto slurm. It never goes
-the other way: discrepancies that would change Coact (drift, coact-mismatch, pending-request) still
-abort the run.
+    <fac>:<repo>@<part>               normal leaf (not for default)
+    <fac>:<repo>@<part>^preemptable   preemptable leaf (<fac>:default@<part> for default)
+    <fac>:_regular_@<part>            facility ceiling, node=ceil(purchased + burst)
+    <fac>:_preemptable_@<part>        no limits
+
+Every difference is reported. One is "expected" when slurm still holds what the old hierarchy set
+(the per repo node limit, a missing ^preemptable leaf, the unburst node ceiling); the refire resolves
+those. Anything else is UNEXPECTED and aborts the run without changing anything so it can be resolved
+by hand. A node=0 overage hold on <fac>:_regular_@<part> is kept by the refire and reported as held.
+
+--override lets unexpected slurm differences through so the refire enacts Coact's limits onto slurm. It
+never goes the other way: discrepancies that would change Coact (drift, coact-mismatch, pending-request)
+still abort the run.
 """
 
 import base64
@@ -26,7 +36,7 @@ import sys
 import time
 from math import ceil
 from os import getenv
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import click
 import pendulum as pdl
@@ -54,6 +64,13 @@ DISCREPANCIES = ("drift", "coact-mismatch", "pending-request", "slurm-missing", 
 
 # slurm TRES this script compares; anything else on the association is ignored
 SLURM_TRES = ("cpu", "mem", "node", "gres/gpu")
+
+# per TRES verdicts: expected differences are resolved by the refire, unexpected ones need a human,
+# and held is an overage node=0 hold the refire deliberately keeps
+EXPECTED, UNEXPECTED, HELD = "expected", "UNEXPECTED", "held"
+
+# stands in for a TRES value when the whole account does not exist yet
+MISSING = "missing"
 
 REPOS_GQL = gql("""
     query repos( $filter: RepoInput ) {
@@ -92,7 +109,20 @@ FACILITY_GQL = gql("""
         computepurchases {
           clustername
           purchased
+          burstNodes
         }
+      }
+    }
+""")
+
+# same as RepoRegistration.CLUSTER_NODE_RESOURCES_CGL in modules/coactd.py
+CLUSTER_GQL = gql("""
+    query clusters( $cluster: String! ) {
+      clusters( filter: {name: $cluster} ) {
+        name
+        nodecpucount
+        nodememgb
+        nodegpucount
       }
     }
 """)
@@ -241,30 +271,118 @@ def classify(repo: dict, alloc: dict, req: Optional[dict], pending: Optional[dic
     return "ok", ""
 
 
-def slurm_account(facility: str, repo: str, cluster: str) -> str:
-    # the old leaf and the new regular leaf share this name (the default repo only ever has this one)
-    return f"{facility}:{repo}@{cluster}".lower()
+class AccountCheck(NamedTuple):
+    """The limits the refire leaves on one slurm account, and the ones the old hierarchy left there."""
+    account: str
+    # TRES the refire sets, and to what; -1 is unlimited
+    future: dict
+    # TRES -> values the old hierarchy left that the refire replaces
+    legacy: dict
+    # the refire creates the account when it does not exist yet
+    missing_ok: bool
+    # the overage daemon may hold the account at node=0, which the refire keeps
+    holdable: bool = False
+    # the refire sets limits on the account at all
+    managed: bool = True
 
 
-def expected_slurm_limits(repo: str, alloc: dict) -> dict:
-    """Limits ensure-repo.yaml sets on slurm_account() from coactd's inputs; -1 is unlimited and None is 0 or unlimited.
+class Diff(NamedTuple):
+    account: str
+    tres: str
+    slurm: object
+    future: object
+    verdict: str
+    note: str = ""
 
-    node is left out on purpose: existing leaves still carry the old per repo node limit and
-    refiring is what moves it onto <fac>:_regular_@<part>.
-    """
+
+def allocation_resources(alloc: dict) -> tuple:
+    """(cpus, memory MB, gpus, nodes) exactly as coactd passes them to ensure-repo.yaml."""
+    return (
+        int(alloc.get("cpus") or 0),
+        int(alloc.get("memory") or 0) * 1024,
+        int(alloc.get("gpus") or 0),
+        int(ceil(alloc.get("nodes") or 0)),
+    )
+
+
+def repo_checks(facility: str, repo: str, cluster: str, alloc: dict) -> list:
+    """The repo leaves ensure_repo.yaml sets up for alloc."""
+    leaf = f"{facility}:{repo}@{cluster}".lower()
     if repo.lower() == "default":
-        return {tres: -1 for tres in SLURM_TRES if tres != "node"}
-    cpus = int(alloc.get("cpus") or 0)
-    memory = int(alloc.get("memory") or 0) * 1024
-    gpus = int(alloc.get("gpus") or 0)
-    if not alloc.get("nodes") or not cpus:
-        # a repo with no allocation was unlimited on the old leaf and is held at cpu=0 on the new one
-        return {"cpu": None, "mem": -1, "gres/gpu": -1}
-    return {
-        "cpu": cpus,
-        "mem": memory if memory else -1,
-        "gres/gpu": gpus if gpus else -1,
-    }
+        # default only has the preemptable leaf, unsuffixed and unlimited, before and after
+        return [AccountCheck(leaf, {tres: -1 for tres in SLURM_TRES}, {}, missing_ok=False)]
+
+    cpus, memory, gpus, nodes = allocation_resources(alloc)
+    # ensure_repo.yaml _zero_: nodes is the unscaled allocation; cpus can round to zero for a tiny one
+    zero = nodes == 0 or cpus == 0
+    mem = -1 if zero or not memory else memory
+    gpu = -1 if zero or not gpus else gpus
+    # a repo with no allocation is held at cpu=0 for normal jobs and unlimited for preemptable ones
+    regular = {"cpu": 0 if zero else cpus, "mem": mem, "gres/gpu": gpu, "node": -1}
+    preempt = {"cpu": -1 if zero else cpus, "mem": mem, "gres/gpu": gpu, "node": -1}
+    # the old ensure_repo.yaml set each limit on the shared leaf on its own, node included
+    legacy = {"cpu": (cpus or -1,), "mem": (memory or -1,), "gres/gpu": (gpus or -1,), "node": (nodes or -1,)}
+    return [
+        AccountCheck(leaf, regular, legacy, missing_ok=False),
+        AccountCheck(f"{leaf}^preemptable", preempt, {}, missing_ok=True),
+    ]
+
+
+def partition_checks(facility: str, cluster: str, purchased: Optional[float], burst: Optional[float], per_node: Optional[dict]) -> list:
+    """The facility accounts ensure_repo.yaml sets up on cluster, from coactd's facility_* extravars."""
+    checks = []
+    regular = f"{facility}:_regular_@{cluster}".lower()
+    # without a purchase coactd passes no facility_* vars and the ceiling is left untouched
+    if purchased and purchased > 0:
+        future = {"node": int(ceil(purchased + (burst or 0)))}
+        # without a cluster definition coactd sets no cpu/mem/gpu ceiling, so there is nothing to compare
+        if per_node:
+            nodes = ceil(purchased)
+            # zero means the cluster has none of that resource, so it is left unlimited
+            future["cpu"] = int(nodes * (per_node.get("nodecpucount") or 0)) or -1
+            future["mem"] = int(nodes * (per_node.get("nodememgb") or 0) * 1024) or -1
+            future["gres/gpu"] = int(nodes * (per_node.get("nodegpucount") or 0)) or -1
+        # before burst the overage daemon restored node=ceil(purchased), or never set it, and nothing set cpu/mem/gpu
+        legacy = {"node": (ceil(purchased), -1), "cpu": (-1,), "mem": (-1,), "gres/gpu": (-1,)}
+        checks.append(AccountCheck(regular, future, legacy, missing_ok=True, holdable=True))
+    checks.append(AccountCheck(
+        f"{facility}:_preemptable_@{cluster}".lower(), {tres: -1 for tres in SLURM_TRES}, {}, missing_ok=True, managed=False,
+    ))
+    return checks
+
+
+def compare(check: AccountCheck, current: list) -> list:
+    """Every TRES on check.account (one entry in current per association) that differs from check.future."""
+    if not current:
+        if check.missing_ok:
+            return [Diff(check.account, "-", MISSING, "created", EXPECTED, "the refire creates it")]
+        return [Diff(check.account, "-", MISSING, "exists", UNEXPECTED, "account does not exist in slurm")]
+    diffs = []
+    for limits in current:
+        for tres in SLURM_TRES:
+            if tres not in check.future or limits[tres] == check.future[tres]:
+                continue
+            have, want = limits[tres], check.future[tres]
+            if check.holdable and tres == "node" and have == 0:
+                diffs.append(Diff(check.account, tres, have, want, HELD, "overage hold, kept by the refire"))
+            elif have in check.legacy.get(tres, ()):
+                diffs.append(Diff(check.account, tres, have, want, EXPECTED, "left by the old hierarchy"))
+            elif not check.managed:
+                diffs.append(Diff(check.account, tres, have, want, UNEXPECTED, "the refire does not change it"))
+            else:
+                diffs.append(Diff(check.account, tres, have, want, UNEXPECTED))
+    return diffs
+
+
+def describe(diff: Diff) -> str:
+    note = f": {diff.note}" if diff.note else ""
+    return f"{diff.account} {diff.tres}: slurm={diff.slurm} future={diff.future} ({diff.verdict}{note})"
+
+
+def summarize(diffs: list) -> str:
+    counts = {verdict: sum(1 for d in diffs if d.verdict == verdict) for verdict in (EXPECTED, UNEXPECTED, HELD)}
+    text = f"{counts[EXPECTED]} expected, {counts[UNEXPECTED]} unexpected"
+    return f"{text}, {counts[HELD]} held" if counts[HELD] else text
 
 
 def parse_mem_mb(value: str) -> int:
@@ -299,21 +417,6 @@ def slurm_limits(account: str) -> list:
         if len(parts) >= 3 and parts[0].lower() == account and parts[1] == "":
             limits.append(parse_grptres(parts[2]))
     return limits
-
-
-def slurm_discrepancy(expected: dict, current: list) -> Optional[tuple]:
-    """Return (outcome, detail) when slurm does not already hold what Coact would enact."""
-    if not current:
-        return "slurm-missing", "account does not exist in slurm"
-    diffs = []
-    for limits in current:
-        for tres, want in expected.items():
-            have = limits[tres]
-            if (want is None and have not in (-1, 0)) or (want is not None and have != want):
-                diffs.append(f"{tres}: coact={'0 or unlimited' if want is None else want} slurm={have}")
-    if diffs:
-        return "slurm-mismatch", "; ".join(diffs)
-    return None
 
 
 def wait_for_request(client: Client, facility: str, repo: str, req_id: str, timeout: int, interval: int = 10) -> str:
@@ -389,53 +492,90 @@ def main(facility, continue_on_error, override, dry_run):
     latest = pick_latest_requests(requests)
     pending = pick_pending_requests(requests)
     purchases = {
-        p["clustername"]: p["purchased"]
+        p["clustername"].lower(): (p["purchased"], p.get("burstNodes") or 0)
         for p in client.execute(FACILITY_GQL, variable_values={"facility": facility})["facility"].get("computepurchases") or []
     }
 
+    limits_cache = {}
+
+    def check_slurm(checks: list) -> list:
+        diffs = []
+        for check in checks:
+            if check.account not in limits_cache:
+                limits_cache[check.account] = slurm_limits(check.account)
+            diffs.extend(compare(check, limits_cache[check.account]))
+        return diffs
+
+    def log_diffs(diffs: list) -> None:
+        for diff in diffs:
+            if diff.verdict != UNEXPECTED:
+                logger.info(describe(diff))
+            elif override:
+                # coactd enacts slurm from coact, so proceeding overwrites slurm with coact's values
+                logger.warning(f"overriding {describe(diff)}")
+            else:
+                logger.error(describe(diff))
+
     # check everything up front so a discrepancy anywhere leaves the whole facility untouched
     targets = []
+    partition_diffs = {}
     for r in sorted(repos, key=lambda x: x["name"]):
         for alloc in sorted(r.get("currentComputeAllocations") or [], key=lambda a: a["clustername"]):
-            key = (r["name"], alloc["clustername"])
+            cluster = alloc["clustername"]
+            key = (r["name"], cluster)
             req = latest.get(key)
-            outcome, detail = classify(r, alloc, req, pending.get(key), purchases.get(alloc["clustername"]))
+            purchased, burst = purchases.get(cluster.lower(), (None, 0))
+            outcome, detail = classify(r, alloc, req, pending.get(key), purchased)
+            diffs = []
             if outcome in ("ok", "generate"):
-                account = slurm_account(facility, r["name"], alloc["clustername"])
-                expected = expected_slurm_limits(r["name"], alloc)
-                found = slurm_discrepancy(expected, slurm_limits(account))
-                if found and override:
-                    # coactd enacts slurm from coact, so proceeding overwrites slurm with coact's values
-                    logger.warning(f"overriding {found[0]} on {account} with coact's limits: {found[1]}")
-                    detail = f"{account}: {found[1]}"
-                elif found:
-                    outcome, detail = found[0], f"{account}: {found[1]}"
-            targets.append((r["name"], alloc, req["Id"] if req else "-", outcome, detail))
+                if cluster not in partition_diffs:
+                    if not purchased or purchased <= 0:
+                        logger.warning(f"{facility} has no purchase on {cluster}; the refire leaves {facility}:_regular_@{cluster} untouched")
+                    per_node = next((c for c in client.execute(CLUSTER_GQL, variable_values={"cluster": cluster}).get("clusters") or []
+                                     if c.get("name", "").lower() == cluster.lower()), None)
+                    if per_node is None:
+                        logger.warning(f"no cluster definition for {cluster}; its facility cpu/mem/gpu ceiling is not compared")
+                    partition_diffs[cluster] = check_slurm(partition_checks(facility, cluster, purchased, burst, per_node))
+                    log_diffs(partition_diffs[cluster])
+                diffs = check_slurm(repo_checks(facility, r["name"], cluster, alloc))
+                log_diffs(diffs)
+                unexpected = [d for d in diffs if d.verdict == UNEXPECTED]
+                if unexpected:
+                    detail = "; ".join(describe(d) for d in unexpected)
+                    if not override:
+                        outcome = "slurm-missing" if any(d.slurm == MISSING for d in unexpected) else "slurm-mismatch"
+            targets.append((r["name"], alloc, req["Id"] if req else "-", outcome, detail, diffs))
+
+    print_diffs([d for diffs in partition_diffs.values() for d in diffs] + [d for t in targets for d in t[5]])
 
     discrepancies = [t for t in targets if t[3] in DISCREPANCIES]
-    if discrepancies:
-        for name, alloc, req_id, outcome, detail in discrepancies:
+    # partition accounts are shared by every repo on the partition, so they block the whole run
+    partition_unexpected = [d for diffs in partition_diffs.values() for d in diffs if d.verdict == UNEXPECTED]
+    if discrepancies or (partition_unexpected and not override):
+        for name, alloc, req_id, outcome, detail, _ in discrepancies:
             logger.error(f"{facility}:{name}@{alloc['clustername']} ({req_id}): {outcome} {detail}")
-        results = [(name, alloc["clustername"], req_id, outcome) for name, alloc, req_id, outcome, _ in targets]
+        results = [(name, alloc["clustername"], req_id, outcome, summarize(diffs)) for name, alloc, req_id, outcome, _, diffs in targets]
         print_results(results)
-        raise click.ClickException(f"{len(discrepancies)} discrepancies in {facility}; nothing was changed")
+        count = len(discrepancies) + (len(partition_unexpected) if not override else 0)
+        raise click.ClickException(f"{count} discrepancies in {facility}; nothing was changed")
 
     results = []
     failed = False
-    for name, alloc, req_id, outcome, detail in targets:
+    for name, alloc, req_id, outcome, detail, diffs in targets:
         cluster = alloc["clustername"]
+        summary = summarize(diffs)
         if outcome not in ("ok", "generate"):
             logger.warning(f"skipping {facility}:{name}@{cluster} ({req_id}): {outcome} {detail}")
-            results.append((name, cluster, req_id, f"skipped-{outcome}"))
+            results.append((name, cluster, req_id, f"skipped-{outcome}", summary))
             continue
         if dry_run:
             action = "refire" if outcome == "ok" else "generate"
             suffix = " (override)" if detail else ""
             logger.info(f"would {action} {facility}:{name}@{cluster} request {req_id}{suffix}")
-            results.append((name, cluster, req_id, f"would-{action}{suffix}"))
+            results.append((name, cluster, req_id, f"would-{action}{suffix}", summary))
             continue
         if failed and not continue_on_error:
-            results.append((name, cluster, req_id, "not-attempted"))
+            results.append((name, cluster, req_id, "not-attempted", summary))
             continue
 
         if outcome == "ok":
@@ -449,16 +589,26 @@ def main(facility, continue_on_error, override, dry_run):
         if outcome not in ("refired-complete", "generated-complete"):
             logger.error(f"{facility}:{name}@{cluster} request {req_id} ended {outcome}")
             failed = True
-        results.append((name, cluster, req_id, outcome))
+        results.append((name, cluster, req_id, outcome, summary))
 
     print_results(results)
     sys.exit(1 if failed else 0)
 
 
+def print_diffs(diffs: list) -> None:
+    if not diffs:
+        click.echo("slurm already matches the future hierarchy")
+        return
+    click.echo(f"{'account':<48} {'tres':<9} {'slurm':>10} {'future':>10} {'verdict':<11} note")
+    for d in diffs:
+        click.echo(f"{d.account:<48} {d.tres:<9} {str(d.slurm):>10} {str(d.future):>10} {d.verdict:<11} {d.note}")
+    click.echo("")
+
+
 def print_results(results: list) -> None:
-    click.echo(f"{'repo':<32} {'partition':<16} {'request':<26} outcome")
-    for name, cluster, req_id, outcome in results:
-        click.echo(f"{name:<32} {cluster:<16} {req_id:<26} {outcome}")
+    click.echo(f"{'repo':<32} {'partition':<16} {'request':<26} {'outcome':<28} slurm diffs")
+    for name, cluster, req_id, outcome, summary in results:
+        click.echo(f"{name:<32} {cluster:<16} {req_id:<26} {outcome:<28} {summary}")
 
 
 if __name__ == "__main__":
