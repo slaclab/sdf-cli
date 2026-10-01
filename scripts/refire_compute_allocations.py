@@ -24,6 +24,7 @@ Every difference is reported. One is "expected" when slurm still holds what the 
 (the per repo node limit, a missing ^preemptable leaf, the unburst node ceiling); the refire resolves
 those. Anything else is UNEXPECTED and aborts the run without changing anything so it can be resolved
 by hand. A node=0 overage hold on <fac>:_regular_@<part> is kept by the refire and reported as held.
+Slurm is compared even for allocations Coact already blocks, so one --dry-run reports every problem.
 
 --override lets unexpected slurm differences through so the refire enacts Coact's limits onto slurm. It
 never goes the other way: discrepancies that would change Coact (drift, coact-mismatch, pending-request)
@@ -527,7 +528,9 @@ def main(facility, continue_on_error, override, dry_run):
             purchased, burst = purchases.get(cluster.lower(), (None, 0))
             outcome, detail = classify(r, alloc, req, pending.get(key), purchased)
             diffs = []
-            if outcome in ("ok", "generate"):
+            # slurm is read only here, so it is checked even when coact already rules the allocation out,
+            # letting a single dry run surface every problem; a slurm-disabled repo loses its accounts instead
+            if outcome != "slurm-disabled":
                 if cluster not in partition_diffs:
                     if not purchased or purchased <= 0:
                         logger.warning(f"{facility} has no purchase on {cluster}; the refire leaves {facility}:_regular_@{cluster} untouched")
@@ -540,10 +543,13 @@ def main(facility, continue_on_error, override, dry_run):
                 diffs = check_slurm(repo_checks(facility, r["name"], cluster, alloc))
                 log_diffs(diffs)
                 unexpected = [d for d in diffs if d.verdict == UNEXPECTED]
-                if unexpected:
+                if unexpected and outcome in ("ok", "generate"):
                     detail = "; ".join(describe(d) for d in unexpected)
                     if not override:
                         outcome = "slurm-missing" if any(d.slurm == MISSING for d in unexpected) else "slurm-mismatch"
+                elif unexpected:
+                    # keep the coact outcome, which already blocks the allocation, and note slurm alongside it
+                    detail = "; ".join([detail] + [describe(d) for d in unexpected])
             targets.append((r["name"], alloc, req["Id"] if req else "-", outcome, detail, diffs))
 
     print_diffs([d for diffs in partition_diffs.values() for d in diffs] + [d for t in targets for d in t[5]])
