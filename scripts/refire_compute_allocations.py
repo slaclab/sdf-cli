@@ -6,7 +6,7 @@ For every repo/partition in a facility that has a current compute allocation, fi
 RepoComputeAllocation request and refire it. The running reporegistration coactd picks the refire up
 from the change stream and re-runs ensure-repo/ensure-users, which builds the new
 <fac>:<repo>@<part> and <fac>:<repo>@<part>^preemptable leaves. The refire also moves the node limit off
-the repo leaves onto <fac>:_regular_@<part>, so the leaves' current node limit is not compared.
+the repo leaves onto <fac>:_regular_@<part>.
 
 Allocations that predate the request model have no request to refire; for those a request mirroring
 the existing allocation is generated and approved instead, which coactd services the same way.
@@ -18,11 +18,12 @@ node), against the limits the refire will leave behind. That covers both trees:
     <fac>:<repo>@<part>               normal leaf (not for default)
     <fac>:<repo>@<part>^preemptable   preemptable leaf (<fac>:default@<part> for default)
     <fac>:_regular_@<part>            facility ceiling, node=ceil(purchased + burst)
-    <fac>:_preemptable_@<part>        no limits
+    <fac>:_preemptable_@<part>        no limits; the refire clears any
 
 Every difference is reported. One is "expected" when slurm still holds what the old hierarchy set
-(the per repo node limit, a missing ^preemptable leaf, the unburst node ceiling); the refire resolves
-those. Anything else is UNEXPECTED and aborts the run without changing anything so it can be resolved
+(the per repo node limit, a missing ^preemptable leaf, the unburst node ceiling), or any node limit
+below <fac>:_regular_@<part>, which an earlier version of this hierarchy left behind; the refire
+resolves those. Anything else is UNEXPECTED and aborts the run without changing anything so it can be resolved
 by hand. A node=0 overage hold on <fac>:_regular_@<part> is kept by the refire and reported as held.
 Slurm is compared even for allocations Coact already blocks, so one --dry-run reports every problem.
 
@@ -283,8 +284,8 @@ class AccountCheck(NamedTuple):
     missing_ok: bool
     # the overage daemon may hold the account at node=0, which the refire keeps
     holdable: bool = False
-    # the refire sets limits on the account at all
-    managed: bool = True
+    # TRES the refire always resets, so whatever slurm holds there is a leftover rather than a hand edit
+    resets: tuple = ()
 
 
 class Diff(NamedTuple):
@@ -309,9 +310,11 @@ def allocation_resources(alloc: dict) -> tuple:
 def repo_checks(facility: str, repo: str, cluster: str, alloc: dict) -> list:
     """The repo leaves ensure_repo.yaml sets up for alloc."""
     leaf = f"{facility}:{repo}@{cluster}".lower()
+    # node limits only live on <fac>:_regular_@<part>, so the refire sets node=-1 on every leaf whatever
+    # an earlier hierarchy left there
     if repo.lower() == "default":
         # default only has the preemptable leaf, unsuffixed and unlimited, before and after
-        return [AccountCheck(leaf, {tres: -1 for tres in SLURM_TRES}, {}, missing_ok=False)]
+        return [AccountCheck(leaf, {tres: -1 for tres in SLURM_TRES}, {}, missing_ok=False, resets=("node",))]
 
     cpus, memory, gpus, nodes = allocation_resources(alloc)
     # ensure_repo.yaml _zero_: nodes is the unscaled allocation; cpus can round to zero for a tiny one
@@ -324,8 +327,8 @@ def repo_checks(facility: str, repo: str, cluster: str, alloc: dict) -> list:
     # the old ensure_repo.yaml set each limit on the shared leaf on its own, node included
     legacy = {"cpu": (cpus or -1,), "mem": (memory or -1,), "gres/gpu": (gpus or -1,), "node": (nodes or -1,)}
     return [
-        AccountCheck(leaf, regular, legacy, missing_ok=False),
-        AccountCheck(f"{leaf}^preemptable", preempt, {}, missing_ok=True),
+        AccountCheck(leaf, regular, legacy, missing_ok=False, resets=("node",)),
+        AccountCheck(f"{leaf}^preemptable", preempt, {}, missing_ok=True, resets=("node",)),
     ]
 
 
@@ -353,8 +356,10 @@ def partition_checks(facility: str, cluster: str, purchased: Optional[float], bu
             legacy["cpu"] += (int(nodes * (per_node.get("nodecpucount") or 0)) or -1,)
             legacy["mem"] += (int(nodes * (per_node.get("nodememgb") or 0) * 1024) or -1,)
         checks.append(AccountCheck(regular, future, legacy, missing_ok=True, holdable=True))
+    # ensure_repo.yaml clears every limit here; an early version of the hierarchy put the facility node
+    # ceiling on it too, so a node limit is a leftover, while cpu/mem/gpu limits were never set by coactd
     checks.append(AccountCheck(
-        f"{facility}:_preemptable_@{cluster}".lower(), {tres: -1 for tres in SLURM_TRES}, {}, missing_ok=True, managed=False,
+        f"{facility}:_preemptable_@{cluster}".lower(), {tres: -1 for tres in SLURM_TRES}, {}, missing_ok=True, resets=("node",),
     ))
     return checks
 
@@ -375,8 +380,8 @@ def compare(check: AccountCheck, current: list) -> list:
                 diffs.append(Diff(check.account, tres, have, want, HELD, "overage hold, kept by the refire"))
             elif have in check.legacy.get(tres, ()):
                 diffs.append(Diff(check.account, tres, have, want, EXPECTED, "left by the old hierarchy"))
-            elif not check.managed:
-                diffs.append(Diff(check.account, tres, have, want, UNEXPECTED, "the refire does not change it"))
+            elif tres in check.resets:
+                diffs.append(Diff(check.account, tres, have, want, EXPECTED, "left by an earlier hierarchy, reset by the refire"))
             else:
                 diffs.append(Diff(check.account, tres, have, want, UNEXPECTED))
     return diffs
