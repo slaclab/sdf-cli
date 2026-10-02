@@ -207,6 +207,25 @@ class Registration(GraphQlSubscriber, AnsibleRunner):
         """Process a request. Subclasses must override this method."""
         raise NotImplementedError('do() is abstract')
 
+    USER_POSIX_GROUP_UPDATE_GQL = gql("""
+        mutation userPosixGroupUpdate($username: String!, $gidnumber: Int!, $present: Boolean!) {
+            userPosixGroupUpdate(username: $username, gidnumber: $gidnumber, present: $present) {
+                secondaryGidNumbers
+            }
+        }
+        """)
+
+    def record_posix_group_change(self, user: str, gid_number: int, present: bool) -> None:
+        """Tell coact that this user was just added to / removed from the posixGroup with gid_number,
+        so coact's stored gids reflect the playbook we just ran. Never raises: the request outcome is the
+        LDAP change itself, and the periodic posix sync reconciles anything missed here."""
+        try:
+            res = self.back_channel.execute(self.USER_POSIX_GROUP_UPDATE_GQL,
+                                            {'username': user, 'gidnumber': int(gid_number), 'present': present})
+            self.logger.info(f"recorded gid {gid_number} {'present' if present else 'absent'} for {user} in coact: {res['userPosixGroupUpdate']}")
+        except Exception as e:
+            self.logger.warning(f"could not record gid {gid_number} change for {user} in coact (periodic sync will reconcile): {e}")
+
 
 # ============================================================================
 # Create the main coactd group
@@ -996,6 +1015,8 @@ class RepoRegistration(Registration):
                 create=True,
                 dry_run=dry_run
             )
+            if not dry_run:
+                self.record_posix_group_change(user, gid_number, present=(action == 'present'))
 
         # finish up and mark record
         user_req = {
