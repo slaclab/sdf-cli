@@ -197,7 +197,7 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
 
 # --------------------------------------------------------------------------------
 # Facility burst nodes: a facility may run burst_nodes above its purchase, which
-# raises the node count restored when a hold is lifted but not the overage threshold.
+# raises the node count restored when a hold is lifted but does not scale the overage threshold.
 # --------------------------------------------------------------------------------
 
 PURCHASED = 256
@@ -261,7 +261,7 @@ def make_point(**overrides):
 
 
 class TestBurstDoesNotRaiseTheThreshold:
-    """Burst only raises the node limit; usage is still held at the plain threshold of the purchase."""
+    """Burst does not scale the threshold; usage is still held at the given threshold of the purchase."""
 
     def test_usage_over_the_purchase_is_an_overage_despite_the_burst(self):
         point = single_point(105)
@@ -433,3 +433,10 @@ class TestUsageQuery:
         query = self._executed_query(make_usage(windows=[5, 60, 1440]))
         for minutes in (5, 60, 1440):
             assert f"pastMinutes: {minutes}" in query
+
+
+def test_the_overage_command_holds_at_120_percent_by_default():
+    # cpu and memory burst above the purchase, so the hold sits above 100% until it accounts for burst
+    from modules.coact import overage
+    threshold = next(p for p in overage.params if p.name == "threshold")
+    assert threshold.default == 120.0

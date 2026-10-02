@@ -913,19 +913,20 @@ class RepoRegistration(Registration):
             r = resources.pop(0)
 
             # node limits only apply facility wide on <fac>:_regular_@<part>, which may burst an absolute
-            # number of nodes above the purchase. cpu, memory and gpus there stay at the purchase, and
-            # each repo gets its raw allocation.
+            # number of nodes above the purchase. cpu and memory there burst with it, gpus stay at the
+            # purchase, and each repo gets its raw allocation.
             purchased, burst_nodes = self.facility_compute_ceiling(facility, cluster)
 
             extravars = {}
             if purchased and purchased > 0:
-                extravars['facility_nodes'] = int(ceil(purchased + burst_nodes))
+                burst_ceiling = int(ceil(purchased + burst_nodes))
+                extravars['facility_nodes'] = burst_ceiling
                 per_node = self.cluster_node_resources(cluster)
                 if per_node:
                     nodes = ceil(purchased)
                     # zero means the cluster has none of that resource, so leave it unlimited
-                    extravars['facility_cpus'] = int(nodes * (per_node.get('nodecpucount') or 0)) or -1
-                    extravars['facility_memory'] = int(nodes * (per_node.get('nodememgb') or 0) * 1024) or -1
+                    extravars['facility_cpus'] = int(burst_ceiling * (per_node.get('nodecpucount') or 0)) or -1
+                    extravars['facility_memory'] = int(burst_ceiling * (per_node.get('nodememgb') or 0) * 1024) or -1
                     extravars['facility_gpus'] = int(nodes * (per_node.get('nodegpucount') or 0)) or -1
 
             self.logger.info(

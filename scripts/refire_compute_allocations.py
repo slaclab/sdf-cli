@@ -335,16 +335,23 @@ def partition_checks(facility: str, cluster: str, purchased: Optional[float], bu
     regular = f"{facility}:_regular_@{cluster}".lower()
     # without a purchase coactd passes no facility_* vars and the ceiling is left untouched
     if purchased and purchased > 0:
-        future = {"node": int(ceil(purchased + (burst or 0)))}
+        burst_ceiling = int(ceil(purchased + (burst or 0)))
+        future = {"node": burst_ceiling}
         # without a cluster definition coactd sets no cpu/mem/gpu ceiling, so there is nothing to compare
         if per_node:
             nodes = ceil(purchased)
-            # zero means the cluster has none of that resource, so it is left unlimited
-            future["cpu"] = int(nodes * (per_node.get("nodecpucount") or 0)) or -1
-            future["mem"] = int(nodes * (per_node.get("nodememgb") or 0) * 1024) or -1
+            # cpu and mem burst with the node ceiling, gpus stay at the purchase; zero means the
+            # cluster has none of that resource, so it is left unlimited
+            future["cpu"] = int(burst_ceiling * (per_node.get("nodecpucount") or 0)) or -1
+            future["mem"] = int(burst_ceiling * (per_node.get("nodememgb") or 0) * 1024) or -1
             future["gres/gpu"] = int(nodes * (per_node.get("nodegpucount") or 0)) or -1
         # before burst the overage daemon restored node=ceil(purchased), or never set it, and nothing set cpu/mem/gpu
         legacy = {"node": (ceil(purchased), -1), "cpu": (-1,), "mem": (-1,), "gres/gpu": (-1,)}
+        if per_node:
+            # an earlier refire capped cpu/mem at the purchase alone, before they burst
+            nodes = ceil(purchased)
+            legacy["cpu"] += (int(nodes * (per_node.get("nodecpucount") or 0)) or -1,)
+            legacy["mem"] += (int(nodes * (per_node.get("nodememgb") or 0) * 1024) or -1,)
         checks.append(AccountCheck(regular, future, legacy, missing_ok=True, holdable=True))
     checks.append(AccountCheck(
         f"{facility}:_preemptable_@{cluster}".lower(), {tres: -1 for tres in SLURM_TRES}, {}, missing_ok=True, managed=False,

@@ -883,7 +883,7 @@ def slurm_recalculate(ctx, date, verbose, username, password_file):
 @common_options
 @graphql_options
 @click.option('--windows', type=int, multiple=True, default=[15, 60, 10080, 43800], help='Time windows to collate overage calculations')
-@click.option('--threshold', type=float, default=100.0, help='Percentage at which to be considered over allocation')
+@click.option('--threshold', type=float, default=120.0, help='Percentage of the purchase at which to be considered over allocation')
 @click.option('--dry-run', is_flag=True, default=False, help='Do not actually enforce job holding')
 @click.option('--influxdb-url', default='http://localhost:8086', help='InfluxDB server URL (default: http://localhost:8086)')
 @click.option('--influxdb-username', default=None, help='InfluxDB username')
@@ -1125,8 +1125,8 @@ class FacilityUsage(GraphQlMixin):
                 percentages = m["percentUsed"]
                 purchased_nodes = m.get("purchasedNodes")
                 burst_nodes = m.get("burstNodes") or 0
-                # percentUsed is measured against the purchase. Burst only lets the facility spread
-                # its purchased cpu and memory over more nodes, so it does not move the threshold.
+                # percentUsed is measured against the purchase, and burst cpu and memory let it pass 100%.
+                # The threshold does not scale with the facility's burst yet; --threshold covers it for now.
                 effective_threshold = threshold
                 logger.trace(f"Sublooping {clust}, {percentages}, purchased_nodes: {purchased_nodes}, burst_nodes: {burst_nodes}")
                 over = False

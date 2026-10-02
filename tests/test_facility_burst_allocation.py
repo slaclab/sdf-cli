@@ -3,8 +3,8 @@ Unit tests for propagating a facility's absolute burst node headroom into the sl
 limits set by RepoRegistration.do_repo_compute_allocation.
 
 The facility ceiling is its purchase plus its burst nodes and is the only node limit, set
-on <fac>:_regular_@<part>. The facility's cpus, memory and gpus there stay at the rounded up
-purchase, and every repo gets its raw allocation; the burst never enters into either.
+on <fac>:_regular_@<part>. The facility's cpus and memory there burst with it, its gpus stay
+at the rounded up purchase, and every repo gets its raw allocation without any burst.
 """
 
 import sys
@@ -141,17 +141,17 @@ class TestFacilityComputeCeiling:
         assert registration.facility_compute_ceiling(FACILITY, CLUSTER) == (256, 0.0)
 
 
-class TestBurstOnlyRaisesTheNodeLimit:
+class TestBurstRaisesTheFacilityCeiling:
 
-    def test_only_the_facility_node_limit_includes_the_burst(self, registration):
-        # 100 purchased + 10 burst: the repo keeps its 6400 cpus and 1000 GB, the facility its purchase
+    def test_the_facility_node_cpu_and_memory_limits_include_the_burst(self, registration):
+        # 100 purchased + 10 burst: the repo keeps its 6400 cpus and 1000 GB, the facility gets 110 nodes' worth
         extravars = run_allocation(registration, allocated_nodes=50, purchased=100, burst_nodes=10)
         assert extravars['cpus'] == 6400
         assert extravars['memory'] == 1024000
         assert extravars['gpus'] == 0
         assert extravars['facility_nodes'] == 110
-        assert extravars['facility_cpus'] == 100 * 128
-        assert extravars['facility_memory'] == 100 * 512 * 1024
+        assert extravars['facility_cpus'] == 110 * 128
+        assert extravars['facility_memory'] == 110 * 512 * 1024
 
     def test_a_fractional_node_allocation_rounds_up(self, registration):
         # the role only uses nodes to spot an empty allocation; leaves never get a node limit
@@ -167,13 +167,13 @@ class TestBurstOnlyRaisesTheNodeLimit:
     def test_a_fractional_ceiling_rounds_the_node_limit_up(self, registration):
         extravars = run_allocation(registration, allocated_nodes=50, purchased=100, burst_nodes=0.5)
         assert extravars['facility_nodes'] == 101
-        assert extravars['facility_cpus'] == 100 * 128
+        assert extravars['facility_cpus'] == 101 * 128
 
     def test_a_fractional_purchase_rounds_the_facility_resources_up(self, registration):
         extravars = run_allocation(registration, allocated_nodes=50, purchased=100.5, burst_nodes=10)
         assert extravars['facility_nodes'] == 111
-        assert extravars['facility_cpus'] == 101 * 128
-        assert extravars['facility_memory'] == 101 * 512 * 1024
+        assert extravars['facility_cpus'] == 111 * 128
+        assert extravars['facility_memory'] == 111 * 512 * 1024
 
     def test_a_repo_with_no_allocation_stays_at_zero(self, registration):
         # the role turns nodes=0 into a cpu=0 hold on the regular leaf
@@ -184,10 +184,12 @@ class TestBurstOnlyRaisesTheNodeLimit:
         extravars = run_allocation(registration, allocated_nodes=50, purchased=100, burst_nodes=10)
         assert extravars['facility_gpus'] == -1
 
-    def test_a_gpu_cluster_caps_the_facility_gpus(self, registration):
+    def test_a_gpu_cluster_caps_the_facility_gpus_at_the_purchase(self, registration):
+        # gpus do not burst: 100 purchased nodes' worth even with 10 burst nodes
         extravars = ensure_repo_kwargs(drive(registration, 50, purchased=100, burst_nodes=10,
                                              cluster=cluster_obj(nodegpucount=4)))
         assert extravars['facility_gpus'] == 400
+        assert extravars['facility_cpus'] == 110 * 128
 
     def test_an_unknown_cluster_writes_only_the_node_ceiling(self, registration):
         extravars = ensure_repo_kwargs(drive(registration, 50, purchased=100, burst_nodes=10,
