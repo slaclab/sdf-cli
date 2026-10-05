@@ -15,7 +15,7 @@ Before anything is changed the whole facility is checked: every request must mat
 allocation, and every slurm account the refire touches is compared, TRES by TRES (cpu, mem, gres/gpu,
 node), against the limits the refire will leave behind. That covers both trees:
 
-    <fac>:<repo>@<part>               normal leaf (not for default)
+    <fac>:<repo>@<part>               normal leaf (not for default, removed for a repo with no allocation)
     <fac>:<repo>@<part>^preemptable   preemptable leaf (<fac>:default@<part> for default)
     <fac>:_regular_@<part>            facility ceiling, node=ceil(purchased + burst)
     <fac>:_preemptable_@<part>        no limits; the refire clears any
@@ -286,6 +286,8 @@ class AccountCheck(NamedTuple):
     holdable: bool = False
     # TRES the refire always resets, so whatever slurm holds there is a leftover rather than a hand edit
     resets: tuple = ()
+    # the refire removes the account, so it should not exist afterwards
+    absent: bool = False
 
 
 class Diff(NamedTuple):
@@ -321,15 +323,19 @@ def repo_checks(facility: str, repo: str, cluster: str, alloc: dict) -> list:
     zero = nodes == 0 or cpus == 0
     mem = -1 if zero or not memory else memory
     gpu = -1 if zero or not gpus else gpus
-    # a repo with no allocation is held at cpu=0 for normal jobs and unlimited for preemptable ones
-    regular = {"cpu": 0 if zero else cpus, "mem": mem, "gres/gpu": gpu, "node": -1}
+    # a repo with no allocation, including any repo of a facility with no purchase here, has no normal leaf
+    # and is unlimited for preemptable jobs
     preempt = {"cpu": -1 if zero else cpus, "mem": mem, "gres/gpu": gpu, "node": -1}
+    preempt_check = AccountCheck(f"{leaf}^preemptable", preempt, {}, missing_ok=True, resets=("node",))
+    if zero:
+        # what the old (unlimited, or a tiny allocation's own node/mem/gpu), early (node=0) and current
+        # (cpu=0 hold) hierarchies leave on the leaf
+        left = {"cpu": (-1, 0), "mem": (-1, memory or -1), "gres/gpu": (-1, gpus or -1), "node": (-1, 0, nodes or -1)}
+        return [AccountCheck(leaf, {}, left, missing_ok=True, absent=True), preempt_check]
+    regular = {"cpu": cpus, "mem": mem, "gres/gpu": gpu, "node": -1}
     # the old ensure_repo.yaml set each limit on the shared leaf on its own, node included
-    legacy = {"cpu": (cpus or -1,), "mem": (memory or -1,), "gres/gpu": (gpus or -1,), "node": (nodes or -1,)}
-    return [
-        AccountCheck(leaf, regular, legacy, missing_ok=False, resets=("node",)),
-        AccountCheck(f"{leaf}^preemptable", preempt, {}, missing_ok=True, resets=("node",)),
-    ]
+    legacy = {"cpu": (cpus,), "mem": (memory or -1,), "gres/gpu": (gpus or -1,), "node": (nodes,)}
+    return [AccountCheck(leaf, regular, legacy, missing_ok=False, resets=("node",)), preempt_check]
 
 
 def partition_checks(facility: str, cluster: str, purchased: Optional[float], burst: Optional[float], per_node: Optional[dict]) -> list:
@@ -366,6 +372,15 @@ def partition_checks(facility: str, cluster: str, purchased: Optional[float], bu
 
 def compare(check: AccountCheck, current: list) -> list:
     """Every TRES on check.account (one entry in current per association) that differs from check.future."""
+    if check.absent:
+        if not current:
+            return []
+        # a limit no hierarchy would leave here was set by hand; removing the account would drop it unseen
+        diffs = [
+            Diff(check.account, tres, limits[tres], "removed", UNEXPECTED, "no allocation, but set by hand")
+            for limits in current for tres in SLURM_TRES if limits[tres] not in check.legacy.get(tres, ())
+        ]
+        return diffs or [Diff(check.account, "-", "exists", "removed", EXPECTED, "no allocation; the refire removes it")]
     if not current:
         if check.missing_ok:
             return [Diff(check.account, "-", MISSING, "created", EXPECTED, "the refire creates it")]
