@@ -207,6 +207,46 @@ class Registration(GraphQlSubscriber, AnsibleRunner):
         """Process a request. Subclasses must override this method."""
         raise NotImplementedError('do() is abstract')
 
+    USER_POSIX_GROUP_UPDATE_GQL = gql("""
+        mutation userPosixGroupUpdate($username: String!, $gidnumber: Int!, $present: Boolean!) {
+            userPosixGroupUpdate(username: $username, gidnumber: $gidnumber, present: $present) {
+                secondaryGidNumbers
+            }
+        }
+        """)
+
+    def record_posix_group_change(self, user: str, gid_number: int, present: bool) -> None:
+        """Tell coact that this user was just added to / removed from the posixGroup with gid_number,
+        so coact's stored gids reflect the playbook we just ran. Never raises: the request outcome is the
+        LDAP change itself, and the periodic posix sync reconciles anything missed here."""
+        try:
+            res = self.back_channel.execute(self.USER_POSIX_GROUP_UPDATE_GQL,
+                                            {'username': user, 'gidnumber': int(gid_number), 'present': present})
+            self.logger.info(f"recorded gid {gid_number} {'present' if present else 'absent'} for {user} in coact: {res['userPosixGroupUpdate']}")
+        except Exception as e:
+            self.logger.warning(f"could not record gid {gid_number} change for {user} in coact (periodic sync will reconcile): {e}")
+
+    USER_POSIX_INIT_GQL = gql("""
+        mutation userPosixInit($username: String!) {
+            userPosixInit(username: $username) {
+                primaryGid
+                secondaryGidNumbers
+                syncedAt
+            }
+        }
+        """)
+
+    def record_posix_init(self, user: str) -> None:
+        """Ask coact to initialise this newly provisioned user's posix data (primary gid, secondary gids) from
+        user-lookup, so the user is served from coact's users collection and kept current by the periodic sync.
+        Never raises: registration must still complete. On failure the user keeps working via coact's live
+        user-lookup fallback, but the periodic sync will not pick them up; an admin can re-run userPosixInit."""
+        try:
+            res = self.back_channel.execute(self.USER_POSIX_INIT_GQL, {'username': user})
+            self.logger.info(f"initialised posix data for {user} in coact: {res['userPosixInit']}")
+        except Exception as e:
+            self.logger.warning(f"could not initialise posix data for {user} in coact (re-run userPosixInit for this user to fix): {e}")
+
 
 # ============================================================================
 # Create the main coactd group
@@ -332,6 +372,10 @@ class UserRegistration(Registration):
         self.logger.debug(f"upserting user record {user_create_req}")
         user_id = self.back_channel.execute(self.USER_UPSERT_GQL, user_create_req)
         self.logger.debug(f"upserted user {user_id}")
+
+        # record the user's gids in coact now, before any repo membership change can $addToSet on top of them
+        if not self.dry_run:
+            self.record_posix_init(user)
 
         # configure home directory
         runner = self.run_playbook(playbook, user=user, user_facility=facility, tags='home', force_copy_skel=False)
@@ -996,6 +1040,8 @@ class RepoRegistration(Registration):
                 create=True,
                 dry_run=dry_run
             )
+            if not dry_run:
+                self.record_posix_group_change(user, gid_number, present=(action == 'present'))
 
         # finish up and mark record
         user_req = {
