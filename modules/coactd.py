@@ -508,7 +508,19 @@ class RepoRegistration(Registration):
             computepurchases {
               clustername
               purchased
+              burstNodes
             }
+          }
+        }
+    """)
+
+    CLUSTER_NODE_RESOURCES_CGL = gql("""
+        query clusters( $cluster: String! ) {
+          clusters(filter: {name: $cluster}) {
+            name
+            nodecpucount
+            nodememgb
+            nodegpucount
           }
         }
     """)
@@ -843,6 +855,29 @@ class RepoRegistration(Registration):
         self.logger.info(f'modified {resp}')
         return resp
 
+    def facility_compute_ceiling(self, facility: str, cluster: str) -> tuple:
+        """The facility's purchased node count and its absolute burst headroom on this cluster.
+
+        Burst is an absolute number of nodes the facility may run above its purchase.
+        Returns (None, 0.0) when the facility has no purchase on the cluster; there is
+        nothing to burst from in that case.
+        """
+        resp = self.back_channel.execute(self.FACILITY_CURRENT_COMPUTE_CGL, {'facility': facility})
+        for purchase in resp['facility'].get('computepurchases') or []:
+            if purchase.get('clustername', '').lower() == cluster.lower():
+                return purchase.get('purchased'), purchase.get('burstNodes') or 0.0
+        self.logger.warning(f"No compute purchase for {facility}@{cluster}; not applying any burst")
+        return None, 0.0
+
+    def cluster_node_resources(self, cluster: str) -> Optional[dict]:
+        """The cluster's per node cpus, memory (GB) and gpus; None when the cluster is unknown."""
+        resp = self.back_channel.execute(self.CLUSTER_NODE_RESOURCES_CGL, {'cluster': cluster})
+        for c in resp.get('clusters') or []:
+            if c.get('name', '').lower() == cluster.lower():
+                return c
+        self.logger.warning(f"No cluster definition for {cluster}; not applying a facility resource ceiling")
+        return None
+
     def get_feature(self, repo_obj, name):
         state = None
         feature = None
@@ -921,6 +956,28 @@ class RepoRegistration(Registration):
                 raise Exception("Could not determine allocation resources")
             r = resources.pop(0)
 
+            # node limits only apply facility wide on <fac>:_regular_@<part>, which may burst an absolute
+            # number of nodes above the purchase. cpu and memory there burst with it, gpus stay at the
+            # purchase, and each repo gets its raw allocation.
+            purchased, burst_nodes = self.facility_compute_ceiling(facility, cluster)
+
+            extravars = {}
+            if purchased and purchased > 0:
+                burst_ceiling = int(ceil(purchased + burst_nodes))
+                extravars['facility_nodes'] = burst_ceiling
+                per_node = self.cluster_node_resources(cluster)
+                if per_node:
+                    nodes = ceil(purchased)
+                    # zero means the cluster has none of that resource, so leave it unlimited
+                    extravars['facility_cpus'] = int(burst_ceiling * (per_node.get('nodecpucount') or 0)) or -1
+                    extravars['facility_memory'] = int(burst_ceiling * (per_node.get('nodememgb') or 0) * 1024) or -1
+                    extravars['facility_gpus'] = int(nodes * (per_node.get('nodegpucount') or 0)) or -1
+
+            self.logger.info(
+                f"{facility}:{repo}@{cluster} limits cpus={r['cpus']} memory={r['memory']}G gpus={r['gpus']}; "
+                f"facility purchased={purchased} burst={burst_nodes} ceiling {extravars or None}"
+            )
+
             # enact it through slurm
             ensure_repos = self.run_playbook(
                 'coact/slurm/ensure-repo.yaml',
@@ -932,7 +989,8 @@ class RepoRegistration(Registration):
                 nodes=int(ceil(r['nodes'])),
                 gpus=int(r['gpus']),
                 state='present',
-                dry_run=dry_run
+                dry_run=dry_run,
+                **extravars
             )
 
             # sync users

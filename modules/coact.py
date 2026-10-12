@@ -48,6 +48,8 @@ class OveragePoint(TypedDict):
     over: bool
     change: bool
     purchased_nodes: int
+    burst_nodes: float
+    effective_threshold: float
 
 class FacilityNodeUsage(TypedDict):
     facility: str
@@ -73,6 +75,14 @@ def datetime_converter(o: Any) -> Optional[str]:
     if isinstance(o, pdl.DateTime):
         return str(o.in_tz("UTC")).replace("+00:00", "Z")
     return None
+
+
+def parse_account(account: str, default_facility: str = "shared", default_repo: str = "default") -> tuple:
+    """Split a slurm account of the form <facility>:<repo>[@<partition>][^<qos>] into (facility, repo)."""
+    facility, sep, repo = account.partition(":")
+    if not sep or not repo:
+        return default_facility, default_repo
+    return facility, re.split(r"[@^]", repo, maxsplit=1)[0]
 
 
 def time_function(level="INFO"):
@@ -221,8 +231,11 @@ class SlurmRemapper:
             a = d["Partition"].split(",")[0]
             d["Partition"] = a
 
-        if "@" in d["Account"]:
-            d["Account"], _ = d["Account"].split("@")
+        if "^preemptable" in d["Account"]:
+            d["QOS"] = "preemptable"
+
+        if "@" in d["Account"] or "^" in d["Account"]:
+            d["Account"] = re.split(r"[@^]", d["Account"])[0]
 
         if d["QOS"] in ("Unknown",):
             d["QOS"] = "normal"
@@ -770,11 +783,8 @@ class SlurmImporter(GraphQlMixin):
             return resource_time, elapsed_secs
 
         d = {field: parts[idx] for field, idx in index.items()}
-        facility = default_facility
-        repo = default_repo
-        try:
-            facility, repo = d["Account"].split(":")
-        except Exception:
+        facility, repo = parse_account(d["Account"], default_facility, default_repo)
+        if (facility, repo) == (default_facility, default_repo) and ":" not in d["Account"]:
             logger.warning(f"could not determine facility and repo from {d['Account']}")
 
         startTs = parse_datetime(int(d["Start"]), force_tz=True)
@@ -804,14 +814,21 @@ class SlurmImporter(GraphQlMixin):
                 sys.exit(1)
             return None
 
-        qos = d["QOS"]
+        raw_qos = d.get("QOS", "")
+        clean_qos = raw_qos
         try:
-            a = qos.split("^")
+            a = raw_qos.split("^")
             b = a[1].split("@")
-            qos = b[0]
-        except:
-            pass
-        if qos not in ("scavenger", "preemptable", "normal"):
+            clean_qos = b[0]
+        except Exception:
+            clean_qos = raw_qos.split("@")[0].split("^")[0]
+
+        if "^preemptable" in d["Account"] or repo == "default" or clean_qos == "preemptable":
+            qos = "preemptable"
+        elif clean_qos in ("preemptable", "normal"):
+            qos = clean_qos
+        else:
+            qos = "normal"
             logger.warning(f"could not determine appropriate qos '{d['QOS']}': line {d}")
 
         out = {
@@ -866,7 +883,7 @@ def slurm_recalculate(ctx, date, verbose, username, password_file):
 @common_options
 @graphql_options
 @click.option('--windows', type=int, multiple=True, default=[15, 60, 10080, 43800], help='Time windows to collate overage calculations')
-@click.option('--threshold', type=float, default=100.0, help='Percentage at which to be considered over allocation')
+@click.option('--threshold', type=float, default=120.0, help='Percentage of the purchase at which to be considered over allocation')
 @click.option('--dry-run', is_flag=True, default=False, help='Do not actually enforce job holding')
 @click.option('--influxdb-url', default='http://localhost:8086', help='InfluxDB server URL (default: http://localhost:8086)')
 @click.option('--influxdb-username', default=None, help='InfluxDB username')
@@ -911,11 +928,7 @@ def overage(
     # Bulk send all points to InfluxDB using raw requests
     if influxdb_url is not None and len(data) > 0:
 
-        lines = []
-        for point in data:
-            line = f"allocation_usage,facility={point['facility']},cluster={point['cluster']},qos={point['qos']},window_mins={point['window_mins']} "
-            line += f"held={str(point['held']).lower()},over={str(point['over']).lower()},change={str(point['change']).lower()},percent_used={float(point['percent_used'])},purchased_nodes={float(point['purchased_nodes']) if point.get('purchased_nodes') is not None else 0.0}"
-            lines.append(line)
+        lines = [influx_line(point) for point in data]
 
         try:
             # Parse URL
@@ -938,6 +951,21 @@ def overage(
             logger.error(f"Failed to send data to InfluxDB: {e}")
 
 
+def influx_line(point: OveragePoint) -> str:
+    """Render one overage point as an InfluxDB line-protocol record."""
+    tags = f"allocation_usage,facility={point['facility']},cluster={point['cluster']},qos={point['qos']},window_mins={point['window_mins']}"
+    fields = ",".join([
+        f"held={str(point['held']).lower()}",
+        f"over={str(point['over']).lower()}",
+        f"change={str(point['change']).lower()}",
+        f"percent_used={float(point['percent_used'])}",
+        f"purchased_nodes={float(point['purchased_nodes']) if point.get('purchased_nodes') is not None else 0.0}",
+        f"burst_nodes={float(point.get('burst_nodes') or 0.0)}",
+        f"effective_threshold={float(point.get('effective_threshold') or 0.0)}",
+    ])
+    return f"{tags} {fields}"
+
+
 def toggle_job_blocking(point: OveragePoint, execute: bool = False) -> bool:
     """Enable/disable job blocking for overaged allocations."""
     template = Template("sacctmgr modify -i account name=$facility:_regular_@$cluster set GrpTRES=node=$nodes")
@@ -947,15 +975,17 @@ def toggle_job_blocking(point: OveragePoint, execute: bool = False) -> bool:
         # Blocking: set to 0
         nodes = 0
     else:
-        # Unblocking: use purchased nodes or fallback to unlimited
-        nodes = point.get('purchased_nodes', -1)
-        if nodes is None:
+        # Unblocking: restore the burst ceiling
+        purchased = point.get('purchased_nodes')
+        burst = point.get('burst_nodes') or 0
+        if purchased is None:
             nodes = -1
             logger.warning(f"No purchased node count available for {point['facility']}@{point['cluster']}, using unlimited")
-        elif nodes > 0:
-            logger.info(f"Restoring {nodes} nodes for {point['facility']}@{point['cluster']}")
+        elif purchased > 0:
+            nodes = purchased + burst
+            logger.info(f"Restoring {nodes} nodes ({purchased} purchased + {burst} burst) for {point['facility']}@{point['cluster']}")
         else:
-            logger.warning(f"Invalid node count {nodes} for {point['facility']}@{point['cluster']}, using unlimited")
+            logger.warning(f"Invalid node count {purchased} for {point['facility']}@{point['cluster']}, using unlimited")
             nodes = -1
 
     nodes = math.ceil(nodes)
@@ -1018,7 +1048,7 @@ class FacilityUsage(GraphQlMixin):
 
         query = "query usage {"
         query += "\n".join(all_windows) + ",\n"
-        query += "facilities(filter:{}) { name, computepurchases { clustername, purchased } },\n"
+        query += "facilities(filter:{}) { name, computepurchases { clustername, purchased, burstNodes } },\n"
         query += "repos { facility, allocs: currentComputeAllocations { cluster: clustername, start, end } }"
         query += "\n}"
 
@@ -1031,9 +1061,12 @@ class FacilityUsage(GraphQlMixin):
         """Format the raw data for processing."""
         # Build purchased nodes lookup from Facility.computepurchases
         fac_purchases = {}
+        fac_bursts = {}
         for fac in result.pop("facilities", []):
             for cp in fac.get("computepurchases") or []:
-                fac_purchases[(fac["name"].lower(), cp["clustername"].lower())] = cp["purchased"]
+                key = (fac["name"].lower(), cp["clustername"].lower())
+                fac_purchases[key] = cp["purchased"]
+                fac_bursts[key] = cp.get("burstNodes") or 0
 
         current = {}
         for k in result["repos"]:
@@ -1042,7 +1075,7 @@ class FacilityUsage(GraphQlMixin):
                 current[f] = {}
             for item in k["allocs"]:
                 c = item["cluster"].lower()
-                current[f][c] = {"held": None, "percentUsed": [], "purchasedNodes": fac_purchases.get((f, c))}
+                current[f][c] = {"held": None, "nodes": None, "percentUsed": [], "purchasedNodes": fac_purchases.get((f, c)), "burstNodes": fac_bursts.get((f, c), 0)}
         del result["repos"]
 
         for time, array in result.items():
@@ -1051,7 +1084,7 @@ class FacilityUsage(GraphQlMixin):
                 f = a["facility"].lower()
                 c = a["cluster"].lower()
                 logger.trace(f"Setting {f} {c} to {a['percentUsed']}")
-                current[f][c]["percentUsed"].append(int(a["percentUsed"]))
+                current[f][c]["percentUsed"].append(float(a["percentUsed"]))
 
         logger.trace(f"Overages: {current}")
 
@@ -1074,6 +1107,7 @@ class FacilityUsage(GraphQlMixin):
                         f = d["f"]
                         c = d["c"]
                         current[f][c]["held"] = holding
+                        current[f][c]["nodes"] = int(this[1]) if this[1] else -1
                         logger.trace(f"Set {f}@{c} to {holding}")
                 except Exception:
                     pass
@@ -1090,18 +1124,27 @@ class FacilityUsage(GraphQlMixin):
             for clust, m in d.items():
                 percentages = m["percentUsed"]
                 purchased_nodes = m.get("purchasedNodes")
-                logger.trace(f"Sublooping {clust}, {percentages}, purchased_nodes: {purchased_nodes}")
+                burst_nodes = m.get("burstNodes") or 0
+                # percentUsed is measured against the purchase, and burst cpu and memory let it pass 100%.
+                # The threshold does not scale with the facility's burst yet; --threshold covers it for now.
+                effective_threshold = threshold
+                logger.trace(f"Sublooping {clust}, {percentages}, purchased_nodes: {purchased_nodes}, burst_nodes: {burst_nodes}")
                 over = False
                 for p in percentages:
-                    if p >= threshold:
+                    if p >= effective_threshold:
                         over = True
-                values = ",".join([f"{i:>3}" for i in percentages])
+                values = ",".join([f"{i:>6.1f}" for i in percentages])
                 logger.trace(f"Looking at {fac}@{clust} over: {over}, {m}")
                 change = not m["held"] == over
                 if m["held"] is None:
                     change = False
+                # an unheld partition should sit at the burst ceiling; re-apply it when it was never
+                # set or the purchase changed since
+                if m["held"] is False and not over and purchased_nodes and purchased_nodes > 0:
+                    if m.get("nodes") != math.ceil(purchased_nodes + burst_nodes):
+                        change = True
                 if len(percentages) > 0:
-                    logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1} nodes={purchased_nodes or 'N/A':>5}   {values}")
+                    logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1} nodes={purchased_nodes or 'N/A':>5} burst={burst_nodes:>5} thresh={effective_threshold:>6.1f}   {values}")
 
                     # Yield a point for each window
                     for idx, pct in enumerate(percentages):
@@ -1116,7 +1159,9 @@ class FacilityUsage(GraphQlMixin):
                             held=bool(m["held"]) if m["held"] is not None else None,
                             over=bool(over),
                             change=bool(change),
-                            purchased_nodes=purchased_nodes
+                            purchased_nodes=purchased_nodes,
+                            burst_nodes=burst_nodes,
+                            effective_threshold=effective_threshold
                         )
 
 
