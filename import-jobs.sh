@@ -30,12 +30,6 @@ $PYTHON_BIN ./sdf_click.py coact slurmdump --date $DATE \
     | tee ../slurm-job-remapped/$DATE \
     | $PYTHON_BIN ./sdf_click.py coact slurmimport --password-file $PASSWORD_FILE --output=upload >/dev/null
 
-# just for 2023 imports
-#cat ../slurm-job-remapped/$DATE | ./sdf.py coact slurmimport --password-file $PASSWORD_FILE --output=upload >/dev/null
-
-# don't pull data from slurm
-#cat ../slurm-job-history/$DATE | ./sdf.py coact slurmremap | tee ../slurm-job-remapped/$DATE | ./sdf.py coact slurmimport --password-file $PASSWORD_FILE --output=upload >/dev/null
-
 ###
 # recalculate summaries
 ###

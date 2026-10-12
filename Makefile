@@ -6,7 +6,6 @@ VAULT_SECRET_PATH ?= secret/tid/coact
 
 secrets:
 	mkdir etc/.secrets/ -p
-	#set -e; for i in ldap_binddn ldap_bindpw; do vault kv get --field=$$i $(VAULT_SECRET_PATH) > etc/.secrets/$$i ; done
 	set -e; for i in password; do vault kv get --field=$$i $(VAULT_SECRET_PATH)/service-account > etc/.secrets/$$i ; done
 	chmod -R go-rwx etc/.secrets
 
@@ -25,7 +24,6 @@ pip:
 # OS level dependencies
 deps:
 	dnf groupinstall -y "Development Tools"
-	dnf install -y python36-devel openldap-devel
 
 # run this to configure the dev environment
 environment: venv pip
