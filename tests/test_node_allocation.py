@@ -6,8 +6,16 @@ import subprocess
 from unittest.mock import Mock, patch
 
 import pytest
+from click.testing import CliRunner
 from graphql import print_ast
-from modules.coact import FacilityUsage, OveragePoint, influx_line, toggle_job_blocking
+from modules.coact import (
+    OVERAGE_WINDOW_THRESHOLDS,
+    FacilityUsage,
+    OveragePoint,
+    influx_line,
+    overage,
+    toggle_job_blocking,
+)
 
 
 def create_graphql_response(usage_percent: float, nodes: int, burst_nodes: float = 0, windows=None):
@@ -53,8 +61,7 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
     facility_usage = FacilityUsage(
         username="test_user",
         password_file="/tmp/test",
-        windows=[60],
-        threshold=100.0,
+        thresholds={60: 100.0},
         dry_run=False
     )
     
@@ -88,7 +95,7 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
         
         # Verify initial state: facility is not held and has nodes from GraphQL
         assert result[facility][cluster]["held"] is False
-        assert result[facility][cluster]["percentUsed"] == [85.0]
+        assert result[facility][cluster]["percentUsed"] == {60: 85.0}
         assert result[facility][cluster]["purchasedNodes"] == purchased_nodes
     
     # === PHASE 2: Facility Goes Over Quota ===
@@ -103,7 +110,7 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
         data_over = facility_usage.format_data(graphql_response_over)
     
     # Now get the OveragePoint through overage()
-    overage_points = list(facility_usage.overaged(data_over, threshold=100.0))
+    overage_points = list(facility_usage.overaged(data_over))
     assert len(overage_points) == 1, "one window configured, so one point per facility/cluster"
     
     # Verify the OveragePoint from overage() has purchasedNodes populated
@@ -137,7 +144,7 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
         
         # Verify blocked state: held is True (GrpNodes=0), but purchasedNodes preserved from GraphQL
         assert result[facility][cluster]["held"] is True
-        assert result[facility][cluster]["percentUsed"] == [105.0]
+        assert result[facility][cluster]["percentUsed"] == {60: 105.0}
         assert result[facility][cluster]["purchasedNodes"] == purchased_nodes  # From GraphQL
     
     # === PHASE 3: Facility Recovers Below Quota ===
@@ -154,7 +161,7 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
         data_recovered = facility_usage.format_data(graphql_response_recovered)
     
     # Get the recovery OveragePoint through overage()
-    recovery_points = list(facility_usage.overaged(data_recovered, threshold=100.0))
+    recovery_points = list(facility_usage.overaged(data_recovered))
     assert len(recovery_points) == 1, "one window configured, so one point per facility/cluster"
     
     recovery_point = recovery_points[0]
@@ -189,7 +196,7 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
         
         # Verify recovered state: not held and purchasedNodes from GraphQL
         assert result[facility][cluster]["held"] is False
-        assert result[facility][cluster]["percentUsed"] == [95.0]
+        assert result[facility][cluster]["percentUsed"] == {60: 95.0}
         assert result[facility][cluster]["purchasedNodes"] == purchased_nodes
 
 
@@ -205,12 +212,11 @@ BURST = 26
 # 256 purchased + 26 burst = 282 nodes
 
 
-def make_usage(windows=None, threshold=100.0):
+def make_usage(windows=None, threshold=100.0, thresholds=None):
     return FacilityUsage(
         username="test_user",
         password_file="/tmp/test",
-        windows=windows or [60],
-        threshold=threshold,
+        thresholds=thresholds or {w: threshold for w in (windows or [60])},
         dry_run=False,
     )
 
@@ -230,7 +236,7 @@ def single_point(usage_percent, burst_nodes=BURST, purchased=PURCHASED, held_grp
         create_graphql_response(usage_percent, purchased, burst_nodes=burst_nodes),
         grpnodes=held_grpnodes,
     )
-    points = list(usage.overaged(data, threshold=100.0))
+    points = list(usage.overaged(data))
     assert len(points) == 1
     return points[0]
 
@@ -253,7 +259,7 @@ def written_node_count(point, execute=True):
 def make_point(**overrides):
     point = OveragePoint(
         facility="lcls", cluster="ada", qos="regular", window_mins=60,
-        percentages=[95.0], percent_used=95.0, held=True, over=False, change=True,
+        percentages={60: 95.0}, percent_used=95.0, held=True, over=False, window_over=False, change=True,
         purchased_nodes=PURCHASED, burst_nodes=BURST, effective_threshold=100.0,
     )
     point.update(overrides)
@@ -290,7 +296,7 @@ class TestBurstDoesNotRaiseTheThreshold:
         data = format_with_sacctmgr(
             usage, create_graphql_response(105, PURCHASED, burst_nodes=BURST, windows=windows)
         )
-        points = list(usage.overaged(data, threshold=100.0))
+        points = list(usage.overaged(data))
         assert [p["window_mins"] for p in points] == windows
         assert all(p["over"] is True for p in points)
         assert all(p["effective_threshold"] == 100.0 for p in points)
@@ -298,7 +304,7 @@ class TestBurstDoesNotRaiseTheThreshold:
     def test_a_non_default_threshold_is_used_as_is(self):
         usage = make_usage(threshold=90.0)
         data = format_with_sacctmgr(usage, create_graphql_response(95, PURCHASED, burst_nodes=BURST))
-        point = list(usage.overaged(data, threshold=90.0))[0]
+        point = list(usage.overaged(data))[0]
         assert point["effective_threshold"] == 90.0
         assert point["over"] is True
 
@@ -307,7 +313,7 @@ class TestBurstDoesNotRaiseTheThreshold:
         response = create_graphql_response(105, PURCHASED, burst_nodes=BURST)
         response["facilities"] = [{"name": "LCLS", "computepurchases": []}]
         data = format_with_sacctmgr(usage, response)
-        point = list(usage.overaged(data, threshold=100.0))[0]
+        point = list(usage.overaged(data))[0]
         assert point["purchased_nodes"] is None
         assert point["effective_threshold"] == 100.0
         assert point["over"] is True
@@ -319,7 +325,7 @@ class TestBurstDoesNotRaiseTheThreshold:
         for purchase in response["facilities"][0]["computepurchases"]:
             del purchase["burstNodes"]
         data = format_with_sacctmgr(usage, response)
-        point = list(usage.overaged(data, threshold=100.0))[0]
+        point = list(usage.overaged(data))[0]
         assert point["burst_nodes"] == 0
         assert point["over"] is True
 
@@ -408,6 +414,10 @@ class TestInfluxLine:
         fields = influx_line(make_point(held=True, over=False, change=True)).split(" ", 1)[1]
         assert "held=true" in fields and "over=false" in fields and "change=true" in fields
 
+    def test_the_window_verdict_is_emitted_alongside_the_overall_one(self):
+        fields = influx_line(make_point(over=True, window_over=False)).split(" ", 1)[1].split(",")
+        assert "over=true" in fields and "window_over=false" in fields
+
 
 class TestUsageQuery:
     """The daemon's own GraphQL query text, which the mocked-response tests cannot see."""
@@ -435,8 +445,69 @@ class TestUsageQuery:
             assert f"pastMinutes: {minutes}" in query
 
 
-def test_the_overage_command_holds_at_120_percent_by_default():
-    # cpu and memory burst above the purchase, so the hold sits above 100% until it accounts for burst
-    from modules.coact import overage
-    threshold = next(p for p in overage.params if p.name == "threshold")
-    assert threshold.default == 120.0
+# --------------------------------------------------------------------------------
+# Per-window thresholds: each rolling window is held at its own percent of the purchase,
+# set in OVERAGE_WINDOW_THRESHOLDS.
+# --------------------------------------------------------------------------------
+
+def window_response(percent_by_window):
+    """A usage response with a different percentUsed per window; a window mapped to None has no jobs."""
+    response = create_graphql_response(0, PURCHASED, burst_nodes=BURST)
+    del response["_000060"]
+    for w, pct in percent_by_window.items():
+        response[f"_{w:0>6}"] = [] if pct is None else [{"facility": "LCLS", "cluster": "ada", "percentUsed": pct}]
+    return response
+
+
+def window_points(thresholds, percent_by_window):
+    usage = make_usage(thresholds=thresholds)
+    data = format_with_sacctmgr(usage, window_response(percent_by_window))
+    return {p["window_mins"]: p for p in usage.overaged(data)}
+
+
+class TestPerWindowThresholds:
+
+    THRESHOLDS = {5: 300.0, 60: 200.0, 1440: 120.0}
+
+    def test_a_short_spike_under_its_own_threshold_is_not_an_overage(self):
+        points = window_points(self.THRESHOLDS, {5: 250.0, 60: 150.0, 1440: 110.0})
+        assert not any(p["over"] for p in points.values())
+        assert not any(p["window_over"] for p in points.values())
+
+    def test_sustained_use_over_the_long_threshold_is_an_overage(self):
+        points = window_points(self.THRESHOLDS, {5: 130.0, 60: 130.0, 1440: 125.0})
+        assert all(p["over"] for p in points.values())
+        assert {w: p["window_over"] for w, p in points.items()} == {5: False, 60: False, 1440: True}
+
+    def test_each_point_reports_its_own_window_threshold(self):
+        points = window_points(self.THRESHOLDS, {5: 10.0, 60: 10.0, 1440: 10.0})
+        assert {w: p["effective_threshold"] for w, p in points.items()} == self.THRESHOLDS
+
+    def test_a_window_without_jobs_does_not_shift_the_others(self):
+        # with a positional list the 1440 figure would be judged against the 60 threshold
+        points = window_points(self.THRESHOLDS, {5: 10.0, 60: None, 1440: 150.0})
+        assert set(points) == {5, 1440}
+        assert points[1440]["percent_used"] == 150.0
+        assert points[1440]["effective_threshold"] == 120.0
+        assert points[1440]["window_over"] is True
+
+    def test_usage_for_a_cluster_without_a_current_allocation_is_skipped(self):
+        usage = make_usage()
+        response = create_graphql_response(150, PURCHASED)
+        response["_000060"].append({"facility": "LCLS", "cluster": "roma", "percentUsed": 150})
+        response["_000060"].append({"facility": "CryoEM", "cluster": "ada", "percentUsed": 150})
+        data = format_with_sacctmgr(usage, response)
+        assert set(data) == {"lcls"} and set(data["lcls"]) == {"ada"}
+
+
+class TestOverageCommandWindows:
+    def test_every_window_is_held_at_120_percent(self):
+        # cpu and memory burst above the purchase, so the hold sits above 100% until it accounts for burst
+        assert sorted(OVERAGE_WINDOW_THRESHOLDS) == [5, 15, 60, 180, 1440]
+        assert set(OVERAGE_WINDOW_THRESHOLDS.values()) == {120.0}
+
+    @pytest.mark.parametrize("flag", ["--windows", "--threshold", "--config"])
+    def test_windows_and_thresholds_are_not_cli_options(self, flag):
+        result = CliRunner().invoke(overage, [flag, "60"], obj={})
+        assert result.exit_code != 0
+        assert "No such option" in result.output
