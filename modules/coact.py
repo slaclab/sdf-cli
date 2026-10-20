@@ -882,10 +882,10 @@ def slurm_recalculate(ctx, date, verbose, username, password_file):
 # Rolling window (minutes) -> percent of purchased capacity at which a facility/cluster is held.
 # A facility/cluster is held when ANY window is at or above its threshold.
 OVERAGE_WINDOW_THRESHOLDS: dict[int, float] = {
-    5: 120.0,
-    15: 120.0,
-    60: 120.0,
-    180: 120.0,
+    5: 200.0,
+    15: 175.0,
+    60: 150.0,
+    180: 135.0,
     1440: 120.0,
 }
 
