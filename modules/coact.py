@@ -925,10 +925,14 @@ def overage(
 
     # iterate and collect data, initiate toggle as needed
     data = []
+    toggled = set()
     for point in usages.get(date):
         data.append(point)
-        # Toggle job blocking only if held state needs to change
-        if point['held'] is not None and point['change']:
+        # Toggle job blocking only if held state needs to change; every window's point
+        # carries the same verdict, so act once per facility/cluster
+        key = (point['facility'], point['cluster'])
+        if point['held'] is not None and point['change'] and key not in toggled:
+            toggled.add(key)
             toggle_job_blocking(execute=not dry_run, point=point)
 
     # Bulk send all points to InfluxDB using raw requests
@@ -960,8 +964,9 @@ def overage(
 def influx_line(point: OveragePoint) -> str:
     """Render one overage point as an InfluxDB line-protocol record."""
     tags = f"allocation_usage,facility={point['facility']},cluster={point['cluster']},qos={point['qos']},window_mins={point['window_mins']}"
-    fields = ",".join([
-        f"held={str(point['held']).lower()}",
+    # held is None when sacctmgr has no association; line protocol has no null, so leave it out
+    held = [] if point['held'] is None else [f"held={str(point['held']).lower()}"]
+    fields = ",".join(held + [
         f"over={str(point['over']).lower()}",
         f"window_over={str(point['window_over']).lower()}",
         f"change={str(point['change']).lower()}",
@@ -1134,7 +1139,9 @@ class FacilityUsage(GraphQlMixin):
         for fac, d in data.items():
             logger.trace(f"Looping facility {fac}...")
             for clust, m in d.items():
-                percentages = m["percentUsed"]
+                # facilityRecentComputeUsage omits a facility with no finished jobs in a window, which
+                # is 0% usage; without this, an idle held facility would never be released
+                percentages = {w: m["percentUsed"].get(w, 0.0) for w in self.windows}
                 purchased_nodes = m.get("purchasedNodes")
                 burst_nodes = m.get("burstNodes") or 0
                 # percentUsed is measured against the purchase, and burst cpu and memory let it pass 100%.

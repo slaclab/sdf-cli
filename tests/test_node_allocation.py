@@ -212,11 +212,11 @@ BURST = 26
 # 256 purchased + 26 burst = 282 nodes
 
 
-def make_usage(windows=None, threshold=100.0, thresholds=None):
+def make_usage(thresholds=None):
     return FacilityUsage(
         username="test_user",
         password_file="/tmp/test",
-        thresholds=thresholds or {w: threshold for w in (windows or [60])},
+        thresholds=thresholds or {60: 100.0},
         dry_run=False,
     )
 
@@ -292,7 +292,7 @@ class TestBurstDoesNotRaiseTheThreshold:
     def test_the_same_verdict_is_reported_for_every_window(self):
         # `over` is computed per facility/cluster and stamped onto each window point
         windows = [5, 15, 60, 180, 1440]
-        usage = make_usage(windows=windows)
+        usage = make_usage({w: 100.0 for w in windows})
         data = format_with_sacctmgr(
             usage, create_graphql_response(105, PURCHASED, burst_nodes=BURST, windows=windows)
         )
@@ -302,7 +302,7 @@ class TestBurstDoesNotRaiseTheThreshold:
         assert all(p["effective_threshold"] == 100.0 for p in points)
 
     def test_a_non_default_threshold_is_used_as_is(self):
-        usage = make_usage(threshold=90.0)
+        usage = make_usage({60: 90.0})
         data = format_with_sacctmgr(usage, create_graphql_response(95, PURCHASED, burst_nodes=BURST))
         point = list(usage.overaged(data))[0]
         assert point["effective_threshold"] == 90.0
@@ -414,6 +414,12 @@ class TestInfluxLine:
         fields = influx_line(make_point(held=True, over=False, change=True)).split(" ", 1)[1]
         assert "held=true" in fields and "over=false" in fields and "change=true" in fields
 
+    def test_an_unknown_hold_state_is_left_out_rather_than_written_as_none(self):
+        # line protocol has no null; held=none would get the whole bulk write rejected
+        fields = influx_line(make_point(held=None)).split(" ", 1)[1].split(",")
+        assert not any(f.startswith("held=") for f in fields)
+        assert "over=false" in fields
+
     def test_the_window_verdict_is_emitted_alongside_the_overall_one(self):
         fields = influx_line(make_point(over=True, window_over=False)).split(" ", 1)[1].split(",")
         assert "over=true" in fields and "window_over=false" in fields
@@ -440,7 +446,7 @@ class TestUsageQuery:
         assert "purchased" in query
 
     def test_one_usage_alias_is_requested_per_configured_window(self):
-        query = self._executed_query(make_usage(windows=[5, 60, 1440]))
+        query = self._executed_query(make_usage({5: 100.0, 60: 100.0, 1440: 100.0}))
         for minutes in (5, 60, 1440):
             assert f"pastMinutes: {minutes}" in query
 
@@ -460,7 +466,7 @@ def window_response(percent_by_window):
 
 
 def window_points(thresholds, percent_by_window):
-    usage = make_usage(thresholds=thresholds)
+    usage = make_usage(thresholds)
     data = format_with_sacctmgr(usage, window_response(percent_by_window))
     return {p["window_mins"]: p for p in usage.overaged(data)}
 
@@ -486,10 +492,21 @@ class TestPerWindowThresholds:
     def test_a_window_without_jobs_does_not_shift_the_others(self):
         # with a positional list the 1440 figure would be judged against the 60 threshold
         points = window_points(self.THRESHOLDS, {5: 10.0, 60: None, 1440: 150.0})
-        assert set(points) == {5, 1440}
+        assert set(points) == {5, 60, 1440}
+        assert points[60]["percent_used"] == 0.0
+        assert points[60]["window_over"] is False
         assert points[1440]["percent_used"] == 150.0
         assert points[1440]["effective_threshold"] == 120.0
         assert points[1440]["window_over"] is True
+
+    def test_a_held_facility_with_no_jobs_in_any_window_is_released(self):
+        # the usage query returns nothing for an idle facility; that is 0%, not "no data"
+        usage = make_usage(self.THRESHOLDS)
+        data = format_with_sacctmgr(usage, window_response({5: None, 60: None, 1440: None}), grpnodes=b"0")
+        points = list(usage.overaged(data))
+        assert [p["percent_used"] for p in points] == [0.0, 0.0, 0.0]
+        assert all((p["held"], p["over"], p["change"]) == (True, False, True) for p in points)
+        assert written_node_count(points[0]) == "282"
 
     def test_usage_for_a_cluster_without_a_current_allocation_is_skipped(self):
         usage = make_usage()
@@ -506,8 +523,21 @@ class TestOverageCommandWindows:
         assert sorted(OVERAGE_WINDOW_THRESHOLDS) == [5, 15, 60, 180, 1440]
         assert set(OVERAGE_WINDOW_THRESHOLDS.values()) == {120.0}
 
-    @pytest.mark.parametrize("flag", ["--windows", "--threshold", "--config"])
+    @pytest.mark.parametrize("flag", ["--windows", "--threshold"])
     def test_windows_and_thresholds_are_not_cli_options(self, flag):
         result = CliRunner().invoke(overage, [flag, "60"], obj={})
         assert result.exit_code != 0
         assert "No such option" in result.output
+
+    def test_a_change_is_enacted_once_per_facility_cluster_not_once_per_window(self, tmp_path):
+        password_file = tmp_path / "password"
+        password_file.write_text("x")
+        points = [make_point(window_mins=w, held=False, over=True) for w in (5, 60, 1440)]
+        points.append(make_point(cluster="roma", held=False, over=True))
+        with patch("modules.coact.FacilityUsage.get", return_value=iter(points)), \
+                patch("modules.coact.toggle_job_blocking") as toggle, \
+                patch("modules.coact.requests.post"):
+            result = CliRunner().invoke(overage, ["--dry-run", "--password-file", str(password_file)], obj={})
+        assert result.exit_code == 0, result.output
+        assert [c.kwargs["point"]["cluster"] for c in toggle.call_args_list] == ["ada", "roma"]
+        assert all(c.kwargs["execute"] is False for c in toggle.call_args_list)
