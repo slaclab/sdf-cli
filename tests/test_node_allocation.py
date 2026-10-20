@@ -518,10 +518,22 @@ class TestPerWindowThresholds:
 
 
 class TestOverageCommandWindows:
-    def test_every_window_is_held_at_120_percent(self):
-        # cpu and memory burst above the purchase, so the hold sits above 100% until it accounts for burst
-        assert sorted(OVERAGE_WINDOW_THRESHOLDS) == [5, 15, 60, 180, 1440]
-        assert set(OVERAGE_WINDOW_THRESHOLDS.values()) == {120.0}
+    # the thresholds are tuned in place, so these check their shape and wiring, not their values
+
+    def test_every_window_is_a_positive_number_of_minutes_with_a_positive_threshold(self):
+        assert OVERAGE_WINDOW_THRESHOLDS
+        for window, threshold in OVERAGE_WINDOW_THRESHOLDS.items():
+            assert isinstance(window, int) and not isinstance(window, bool) and window > 0
+            assert isinstance(threshold, float) and threshold > 0
+
+    def test_the_command_checks_the_configured_windows(self, tmp_path):
+        password_file = tmp_path / "password"
+        password_file.write_text("x")
+        with patch("modules.coact.FacilityUsage") as facility_usage:
+            facility_usage.return_value.get.return_value = iter([])
+            result = CliRunner().invoke(overage, ["--dry-run", "--password-file", str(password_file)], obj={})
+        assert result.exit_code == 0, result.output
+        assert facility_usage.call_args.kwargs["thresholds"] == OVERAGE_WINDOW_THRESHOLDS
 
     @pytest.mark.parametrize("flag", ["--windows", "--threshold"])
     def test_windows_and_thresholds_are_not_cli_options(self, flag):
