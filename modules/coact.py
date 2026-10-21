@@ -6,7 +6,7 @@ click decorators; sdf_click.py attaches it to the root CLI.
 """
 
 from loguru import logger
-from typing import Any, Iterator, Optional, Sequence, TypedDict
+from typing import Any, Iterator, Optional, TypedDict
 from functools import wraps
 from string import Template
 import re
@@ -42,10 +42,11 @@ class OveragePoint(TypedDict):
     cluster: str
     qos: str
     window_mins: int
-    percentages: Sequence[float]
+    percentages: dict[int, float]
     percent_used: float
     held: bool
     over: bool
+    window_over: bool
     change: bool
     purchased_nodes: int
     burst_nodes: float
@@ -878,12 +879,20 @@ def slurm_recalculate(ctx, date, verbose, username, password_file):
 # Overage Command
 # ============================================================================
 
+# Rolling window (minutes) -> percent of purchased capacity at which a facility/cluster is held.
+# A facility/cluster is held when ANY window is at or above its threshold.
+OVERAGE_WINDOW_THRESHOLDS: dict[int, float] = {
+    5: 200.0,
+    15: 175.0,
+    60: 150.0,
+    180: 135.0,
+    1440: 120.0,
+}
+
 @coact.command(name='overage')
 @click.option('--date', default=lambda: pdl.now().format('YYYY-MM-DD'), help='Recalculate jobs from this date (default: today)')
 @common_options
 @graphql_options
-@click.option('--windows', type=int, multiple=True, default=[15, 60, 10080, 43800], help='Time windows to collate overage calculations')
-@click.option('--threshold', type=float, default=120.0, help='Percentage of the purchase at which to be considered over allocation')
 @click.option('--dry-run', is_flag=True, default=False, help='Do not actually enforce job holding')
 @click.option('--influxdb-url', default='http://localhost:8086', help='InfluxDB server URL (default: http://localhost:8086)')
 @click.option('--influxdb-username', default=None, help='InfluxDB username')
@@ -896,8 +905,6 @@ def overage(
         verbose: int,
         username: str,
         password_file: str,
-        windows: Sequence[int],
-        threshold: float,
         dry_run: bool,
         influxdb_url: str,
         influxdb_username: str,
@@ -912,17 +919,20 @@ def overage(
     usages = FacilityUsage(
         username=username,
         password_file=password_file,
-        windows=list(windows),
-        threshold=threshold,
+        thresholds=OVERAGE_WINDOW_THRESHOLDS,
         dry_run=dry_run
     )
 
     # iterate and collect data, initiate toggle as needed
     data = []
+    toggled = set()
     for point in usages.get(date):
         data.append(point)
-        # Toggle job blocking only if held state needs to change
-        if point['held'] is not None and point['change']:
+        # Toggle job blocking only if held state needs to change; every window's point
+        # carries the same verdict, so act once per facility/cluster
+        key = (point['facility'], point['cluster'])
+        if point['held'] is not None and point['change'] and key not in toggled:
+            toggled.add(key)
             toggle_job_blocking(execute=not dry_run, point=point)
 
     # Bulk send all points to InfluxDB using raw requests
@@ -954,9 +964,11 @@ def overage(
 def influx_line(point: OveragePoint) -> str:
     """Render one overage point as an InfluxDB line-protocol record."""
     tags = f"allocation_usage,facility={point['facility']},cluster={point['cluster']},qos={point['qos']},window_mins={point['window_mins']}"
-    fields = ",".join([
-        f"held={str(point['held']).lower()}",
+    # held is None when sacctmgr has no association; line protocol has no null, so leave it out
+    held = [] if point['held'] is None else [f"held={str(point['held']).lower()}"]
+    fields = ",".join(held + [
         f"over={str(point['over']).lower()}",
+        f"window_over={str(point['window_over']).lower()}",
         f"change={str(point['change']).lower()}",
         f"percent_used={float(point['percent_used'])}",
         f"purchased_nodes={float(point['purchased_nodes']) if point.get('purchased_nodes') is not None else 0.0}",
@@ -1016,11 +1028,11 @@ def toggle_job_blocking(point: OveragePoint, execute: bool = False) -> bool:
 class FacilityUsage(GraphQlMixin):
     """Handles facility usage calculations and enforcement."""
 
-    def __init__(self, username: str, password_file: str, windows: list, threshold: float, dry_run: bool):
+    def __init__(self, username: str, password_file: str, thresholds: dict[int, float], dry_run: bool):
         self.username = username
         self.password_file = password_file
-        self.windows = windows
-        self.threshold = threshold
+        self.thresholds = thresholds
+        self.windows = sorted(thresholds)
         self.dry_run = dry_run
 
     def get(self, date: str) -> Iterator[OveragePoint]:
@@ -1032,7 +1044,7 @@ class FacilityUsage(GraphQlMixin):
         )
         logger.debug(f"Fetching usage data for date: {date}")
         data = self.get_data()
-        for point in self.overaged(data, threshold=self.threshold):
+        for point in self.overaged(data):
             yield point
 
     def get_data(self) -> dict:
@@ -1075,16 +1087,21 @@ class FacilityUsage(GraphQlMixin):
                 current[f] = {}
             for item in k["allocs"]:
                 c = item["cluster"].lower()
-                current[f][c] = {"held": None, "nodes": None, "percentUsed": [], "purchasedNodes": fac_purchases.get((f, c)), "burstNodes": fac_bursts.get((f, c), 0)}
+                current[f][c] = {"held": None, "nodes": None, "percentUsed": {}, "purchasedNodes": fac_purchases.get((f, c)), "burstNodes": fac_bursts.get((f, c), 0)}
         del result["repos"]
 
-        for time, array in result.items():
-            logger.trace(f"Looking at time {time} with {array}")
+        # key usage by window so a window with no jobs for a facility doesn't shift the others
+        for key, array in result.items():
+            window = int(key.lstrip("_"))
+            logger.trace(f"Looking at window {window} with {array}")
             for a in array:
                 f = a["facility"].lower()
                 c = a["cluster"].lower()
-                logger.trace(f"Setting {f} {c} to {a['percentUsed']}")
-                current[f][c]["percentUsed"].append(float(a["percentUsed"]))
+                if c not in current.get(f, {}):
+                    logger.debug(f"Skipping usage for {f}@{c}, which has no current allocation")
+                    continue
+                logger.trace(f"Setting {f} {c} window {window} to {a['percentUsed']}")
+                current[f][c]["percentUsed"][window] = float(a["percentUsed"])
 
         logger.trace(f"Overages: {current}")
 
@@ -1116,24 +1133,24 @@ class FacilityUsage(GraphQlMixin):
 
         return current
 
-    def overaged(self, data: dict, threshold: float = 100.0) -> Iterator[OveragePoint]:
+    def overaged(self, data: dict) -> Iterator[OveragePoint]:
         """Check which allocations are over threshold and yield point objects."""
-        logger.trace(f"Determining overages with threshold {threshold}%...")
+        logger.trace(f"Determining overages with thresholds {self.thresholds}...")
         for fac, d in data.items():
             logger.trace(f"Looping facility {fac}...")
             for clust, m in d.items():
-                percentages = m["percentUsed"]
+                # facilityRecentComputeUsage omits a facility with no finished jobs in a window, which
+                # is 0% usage; without this, an idle held facility would never be released
+                percentages = {w: m["percentUsed"].get(w, 0.0) for w in self.windows}
                 purchased_nodes = m.get("purchasedNodes")
                 burst_nodes = m.get("burstNodes") or 0
                 # percentUsed is measured against the purchase, and burst cpu and memory let it pass 100%.
-                # The threshold does not scale with the facility's burst yet; --threshold covers it for now.
-                effective_threshold = threshold
+                # The thresholds do not scale with the facility's burst yet; the per-window values in
+                # OVERAGE_WINDOW_THRESHOLDS cover it for now.
                 logger.trace(f"Sublooping {clust}, {percentages}, purchased_nodes: {purchased_nodes}, burst_nodes: {burst_nodes}")
-                over = False
-                for p in percentages:
-                    if p >= effective_threshold:
-                        over = True
-                values = ",".join([f"{i:>6.1f}" for i in percentages])
+                window_over = {w: pct >= self.thresholds[w] for w, pct in percentages.items()}
+                over = any(window_over.values())
+                values = ",".join([f"{w}m={pct:.1f}/{self.thresholds[w]:.0f}" for w, pct in sorted(percentages.items())])
                 logger.trace(f"Looking at {fac}@{clust} over: {over}, {m}")
                 change = not m["held"] == over
                 if m["held"] is None:
@@ -1144,24 +1161,24 @@ class FacilityUsage(GraphQlMixin):
                     if m.get("nodes") != math.ceil(purchased_nodes + burst_nodes):
                         change = True
                 if len(percentages) > 0:
-                    logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1} nodes={purchased_nodes or 'N/A':>5} burst={burst_nodes:>5} thresh={effective_threshold:>6.1f}   {values}")
+                    logger.info(f"{fac:16} {clust:12} qos=regular held={m['held'] if m['held'] is not None else '-':1} over={over:1} change={change:1} nodes={purchased_nodes or 'N/A':>5} burst={burst_nodes:>5}   {values}")
 
                     # Yield a point for each window
-                    for idx, pct in enumerate(percentages):
-                        window_duration = self.windows[idx] if idx < len(self.windows) else idx
+                    for window, pct in sorted(percentages.items()):
                         yield OveragePoint(
                             facility=fac.lower(),
                             cluster=clust.lower(),
                             qos="regular",
-                            window_mins=window_duration,
+                            window_mins=window,
                             percentages=percentages,
                             percent_used=pct,
                             held=bool(m["held"]) if m["held"] is not None else None,
                             over=bool(over),
+                            window_over=window_over[window],
                             change=bool(change),
                             purchased_nodes=purchased_nodes,
                             burst_nodes=burst_nodes,
-                            effective_threshold=effective_threshold
+                            effective_threshold=self.thresholds[window]
                         )
 
 
