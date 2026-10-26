@@ -54,7 +54,7 @@ LABEL org.opencontainers.image.source=https://github.com/slaclab/sdf-cli
 LABEL org.opencontainers.image.description="Coact batch daemons (slurm job import, facility overage)"
 LABEL edu.stanford.slac.slurm.version="${SLURM_VERSION}"
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12.12@sha256:73d2665b478d8fa2de1cf105c6841f8e9cb6b09e568fc7700440c09f8fcd7ac4 /uv /uvx /bin/
 
 # Build behind the SDF proxy with:
 #   podman build --build-arg https_proxy=http://sdfproxy.sdf.slac.stanford.edu:3128 .
