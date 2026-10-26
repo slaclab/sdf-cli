@@ -7,8 +7,6 @@ CONTAINER_RT ?= podman
 REPO         ?= ghcr.io/slaclab
 IMAGE        ?= sdf-cli
 TAG          ?= $(shell date +"%Y%m%d-%H%M")
-# Expand once so build and push agree even if the minute rolls over.
-TAG          := $(TAG)
 
 # --- vault -----------------------------------------------------------------
 VAULT_SECRET_PATH     ?= secret/scs/coact
@@ -20,10 +18,6 @@ GROUPER_SECRET_FIELD  ?= password
 # ---------------------------------------------------------------------------
 build: update-sdf-ansible ## Build the coact-daemon image
 	$(CONTAINER_RT) build . -f Dockerfile -t $(REPO)/$(IMAGE):$(TAG)
-
-push: build ## Build and push the image; prints the tag to pin in coact-deploy
-	$(CONTAINER_RT) push $(REPO)/$(IMAGE):$(TAG)
-	@echo "Pushed $(REPO)/$(IMAGE):$(TAG)"
 
 update-sdf-ansible: ## Check out the sdf-ansible playbooks (ansible-runner/project)
 	git submodule update --init --recursive
