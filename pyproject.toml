@@ -8,7 +8,6 @@ version = "0.1.0"
 description = "CLI for SDF"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "cliff==3.10.1",
     "click>=8.0.0",
     "gql[all]>=3.4.1,<4",
     "ansible-runner==2.3.1",
@@ -16,6 +15,7 @@ dependencies = [
     "pendulum>=3.2.0",
     "tzlocal>=5.3.1",
     "loguru>=0.7.0",
+    "setuptools<81",
 ]
 
 [project.optional-dependencies]

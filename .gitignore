@@ -9,7 +9,7 @@ pyvenv.cfg
 compiler_compat/
 conda-meta/
 condabin/
-etc/
+etc/.secrets/
 include/
 pkgs/
 share/
