@@ -40,6 +40,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          # ansible-runner/project is slaclab/sdf-ansible (private). The key is a
+          # read-only deploy key on sdf-ansible; checkout also uses it for submodules.
+          submodules: recursive
+          ssh-key: ${{ secrets.SDF_ANSIBLE_DEPLOY_KEY }}
 
       # Install the cosign tool
       # https://github.com/sigstore/cosign-installer
