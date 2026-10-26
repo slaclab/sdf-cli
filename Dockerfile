@@ -123,12 +123,6 @@ RUN uv sync --frozen --no-install-project --no-dev
 COPY . /app
 RUN uv sync --frozen --no-dev
 
-# ansible-runner 2.3.1 imports `pkg_resources` at module scope, and
-# sdf_click.py imports modules/coactd.py (hence ansible_runner) unconditionally
-# -- even for the `coact` batch subcommands.  setuptools >= 81 dropped
-# pkg_resources, so the CLI will not start without an older setuptools.
-RUN uv pip install --python /opt/venv/bin/python "setuptools<81"
-
 # ---------------------------------------------------------------------------
 # Identity / auth configuration
 # ---------------------------------------------------------------------------

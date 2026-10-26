@@ -15,6 +15,7 @@ dependencies = [
     "pendulum>=3.2.0",
     "tzlocal>=5.3.1",
     "loguru>=0.7.0",
+    # ansible-runner 2.3.1 imports pkg_resources, which setuptools 81 dropped.
     "setuptools<81",
 ]
 
