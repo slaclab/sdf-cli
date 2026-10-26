@@ -92,8 +92,13 @@ if ! command -v sacct >/dev/null 2>&1; then
     warn "sacct not on PATH (${PATH})"
     exit 1
 fi
-# After the conf check: even `sacct -V` parses slurm.conf.
-log "slurm client: $(sacct -V)"
+# After the conf check: even `sacct -V` parses slurm.conf.  Checked
+# explicitly: set -e does not catch a failure inside an argument.
+if ! slurm_version=$(sacct -V); then
+    warn "sacct cannot load ${SLURM_CONF:-/run/slurm/conf/slurm.conf}"
+    exit 1
+fi
+log "slurm client: ${slurm_version}"
 
 # `exec` with no arguments is a silent no-op that would exit 0 -- a green
 # CronJob run that did nothing at all.

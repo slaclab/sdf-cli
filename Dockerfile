@@ -95,6 +95,12 @@ RUN groupmod -g $MUNGE_GID munge \
  && usermod  -u $MUNGE_UID -g $MUNGE_GID munge \
  && chown -R munge:munge /etc/munge /var/lib/munge /var/log/munge /run/munge
 
+# slurm.conf names SlurmUser=slurm and the Slurm client refuses to parse it
+# unless that user resolves.  SDF hosts create it locally (sdf-ansible
+# install_slurm.yaml), not in LDAP, so the image does the same.
+ARG SLURM_UID=16924
+RUN useradd --system --no-create-home --uid $SLURM_UID --shell /sbin/nologin slurm
+
 COPY --from=slurm-build /opt/slurm /opt/slurm
 RUN ln -s slurm-${SLURM_VERSION} /opt/slurm/slurm-curr \
  && echo /opt/slurm/slurm-curr/lib64 > /etc/ld.so.conf.d/slurm.conf \
