@@ -6,9 +6,10 @@ name: Docker
 # documentation.
 
 on:
-  # Manual only until the Dockerfile lands with sdf-cli#26, which also adds
-  # the workflow_run trigger.  GitHub only registers a workflow (and so its
-  # dispatch button) once the file is on the default branch.
+  workflow_run:
+    workflows: [ "CI/CD" ]
+    types:
+      - completed
   workflow_dispatch:
 
 env:
@@ -36,7 +37,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           # ansible-runner/project is slaclab/sdf-ansible (private). The key is a
@@ -66,35 +67,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve build branch and Docker tag
+      # Generate timestamp-based tag in YYYYMMDD-HHMM format (matching DockerHub pattern)
+      - name: Generate Docker tag
         id: tag
-        env:
-          HEAD_BRANCH: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}
         run: |
-          set -euo pipefail
-
-          # Docker tags allow [a-zA-Z0-9._-] only, may not lead with '.' or '-',
-          # and are capped at 128 chars. Branch names like `feature/foo` are not
-          # usable verbatim.
-          SLUG=$(printf '%s' "${HEAD_BRANCH}" \
-            | sed -e 's#[^a-zA-Z0-9._-]#-#g' -e 's#^[.-]#_#' \
-            | cut -c1-100)
-          STAMP=$(date -u +"%Y%m%d-%H%M")
-
-          if [ "${HEAD_BRANCH}" = "main" ]; then
-            TAG="${STAMP}"
-          else
-            TAG="${SLUG}-${STAMP}"
-          fi
-
-          {
-            echo "branch=${HEAD_BRANCH}"
-            echo "slug=${SLUG}"
-            echo "tag=${TAG}"
-            echo "full_tag=${REGISTRY}/${IMAGE_NAME}:${TAG}"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "Building ${HEAD_BRANCH} as ${REGISTRY}/${IMAGE_NAME}:${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          TAG=$(date +"%Y%m%d-%H%M")
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "full_tag=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}" >> $GITHUB_OUTPUT
 
       # Extract metadata (tags, labels) for Docker
       # https://github.com/docker/metadata-action
@@ -103,11 +82,14 @@ jobs:
         uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          flavor: |
-            latest=false
           tags: |
             type=raw,value=${{ steps.tag.outputs.tag }}
-            type=raw,value=${{ steps.tag.outputs.slug }}
+            type=schedule
+            type=ref,event=branch
+            type=ref,event=tag
+            type=ref,event=pr
+        # workflow_run events otherwise report main's ref/sha, so
+        # type=ref,event=branch would tag a branch build as main.
         env:
           GITHUB_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           GITHUB_REF: ${{ github.event_name == 'workflow_run' && format('refs/heads/{0}', github.event.workflow_run.head_branch) || github.ref }}
@@ -141,7 +123,7 @@ jobs:
 
       # This step generates an artifact attestation for the image, which is an unforgeable statement about where and how it was built. It increases supply chain security for people who consume the image. For more information, see "[AUTOTITLE](/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds)."
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}
           subject-digest: ${{ steps.build-and-push.outputs.digest }}
