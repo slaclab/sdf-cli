@@ -69,9 +69,6 @@ RUN dnf -y install epel-release \
  && dnf -y --setopt=install_weak_deps=False --setopt=tsflags=nodocs install \
       munge \
       readline \
-      sssd \
-      sssd-client \
-      nss-pam-ldapd \
       openldap-clients \
       krb5-workstation \
       python3.12 \
@@ -100,6 +97,13 @@ RUN groupmod -g $MUNGE_GID munge \
 # install_slurm.yaml), not in LDAP, so the image does the same.
 ARG SLURM_UID=16924
 RUN useradd --system --no-create-home --uid $SLURM_UID --shell /sbin/nologin slurm
+
+# The fixed non-root uid jobs-import (and the other daemons) run as: coact-bot
+ARG COACT_BOT_UID=48362
+ARG COACT_BOT_GID=1034
+RUN groupadd --gid $COACT_BOT_GID oh \
+ && useradd --uid $COACT_BOT_UID --gid $COACT_BOT_GID --create-home \
+      --home-dir /home/coact-bot --shell /sbin/nologin coact-bot
 
 COPY --from=slurm-build /opt/slurm /opt/slurm
 RUN ln -s slurm-${SLURM_VERSION} /opt/slurm/slurm-curr \
@@ -135,15 +139,13 @@ RUN uv sync --frozen --no-dev
 COPY etc/nsswitch.conf /etc/nsswitch.conf
 COPY etc/krb5.conf     /etc/krb5.conf
 COPY etc/ldap.conf     /etc/openldap/ldap.conf
-COPY etc/sssd.conf     /etc/sssd/sssd.conf
-RUN chmod 0600 /etc/sssd/sssd.conf \
- && install -d -m 0755 /data
+RUN install -d -m 0755 /data
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY munge-sidecar.sh     /usr/local/bin/munge-sidecar.sh
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/bin/munge-sidecar.sh /app/import-jobs.sh
 
-# tini reaps sssd and forwards signals; the entrypoint execs the CronJob
+# tini forwards signals and reaps children; the entrypoint execs the CronJob
 # command so the container exits with the job's own exit code.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python3", "/app/sdf_click.py", "--help"]

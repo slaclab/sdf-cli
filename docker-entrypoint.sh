@@ -2,68 +2,20 @@
 #
 # Runtime bootstrap for the coact-daemon image.
 #
-# Starts sssd for NSS/LDAP resolution, waits for the munged sidecar's socket,
-# then execs the command it was given.
+# Waits for the munged sidecar's socket, checks the Slurm client, then execs
+# the command it was given.
+#
+# There is no sssd: user and group lookups are local files only.  sacct's
+# User column comes from slurmdbd, and the users the image itself needs
+# (slurm, munge, coact-bot) are created in the Dockerfile.
 
 set -euo pipefail
 
-START_SSSD="${START_SSSD:-true}"
-SSSD_WAIT_SECONDS="${SSSD_WAIT_SECONDS:-15}"
 MUNGE_SOCKET="${MUNGE_SOCKET:-/run/munge/munge.socket.2}"
 MUNGE_WAIT_SECONDS="${MUNGE_WAIT_SECONDS:-30}"
 
 log()  { printf '[entrypoint] %s\n' "$*" >&2; }
 warn() { printf '[entrypoint] WARNING: %s\n' "$*" >&2; }
-
-# --------------------------------------------------------------------------
-# sssd
-# --------------------------------------------------------------------------
-start_sssd() {
-    if [ ! -f /etc/sssd/sssd.conf ]; then
-        warn "/etc/sssd/sssd.conf missing; skipping sssd"
-        return 0
-    fi
-
-    # Allow the LDAP endpoint to be retargeted without rebuilding the image.
-    if [ -n "${SSSD_LDAP_URI:-}" ]; then
-        log "overriding sssd ldap_uri with ${SSSD_LDAP_URI}"
-        sed -i "s|^ldap_uri = .*|ldap_uri = ${SSSD_LDAP_URI}|" /etc/sssd/sssd.conf
-    fi
-    if [ -n "${SSSD_LDAP_BASE_DN:-}" ]; then
-        log "overriding sssd ldap_search_base with ${SSSD_LDAP_BASE_DN}"
-        sed -i "s|^ldap_search_base = .*|ldap_search_base = ${SSSD_LDAP_BASE_DN}|" /etc/sssd/sssd.conf
-    fi
-    chmod 0600 /etc/sssd/sssd.conf
-
-    # mkdir -p, not `install -d -m`: the sssd RPM already creates these
-    # owned by the sssd user, and chmod-ing a directory we do not own
-    # would need CAP_FOWNER purely to set the mode it already has.
-    mkdir -p /var/lib/sss/db /var/lib/sss/mc /var/lib/sss/pipes/private /var/log/sssd
-
-    log "starting sssd"
-    if ! /usr/sbin/sssd -D; then
-        warn "sssd failed to start; NSS/LDAP name resolution unavailable (continuing)"
-        return 0
-    fi
-
-    local waited=0
-    while ! pgrep -x sssd >/dev/null 2>&1; do
-        if [ "$waited" -ge "$SSSD_WAIT_SECONDS" ]; then
-            warn "sssd did not come up within ${SSSD_WAIT_SECONDS}s (continuing)"
-            return 0
-        fi
-        sleep 1
-        waited=$(( waited + 1 ))
-    done
-    log "sssd running"
-}
-
-# --------------------------------------------------------------------------
-if [ "$START_SSSD" = "true" ]; then
-    start_sssd
-else
-    log "START_SSSD=${START_SSSD}; not starting sssd"
-fi
 
 # --------------------------------------------------------------------------
 # Slurm client
