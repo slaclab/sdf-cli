@@ -63,7 +63,8 @@ class GraphQlClient:
         password = self._normalize_password(password)
         logger.trace(f"GraphQL connect: password length={len(password) if password else 0}")
         logger.trace(f"GraphQL connect: creating AIOHTTPTransport to {graphql_uri}")
-        self.transport = AIOHTTPTransport(url=graphql_uri, headers=self.get_basic_auth_headers(username=username, password=password))
+        # gql 3.x defaults to ssl=False for AIOHTTPTransport; verify against the system CA bundle.
+        self.transport = AIOHTTPTransport(url=graphql_uri, headers=self.get_basic_auth_headers(username=username, password=password), ssl=True)
         logger.trace(f"GraphQL connect: creating Client with execute_timeout={timeout}")
         self.client = Client(transport=self.transport, fetch_schema_from_transport=get_schema, execute_timeout=timeout)
         logger.trace(f"GraphQL connect: successfully connected to {graphql_uri}")
