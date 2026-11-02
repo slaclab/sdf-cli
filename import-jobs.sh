@@ -28,6 +28,7 @@ export COACT_PASSWORD
 
 JOB_HISTORY_DIR="${JOB_HISTORY_DIR:-/data/slurm-job-history}"
 JOB_REMAPPED_DIR="${JOB_REMAPPED_DIR:-/data/slurm-job-remapped}"
+ARCHIVE_RETENTION_DAYS="${ARCHIVE_RETENTION_DAYS:-30}"
 
 PYTHON="${PYTHON:-python3}"
 SDF_CLICK="${SDF_CLICK:-$(dirname "$0")/sdf_click.py}"
@@ -95,6 +96,11 @@ fi
 
 mv -f "$RAW_PARTIAL" "$RAW_ARCHIVE"
 mv -f "$REMAPPED_PARTIAL" "$REMAPPED_ARCHIVE"
+
+# Keep ARCHIVE_RETENTION_DAYS of dumps.
+find "$JOB_HISTORY_DIR" "$JOB_REMAPPED_DIR" -maxdepth 1 -type f \
+    -name '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' \
+    -mtime +"$ARCHIVE_RETENTION_DAYS" -delete
 
 # --------------------------------------------------------------------------
 # Recalculate usage summaries
