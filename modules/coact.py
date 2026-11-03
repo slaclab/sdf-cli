@@ -161,6 +161,12 @@ def run_sacct(
                 f"skipping ({len(fields)}, {int(fields[7])} < {int(fields[8])}) {line}"
             )
 
+    process.wait()
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"sacct exited {process.returncode}; refusing to report an empty job set"
+        )
+
 
 # ============================================================================
 # SlurmRemap Command
@@ -506,7 +512,7 @@ class SlurmRemapper:
     help='Terminate if cannot parse data'
 )
 @click.pass_context
-def slurm_import(ctx, print_output, debug, username, password_file, batch, data, output, exit_on_error):
+def slurm_import(ctx, print_output, debug, username, password, batch, data, output, exit_on_error):
     """Reads sacctmgr info from slurm and translates it to coact accounting stats."""
     if debug:
         configure_logging_from_verbose(2)
@@ -516,7 +522,7 @@ def slurm_import(ctx, print_output, debug, username, password_file, batch, data,
 
     importer = SlurmImporter(
         username=username,
-        password_file=password_file,
+        password=password,
         verbose=print_output,
         exit_on_error=exit_on_error
     )
@@ -538,9 +544,9 @@ class SlurmImporter(GraphQlMixin):
         "sdfmilan272": 1920,
     }
 
-    def __init__(self, username: str, password_file: str, verbose: bool = False, exit_on_error: bool = False):
+    def __init__(self, username: str, password: str, verbose: bool = False, exit_on_error: bool = False):
         self.username = username
-        self.password_file = password_file
+        self.password = password
         self.verbose = verbose
         self.exit_on_error = exit_on_error
         self._allocid = {}
@@ -550,7 +556,7 @@ class SlurmImporter(GraphQlMixin):
         """Run the import process."""
         self.back_channel = self.connect_graph_ql(
             username=self.username,
-            password_file=self.password_file,
+            password=self.password,
             timeout=300
         )
         self.get_metadata()
@@ -853,7 +859,7 @@ class SlurmImporter(GraphQlMixin):
 @common_options
 @graphql_options
 @click.pass_context
-def slurm_recalculate(ctx, date, verbose, username, password_file):
+def slurm_recalculate(ctx, date, verbose, username, password):
     """Recalculate the usage numbers from slurm jobs in Coact."""
     configure_logging_from_verbose(verbose)
     ctx.obj['verbose'] = verbose
@@ -861,7 +867,7 @@ def slurm_recalculate(ctx, date, verbose, username, password_file):
     client = GraphQlClient()
     back_channel = client.connect_graph_ql(
         username=username,
-        password_file=password_file,
+        password=password,
         timeout=300
     )
 
@@ -892,7 +898,11 @@ OVERAGE_WINDOW_THRESHOLDS: dict[int, float] = {
 @coact.command(name='overage')
 @click.option('--date', default=lambda: pdl.now().format('YYYY-MM-DD'), help='Recalculate jobs from this date (default: today)')
 @common_options
-@graphql_options
+# Deliberately not @graphql_options: the overage migration is deferred, so this
+# command and its bare-metal wrapper (coact-facility-overage-daemon.sh) stay on
+# --password-file.  Only the containerized commands read COACT_PASSWORD.
+@click.option('--username', default='sdf-bot', help='Basic auth username for graphql service')
+@click.option('--password-file', required=True, type=click.Path(exists=True), help='Basic auth password for graphql service')
 @click.option('--dry-run', is_flag=True, default=False, help='Do not actually enforce job holding')
 @click.option('--influxdb-url', default='http://localhost:8086', help='InfluxDB server URL (default: http://localhost:8086)')
 @click.option('--influxdb-username', default=None, help='InfluxDB username')
@@ -1044,8 +1054,7 @@ class FacilityUsage(GraphQlMixin):
         )
         logger.debug(f"Fetching usage data for date: {date}")
         data = self.get_data()
-        for point in self.overaged(data):
-            yield point
+        yield from self.overaged(data)
 
     def get_data(self) -> dict:
         """Fetch usage data from GraphQL."""

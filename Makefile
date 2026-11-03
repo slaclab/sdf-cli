@@ -1,39 +1,35 @@
-VENV_DIR ?= venv
-VENV_BIN ?= $(VENV_DIR)/bin/python3.9
-PIP_BIN ?= $(VENV_DIR)/bin/pip
-PYTHON_BIN ?= python3.9
-VAULT_SECRET_PATH ?= secret/tid/coact
+## sdf-cli / coact-daemon
+##
+## Container image build + Vault secret fetching for the batch daemons.
 
-secrets:
-	mkdir etc/.secrets/ -p
-	set -e; for i in password; do vault kv get --field=$$i $(VAULT_SECRET_PATH)/service-account > etc/.secrets/$$i ; done
-	chmod -R go-rwx etc/.secrets
+# --- container image -------------------------------------------------------
+CONTAINER_RT ?= podman
+REPO         ?= ghcr.io/slaclab
+IMAGE        ?= sdf-cli
+TAG          ?= $(shell date +"%Y%m%d-%H%M")
 
-clean-secrets:
-	rm -rf etc/.secrets
+# --- vault -----------------------------------------------------------------
+VAULT_SECRET_PATH     ?= secret/scs/coact
+GROUPER_SECRET_PATH   ?= secret/tid/scs/osmaint
+GROUPER_SECRET_FIELD  ?= password
 
-virtualenv:
-	$(PYTHON_BIN) -m venv $(VENV_DIR)
+# ---------------------------------------------------------------------------
+# Container image
+# ---------------------------------------------------------------------------
+build: update-sdf-ansible ## Build the coact-daemon image
+	$(CONTAINER_RT) build . -f Dockerfile -t $(REPO)/$(IMAGE):$(TAG)
 
-venv: virtualenv
-
-pip:
-	$(VENV_BIN) -m pip install --upgrade pip
-	$(PIP_BIN) install -r requirements.txt
-
-# OS level dependencies
-deps:
-	dnf groupinstall -y "Development Tools"
-
-# run this to configure the dev environment
-environment: venv pip
-
-dev: environment
-
-update-sdf-ansible:
+update-sdf-ansible: ## Check out the sdf-ansible playbooks (ansible-runner/project)
 	git submodule update --init --recursive
 
-apply: environment get-secrets update-sdf-ansible
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+secrets: ## Fetch daemon secrets from Vault into etc/.secrets/
+	mkdir -p etc/.secrets/
+	set -e; for i in password; do vault kv get --field=$$i $(VAULT_SECRET_PATH)/service-account > etc/.secrets/$$i ; done
+	vault kv get --field=$(GROUPER_SECRET_FIELD) $(GROUPER_SECRET_PATH) > etc/.secrets/grouper_password
+	chmod -R go-rwx etc/.secrets
 
-test:
-	$(VENV_BIN) sdf_click.py 
+clean-secrets: ## Remove etc/.secrets/
+	rm -rf etc/.secrets

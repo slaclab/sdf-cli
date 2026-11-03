@@ -28,22 +28,23 @@ class GraphQlMixin:
             def run(self):
                 self.back_channel = self.connect_graph_ql(
                     username='user',
-                    password_file='/path/to/password'
+                    password='hunter2'
                 )
                 # Use self.back_channel for GraphQL queries
     """
-    
+
     back_channel = None
-    
-    def connect_graph_ql(self, username: str, password_file: str, timeout: int = 60):
+
+    def connect_graph_ql(self, username: str, password: str | None = None, password_file: str | None = None, timeout: int = 60):
         """
         Connect to the GraphQL service.
-        
+
         Args:
             username: The username for basic auth
-            password_file: Path to file containing the password
+            password: The password for basic auth
+            password_file: Path to a file containing the password; backwards compatabilty
             timeout: Connection timeout in seconds
-            
+
         Returns:
             A connected GraphQL client
         """
@@ -51,6 +52,7 @@ class GraphQlMixin:
         client = GraphQlClient()
         return client.connect_graph_ql(
             username=username,
+            password=password,
             password_file=password_file,
             timeout=timeout
         )
@@ -122,8 +124,8 @@ def configure_logging_from_verbose(verbose: int) -> None:
 def graphql_options(f):
     """
     Decorator for GraphQL authentication options.
-    
-    Adds --username and --password-file options to commands.
+
+    Adds --username and --password options to commands.
     """
     f = click.option(
         '--username',
@@ -131,9 +133,10 @@ def graphql_options(f):
         help='Basic auth username for graphql service'
     )(f)
     f = click.option(
-        '--password-file',
+        '--password',
+        envvar='COACT_PASSWORD',
         required=True,
-        type=click.Path(exists=True),
-        help='Basic auth password for graphql service'
+        show_envvar=True,
+        help='Basic auth password for graphql service. Prefer the COACT_PASSWORD environment variable'
     )(f)
     return f
