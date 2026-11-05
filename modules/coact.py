@@ -898,11 +898,13 @@ OVERAGE_WINDOW_THRESHOLDS: dict[int, float] = {
 @coact.command(name='overage')
 @click.option('--date', default=lambda: pdl.now().format('YYYY-MM-DD'), help='Recalculate jobs from this date (default: today)')
 @common_options
-@graphql_options
+# Deliberately not @graphql_options: the overage migration is deferred, so this
+# command and its bare-metal wrapper (coact-facility-overage-daemon.sh) stay on
+# --password-file.  Only the containerized commands read COACT_PASSWORD.
+@click.option('--username', default='sdf-bot', help='Basic auth username for graphql service')
+@click.option('--password-file', required=True, type=click.Path(exists=True), help='Basic auth password for graphql service')
 @click.option('--dry-run', is_flag=True, default=False, help='Do not actually enforce job holding')
-# No default: without a URL the metrics write is skipped, so a dry run can stay
-# out of the shared InfluxDB.
-@click.option('--influxdb-url', default=None, help='InfluxDB server URL; metrics are not written unless this is given')
+@click.option('--influxdb-url', default='http://localhost:8086', help='InfluxDB server URL (default: http://localhost:8086)')
 @click.option('--influxdb-username', default=None, help='InfluxDB username')
 @click.option('--influxdb-password', default=None, help='InfluxDB password')
 @click.option('--influxdb-database', default='coact', help='InfluxDB database name (default: coact)')
@@ -912,7 +914,7 @@ def overage(
         date: str,
         verbose: int,
         username: str,
-        password: str,
+        password_file: str,
         dry_run: bool,
         influxdb_url: str,
         influxdb_username: str,
@@ -926,7 +928,7 @@ def overage(
     # create data collection object
     usages = FacilityUsage(
         username=username,
-        password=password,
+        password_file=password_file,
         thresholds=OVERAGE_WINDOW_THRESHOLDS,
         dry_run=dry_run
     )
@@ -1036,9 +1038,9 @@ def toggle_job_blocking(point: OveragePoint, execute: bool = False) -> bool:
 class FacilityUsage(GraphQlMixin):
     """Handles facility usage calculations and enforcement."""
 
-    def __init__(self, username: str, password: str, thresholds: dict[int, float], dry_run: bool):
+    def __init__(self, username: str, password_file: str, thresholds: dict[int, float], dry_run: bool):
         self.username = username
-        self.password = password
+        self.password_file = password_file
         self.thresholds = thresholds
         self.windows = sorted(thresholds)
         self.dry_run = dry_run
@@ -1047,7 +1049,7 @@ class FacilityUsage(GraphQlMixin):
         """Run the overage calculation process."""
         self.back_channel = self.connect_graph_ql(
             username=self.username,
-            password=self.password,
+            password_file=self.password_file,
             timeout=300
         )
         logger.debug(f"Fetching usage data for date: {date}")
