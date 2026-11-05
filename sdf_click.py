@@ -88,7 +88,9 @@ def cli(ctx, debug, quiet):
     ctx.obj['debug'] = debug
     ctx.obj['quiet'] = quiet
 
-    # Configure loguru based on flags
+    # Configure loguru based on flags.  Every handler sets diagnose=False:
+    # loguru's default prints local variable values in tracebacks, which leaks
+    # secrets such as the COACT_PASSWORD-backed `password` argument into logs.
     logger.remove()  # Remove default handler
     
     if debug:
@@ -97,6 +99,7 @@ def cli(ctx, debug, quiet):
             level="DEBUG",
             format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
             colorize=True,
+            diagnose=False,
         )
     elif quiet:
         logger.add(
@@ -104,6 +107,7 @@ def cli(ctx, debug, quiet):
             level="ERROR",
             format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
             colorize=True,
+            diagnose=False,
         )
     else:
         logger.add(
@@ -111,6 +115,7 @@ def cli(ctx, debug, quiet):
             level="INFO",
             format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
             colorize=True,
+            diagnose=False,
         )
 
     # If no subcommand is provided, show help
