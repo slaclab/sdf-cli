@@ -22,12 +22,9 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
-    # Publish automatically only for pushes to main.
     if: >-
       ${{ github.event_name != 'workflow_run' ||
           (github.event.workflow_run.conclusion == 'success' &&
-           github.event.workflow_run.event == 'push' &&
-           github.event.workflow_run.head_branch == 'main' &&
            github.event.workflow_run.head_repository.full_name == github.repository) }}
     permissions:
       contents: read
@@ -91,10 +88,11 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=ref,event=pr
-          # On workflow_run, github.sha is main's tip when this run starts, which
-          # can be newer than the commit CI tested and checkout built.
-          labels: |
-            org.opencontainers.image.revision=${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+        # workflow_run events otherwise report main's ref/sha, so
+        # type=ref,event=branch would tag a branch build as main.
+        env:
+          GITHUB_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          GITHUB_REF: ${{ github.event_name == 'workflow_run' && format('refs/heads/{0}', github.event.workflow_run.head_branch) || github.ref }}
 
       # Build and push Docker image with Buildx
       # https://github.com/docker/build-push-action
@@ -107,8 +105,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          # A cache write failure must not block the publish.
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-to: type=gha,mode=max
 
       # Sign the resulting published Docker image digest.
       # This will only write to the public Rekor transparency log when the Docker
