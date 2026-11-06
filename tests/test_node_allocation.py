@@ -60,7 +60,7 @@ def test_facility_lifecycle_goes_over_blocks_recovers_and_restores_nodes():
     # Initial state: facility under quota with purchased nodes
     facility_usage = FacilityUsage(
         username="test_user",
-        password_file="/tmp/test",
+        password="x",
         thresholds={60: 100.0},
         dry_run=False
     )
@@ -215,7 +215,7 @@ BURST = 26
 def make_usage(thresholds=None):
     return FacilityUsage(
         username="test_user",
-        password_file="/tmp/test",
+        password="x",
         thresholds=thresholds or {60: 100.0},
         dry_run=False,
     )
@@ -526,12 +526,10 @@ class TestOverageCommandWindows:
             assert isinstance(window, int) and not isinstance(window, bool) and window > 0
             assert isinstance(threshold, float) and threshold > 0
 
-    def test_the_command_checks_the_configured_windows(self, tmp_path):
-        password_file = tmp_path / "password"
-        password_file.write_text("x")
+    def test_the_command_checks_the_configured_windows(self):
         with patch("modules.coact.FacilityUsage") as facility_usage:
             facility_usage.return_value.get.return_value = iter([])
-            result = CliRunner().invoke(overage, ["--dry-run", "--password-file", str(password_file)], obj={})
+            result = CliRunner().invoke(overage, ["--dry-run"], obj={}, env={"COACT_PASSWORD": "x"})
         assert result.exit_code == 0, result.output
         assert facility_usage.call_args.kwargs["thresholds"] == OVERAGE_WINDOW_THRESHOLDS
 
@@ -541,15 +539,52 @@ class TestOverageCommandWindows:
         assert result.exit_code != 0
         assert "No such option" in result.output
 
-    def test_a_change_is_enacted_once_per_facility_cluster_not_once_per_window(self, tmp_path):
-        password_file = tmp_path / "password"
-        password_file.write_text("x")
+    def test_a_change_is_enacted_once_per_facility_cluster_not_once_per_window(self):
         points = [make_point(window_mins=w, held=False, over=True) for w in (5, 60, 1440)]
         points.append(make_point(cluster="roma", held=False, over=True))
         with patch("modules.coact.FacilityUsage.get", return_value=iter(points)), \
                 patch("modules.coact.toggle_job_blocking") as toggle, \
                 patch("modules.coact.requests.post"):
-            result = CliRunner().invoke(overage, ["--dry-run", "--password-file", str(password_file)], obj={})
+            result = CliRunner().invoke(overage, ["--dry-run"], obj={}, env={"COACT_PASSWORD": "x"})
         assert result.exit_code == 0, result.output
         assert [c.kwargs["point"]["cluster"] for c in toggle.call_args_list] == ["ada", "roma"]
         assert all(c.kwargs["execute"] is False for c in toggle.call_args_list)
+
+
+class TestOverageCommandContainerInputs:
+    """The CronJob passes the password and the InfluxDB target through the environment and args."""
+
+    def test_the_password_comes_from_coact_password(self):
+        with patch("modules.coact.FacilityUsage") as facility_usage:
+            facility_usage.return_value.get.return_value = iter([])
+            result = CliRunner().invoke(overage, ["--dry-run"], obj={}, env={"COACT_PASSWORD": "hunter2"})
+        assert result.exit_code == 0, result.output
+        assert facility_usage.call_args.kwargs["password"] == "hunter2"
+
+    def test_a_missing_password_is_an_error(self):
+        result = CliRunner().invoke(overage, ["--dry-run"], obj={}, env={"COACT_PASSWORD": None})
+        assert result.exit_code != 0
+        assert "--password" in result.output
+
+    def test_the_password_file_option_is_gone(self):
+        result = CliRunner().invoke(overage, ["--password-file", "/dev/null"], obj={}, env={"COACT_PASSWORD": "x"})
+        assert result.exit_code != 0
+        assert "No such option" in result.output
+
+    def test_no_influxdb_write_without_a_url(self):
+        with patch("modules.coact.FacilityUsage.get", return_value=iter([make_point()])), \
+                patch("modules.coact.toggle_job_blocking"), \
+                patch("modules.coact.requests.post") as post:
+            result = CliRunner().invoke(overage, ["--dry-run"], obj={}, env={"COACT_PASSWORD": "x"})
+        assert result.exit_code == 0, result.output
+        post.assert_not_called()
+
+    def test_influxdb_write_with_a_url(self):
+        with patch("modules.coact.FacilityUsage.get", return_value=iter([make_point()])), \
+                patch("modules.coact.toggle_job_blocking"), \
+                patch("modules.coact.requests.post") as post:
+            result = CliRunner().invoke(
+                overage, ["--dry-run", "--influxdb-url", "https://influxdb.example:443"],
+                obj={}, env={"COACT_PASSWORD": "x"})
+        assert result.exit_code == 0, result.output
+        assert post.call_args.args[0] == "https://influxdb.example:443/write"

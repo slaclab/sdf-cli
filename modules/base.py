@@ -110,12 +110,14 @@ def configure_logging_from_verbose(verbose: int) -> None:
     else:
         level = "WARNING"
     
-    # Add handler with appropriate level and format
+    # Add handler with appropriate level and format.  diagnose=False: loguru's
+    # default prints local variable values (passwords included) in tracebacks.
     logger.add(
         sys.stderr,
         level=level,
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
         colorize=True,
+        diagnose=False,
     )
     
     logger.debug(f"Logging configured with level: {level}")
