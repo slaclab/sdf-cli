@@ -26,7 +26,7 @@ class TestRepoRegistrationGID:
              patch('modules.coactd.AnsibleRunner.__init__'):
             reg = RepoRegistration(
                 username='test-user',
-                password_file='/tmp/test-password',
+                password='test-password',
                 client_name='test-client',
                 grouper_password_file='/tmp/test-grouper-password'
             )
@@ -239,7 +239,7 @@ class TestRepoIdempotency:
              patch('modules.coactd.AnsibleRunner.__init__'):
             reg = RepoRegistration(
                 username='test-user',
-                password_file='/tmp/test-password',
+                password='test-password',
                 client_name='test-client',
                 grouper_password_file='/tmp/test-grouper-password'
             )

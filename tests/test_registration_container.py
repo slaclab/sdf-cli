@@ -5,6 +5,7 @@ run that leaves requests alone, reconnecting when the websocket drops, and
 finishing the current request on SIGTERM.
 """
 
+import asyncio
 import sys
 from unittest.mock import Mock, patch
 
@@ -15,7 +16,10 @@ from gql.transport.exceptions import TransportClosed
 sys.modules['ansible_runner'] = Mock()
 
 from modules import coactd  # noqa: E402
-from modules.coactd import Registration, StopDaemon, UserRegistration  # noqa: E402
+from gql import gql  # noqa: E402
+
+from modules.coactd import Registration, UserRegistration  # noqa: E402
+from modules.utils.graphql import GraphQlSubscriber  # noqa: E402
 
 TARGET = 'sdfmgr002.sdf.slac.stanford.edu'
 RUNNER_ENV = ('COACT_ANSIBLE_RUNNER_PATH', 'COACT_ANSIBLE_ARTIFACT_DIR', 'COACT_ANSIBLE_ROTATE_ARTIFACTS')
@@ -148,33 +152,37 @@ class TestPassword:
             result = CliRunner().invoke(coactd.coactd, ['userregistration', *args], env=env or {}, obj={})
         return result, run
 
-    def test_password_from_env(self):
-        result, run = self.invoke([], env={'COACT_PASSWORD': 'from-env', 'COACT_ANSIBLE_TARGET': TARGET})
+    @pytest.mark.parametrize('command', ['userregistration', 'reporegistration'])
+    def test_password_from_env(self, command):
+        with patch.object(coactd, 'run_registration') as run:
+            result = CliRunner().invoke(coactd.coactd, [command],
+                                        env={'COACT_PASSWORD': 'from-env\n', 'COACT_ANSIBLE_TARGET': TARGET}, obj={})
         assert result.exit_code == 0, result.output
         handler = run.call_args.args[0]
         assert handler.resolve_password() == 'from-env'
-        assert handler.password_file is None
         assert handler.ansible_target == TARGET
 
-    def test_password_file(self, tmp_path):
-        pw = tmp_path / 'password'
-        pw.write_text('from-file\n')
-        result, run = self.invoke(['--password-file', str(pw)])
+    def test_password_from_command_line(self):
+        result, run = self.invoke(['--password', 'from-cli'])
         assert result.exit_code == 0, result.output
-        assert run.call_args.args[0].resolve_password() == 'from-file'
+        assert run.call_args.args[0].resolve_password() == 'from-cli'
         assert run.call_args.args[0].ansible_target is None
 
-    def test_neither_is_an_error(self):
+    def test_missing_password_is_an_error(self):
         result, run = self.invoke([])
         assert result.exit_code == 2
-        assert 'exactly one of --password' in result.output
+        assert '--password' in result.output
         run.assert_not_called()
 
-    def test_both_is_an_error(self, tmp_path):
+    @pytest.mark.parametrize('command', ['userregistration', 'reporegistration'])
+    def test_there_is_no_password_file_option(self, tmp_path, command):
         pw = tmp_path / 'password'
         pw.write_text('from-file')
-        result, run = self.invoke(['--password-file', str(pw)], env={'COACT_PASSWORD': 'from-env'})
+        with patch.object(coactd, 'run_registration') as run:
+            result = CliRunner().invoke(coactd.coactd, [command, '--password-file', str(pw)],
+                                        env={'COACT_PASSWORD': 'from-env'}, obj={})
         assert result.exit_code == 2
+        assert 'No such option' in result.output
         run.assert_not_called()
 
     def test_run_passes_the_env_password_to_both_connections(self):
@@ -248,13 +256,96 @@ class TestRunForever:
         assert r.run.call_count == 1
 
 
+class FakeSubscriptionClient:
+    """Stands in for gql's Client: subscribe_async yields the given events, then waits forever."""
+
+    def __init__(self, events, before_yield=lambda: None):
+        self.events = events
+        self.before_yield = before_yield
+        self.closed = False
+
+    async def subscribe_async(self, document, variable_values=None):
+        try:
+            for event in self.events:
+                self.before_yield()
+                yield event
+            await asyncio.sleep(3600)
+        finally:
+            self.closed = True
+
+
+def request_event(req_id):
+    return {'operationType': 'update', 'requests': {'theRequest': dict(SHELL_REQ, Id=req_id)}}
+
+
+class TestSubscribeStop:
+
+    def subscriber(self, client):
+        s = GraphQlSubscriber()
+        s.subscription_client = client
+        return s
+
+    def test_idle_stop_returns_and_closes(self):
+        client = FakeSubscriptionClient([])
+        stop = {'now': False}
+        polls = []
+
+        def should_stop():
+            polls.append(1)
+            if len(polls) >= 3:
+                stop['now'] = True
+            return stop['now']
+
+        got = list(self.subscriber(client).subscribe('subscription { x }', should_stop=should_stop, poll_interval=0.01))
+        assert got == []
+        assert client.closed
+
+    def test_stop_in_the_window_after_an_event_never_drops_it(self):
+        # The stop flag goes up after the server has handed over the event
+        # (the old window before busy=True): the event must still come out.
+        stop = {'now': False}
+        client = FakeSubscriptionClient([request_event('req1')],
+                                        before_yield=lambda: stop.update(now=True))
+        got = list(self.subscriber(client).subscribe('subscription { x }', should_stop=lambda: stop['now'],
+                                                     poll_interval=0.01))
+        assert [g[0] for g in got] == ['req1']
+        assert client.closed
+
+    def test_events_flow_until_stopped(self):
+        client = FakeSubscriptionClient([request_event('a'), {'operationType': 'delete', 'requests': {}},
+                                         request_event('b')])
+        sub = self.subscriber(client).subscribe('subscription { x }', should_stop=lambda: False, poll_interval=0.01)
+        assert [next(sub)[0], next(sub)[0]] == ['a', 'b']  # the delete is filtered out
+        sub.close()
+        assert client.closed
+
+
 class TestSigterm:
 
-    def test_idle_sigterm_stops_immediately(self):
+    @pytest.mark.parametrize('busy', [False, True])
+    def test_sigterm_only_sets_the_flag(self, busy):
         r = make_user_registration()
-        with pytest.raises(StopDaemon):
-            r.handle_sigterm(15, None)
+        r.busy = busy
+        r.handle_sigterm(15, None)  # never raises, idle or busy
         assert r.stopping
+
+    def test_run_stops_the_subscription_via_the_flag(self):
+        r = make_user_registration()
+        r.connect_graph_ql = Mock()
+        r.connect_subscriber = Mock()
+        r.subscribe = Mock(return_value=iter([]))
+        r.run()
+        should_stop = r.subscribe.call_args.kwargs['should_stop']
+        assert should_stop() is False
+        r.handle_sigterm(15, None)
+        assert should_stop() is True
+
+    def test_sigterm_during_reconnect_sleep_stops(self, monkeypatch):
+        r = make_user_registration()
+        r.run = Mock(side_effect=[TransportClosed('gone')])
+        monkeypatch.setattr(coactd.time, 'sleep', lambda s: r.handle_sigterm(15, None))
+        r.run_forever(max_reconnects=5)
+        assert r.run.call_count == 1
 
     def test_busy_sigterm_finishes_the_request_then_stops(self):
         r = make_user_registration()
@@ -274,10 +365,55 @@ class TestSigterm:
         assert processed == ['req1']
         assert r.stopping and not r.busy
 
-    def test_run_registration_exits_cleanly_on_stop(self):
+    def test_run_registration_installs_the_handler(self):
         r = make_user_registration()
-        r.run_forever = Mock(side_effect=StopDaemon())
+        r.run_forever = Mock()
         with patch.object(coactd.signal, 'signal') as sig:
             coactd.run_registration(r, max_reconnects=3)
         sig.assert_called_once_with(coactd.signal.SIGTERM, r.handle_sigterm)
         r.run_forever.assert_called_once_with(max_reconnects=3)
+
+
+# ---------------------------------------------------------------------------
+# dry-run back channel (every handler)
+# ---------------------------------------------------------------------------
+
+class TestDryRunBackChannel:
+
+    def test_mutations_are_skipped_queries_pass_through(self):
+        client = Mock()
+        client.execute.return_value = {'repo': {'users': []}}
+        log = Mock()
+        bc = coactd.DryRunBackChannel(client, log)
+        assert bc.execute(UserRegistration.USER_UPSERT_GQL, {'user': {'username': 'alice'}}) is None
+        client.execute.assert_not_called()
+        assert 'would send mutation userUpsert' in log.warning.call_args.args[0]
+        query = gql('query getRepoUsers($repo: RepoInput!) { repo(filter: $repo) { users } }')
+        assert bc.execute(query, {'repo': {}}) == {'repo': {'users': []}}
+        client.execute.assert_called_once()
+
+    def test_dry_run_wraps_the_back_channel(self):
+        r = coactd.RepoRegistration(username='sdf-bot', client_name='t', password='pw', dry_run=True)
+        r.connect_graph_ql = Mock()
+        r.connect_subscriber = Mock()
+        r.subscribe = Mock(return_value=iter([]))
+        r.run()
+        assert isinstance(r.back_channel, coactd.DryRunBackChannel)
+
+    def test_repo_dry_run_sends_no_mutation(self):
+        r = coactd.RepoRegistration(username='sdf-bot', client_name='t', password='pw', dry_run=True)
+        r.logger = Mock()
+        client = Mock()
+        client.execute.return_value = {'repo': {'clusters': [], 'features': [], 'users': ['alice']}}
+        r.back_channel = coactd.DryRunBackChannel(client, r.logger)
+        assert r.do_repo_membership(user='bob', repo='r', facility='f', action='present', dry_run=True) is True
+        sent = [c.args[0] for c in client.execute.call_args_list]
+        assert sent and not any(coactd.is_mutation(d) for d in sent)
+
+    def test_real_run_does_not_wrap(self):
+        r = make_user_registration()
+        r.connect_graph_ql = Mock(return_value='client')
+        r.connect_subscriber = Mock()
+        r.subscribe = Mock(return_value=iter([]))
+        r.run()
+        assert r.back_channel == 'client'

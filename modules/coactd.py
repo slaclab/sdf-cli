@@ -26,6 +26,7 @@ import click
 import pendulum as pdl
 from gql import gql
 from gql.transport.exceptions import TransportError
+from graphql import OperationDefinitionNode, OperationType
 from websockets.exceptions import WebSocketException
 
 import jinja2
@@ -35,7 +36,7 @@ from email.message import EmailMessage
 import ansible_runner
 
 # Import base classes from modules.base
-from .base import GraphQlMixin, common_options, configure_logging_from_verbose
+from .base import GraphQlMixin, common_options, configure_logging_from_verbose, graphql_options
 from .utils.graphql import GraphQlSubscriber
 
 # Using loguru logger
@@ -62,16 +63,41 @@ def ansible_runner_settings() -> dict:
     }
 
 
-# Order of class inheritance important
-class StopDaemon(KeyboardInterrupt):
-    """Raised by the SIGTERM handler to leave an idle subscription.
+def is_mutation(document) -> bool:
+    """True if a gql() document contains a mutation operation."""
+    return any(
+        isinstance(d, OperationDefinitionNode) and d.operation == OperationType.MUTATION
+        for d in getattr(document, 'definitions', ())
+    )
 
-    A KeyboardInterrupt so gql's sync subscribe() still closes the websocket
-    on its way out, and so run_forever does not mistake it for a dropped
-    connection.
+
+class DryRunBackChannel:
+    """A dry run's back channel: queries go through, mutations are logged and skipped.
+
+    Wraps the gql Client a registration handler writes Coact records with, so no
+    handler's --dry-run can upsert anything, whichever code path it takes.  A
+    skipped mutation returns None, so a handler that reads a mutation's result
+    stops there; in a dry run that only means "would mark incomplete" is logged.
     """
 
+    def __init__(self, client, log):
+        self._client = client
+        self._log = log
 
+    def execute(self, document, *args, **kwargs):
+        if is_mutation(document):
+            names = [d.name.value for d in document.definitions
+                     if isinstance(d, OperationDefinitionNode) and d.name]
+            variables = args[0] if args else kwargs.get('variable_values')
+            self._log.warning(f"dry run: would send mutation {', '.join(names) or '(unnamed)'} with {variables}")
+            return None
+        return self._client.execute(document, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+# Order of class inheritance important
 class RequestStatus(str, Enum):
     APPROVED = 'Approved'
     NOT_ACTED_ON = 'NotActedOn'
@@ -200,12 +226,11 @@ class Registration(GraphQlSubscriber, AnsibleRunner):
     # failing.  run_forever reconnects on these.
     CONNECTION_ERRORS = (TransportError, WebSocketException, OSError, asyncio.TimeoutError)
 
-    def __init__(self, username: str, client_name: str, password: str = None, password_file: str = None,
+    def __init__(self, username: str, client_name: str, password: str,
                  dry_run: bool = False, grouper_password_file: str = None, ansible_target: str = None):
         self.logger = logger
         self.username = username
         self.password = password
-        self.password_file = password_file
         self.client_name = client_name
         self.dry_run = dry_run
         self.grouper_password_file = grouper_password_file
@@ -214,23 +239,24 @@ class Registration(GraphQlSubscriber, AnsibleRunner):
         self.busy = False
 
     def resolve_password(self) -> str:
-        """The GraphQL password: --password / COACT_PASSWORD, else --password-file."""
-        password = self.password if self.password else self.get_password(self.password_file)
-        return self._normalize_password(password)
+        """The GraphQL password from --password / COACT_PASSWORD, whitespace stripped."""
+        return self._normalize_password(self.password)
 
     def handle_sigterm(self, signum, frame):
         """Stop taking new requests, but let the one in progress finish.
 
         A pod deleted in the middle of add_user.yaml would otherwise leave a
-        half-provisioned user whose request is still Approved.  While idle there
-        is nothing to finish, so exit straight away.
+        half-provisioned user whose request is still Approved.  Only sets a
+        flag, never raises: raising from here could land after the server has
+        handed over an event but before it is processed, losing it for good.
+        While idle, subscribe() notices the flag within a second and returns;
+        after an event, run() checks it before waiting for the next one.
         """
         self.stopping = True
         if self.busy:
             self.logger.warning(f"received signal {signum}: finishing request {self.ident} before exiting")
-            return
-        self.logger.warning(f"received signal {signum} while idle: exiting")
-        raise StopDaemon()
+        else:
+            self.logger.warning(f"received signal {signum} while idle: exiting")
 
     def run_forever(self, max_reconnects: int = 0, reconnect_delay: float = 5.0, stable_after: float = 60.0) -> None:
         """run(), reconnecting when the websocket drops.
@@ -264,6 +290,9 @@ class Registration(GraphQlSubscriber, AnsibleRunner):
             self.logger.warning(f"subscription lost ({reason}); reconnecting in {reconnect_delay}s "
                                 f"(attempt {failures} of {max_reconnects})")
             time.sleep(reconnect_delay)
+            if self.stopping:
+                self.logger.info("stopped")
+                return
 
     def run(self):
         """Main entry point - connect and process subscription requests."""
@@ -279,13 +308,17 @@ class Registration(GraphQlSubscriber, AnsibleRunner):
             password=password
         )
         if self.dry_run:
-            self.logger.warning("dry run: no playbooks run, no coact records written, and requests are left as they are")
+            # Queries still run (a handler needs their answers to get anywhere);
+            # mutations are logged and skipped.
+            self.back_channel = DryRunBackChannel(self.back_channel, self.logger)
+            self.logger.warning("dry run: no playbooks run, no coact mutations sent, and requests are left as they are")
         if self.ansible_target:
             self.logger.info(f"ansible plays target {self.ansible_target}")
 
         for req_id, op_type, req_type, approval, req in self.subscribe(
             self.SUBSCRIPTION_STR,
-            var={"clientName": self.client_name}
+            var={"clientName": self.client_name},
+            should_stop=lambda: self.stopping
         ):
             self.busy = True
             try:
@@ -385,26 +418,12 @@ def coactd(ctx):
 
 
 def registration_options(f):
-    """Decorator for common registration command options."""
-    f = click.option(
-        '--username',
-        default='sdf-bot',
-        help='Basic auth username for graphql service'
-    )(f)
-    f = click.option(
-        '--password',
-        envvar='COACT_PASSWORD',
-        default=None,
-        show_envvar=True,
-        help='Basic auth password for graphql service. Prefer the COACT_PASSWORD environment variable. '
-             'Exactly one of this and --password-file is required'
-    )(f)
-    f = click.option(
-        '--password-file',
-        default=None,
-        type=click.Path(exists=True),
-        help='File holding the basic auth password for graphql service (bare metal)'
-    )(f)
+    """Decorator for common registration command options.
+
+    --username and --password (COACT_PASSWORD) come from graphql_options, as
+    for the other containerized commands; there is no --password-file.
+    """
+    f = graphql_options(f)
     f = click.option(
         '--client-name',
         default=None,
@@ -414,7 +433,7 @@ def registration_options(f):
         '--dry-run',
         is_flag=True,
         default=False,
-        help='Do not run any ansible playbooks or mark any requests Complete/Incomplete (userregistration also writes no coact records)'
+        help='Do not run any ansible playbooks, send any coact mutations, or mark any requests Complete/Incomplete'
     )(f)
     f = click.option(
         '--ansible-target',
@@ -435,19 +454,10 @@ def registration_options(f):
     return f
 
 
-def check_password_options(password, password_file):
-    """Exactly one of --password (COACT_PASSWORD) and --password-file."""
-    if bool(password) == bool(password_file):
-        raise click.UsageError('give exactly one of --password (or COACT_PASSWORD) and --password-file')
-
-
 def run_registration(handler: Registration, max_reconnects: int) -> None:
     """Run a registration handler until it is stopped, finishing the current request on SIGTERM."""
     signal.signal(signal.SIGTERM, handler.handle_sigterm)
-    try:
-        handler.run_forever(max_reconnects=max_reconnects)
-    except StopDaemon:
-        logger.info("stopped")
+    handler.run_forever(max_reconnects=max_reconnects)
 
 
 # ============================================================================
@@ -548,8 +558,7 @@ class UserRegistration(Registration):
         self.logger.debug(f"upserted user {user_id}")
 
         # record the user's gids in coact now, before any repo membership change can $addToSet on top of them
-        if not self.dry_run:
-            self.record_posix_init(user)
+        self.record_posix_init(user)
 
         # configure home directory
         runner = self.run_playbook(playbook, user=user, user_facility=facility, tags='home', force_copy_skel=False)
@@ -594,19 +603,17 @@ class UserRegistration(Registration):
 @common_options
 @registration_options
 @click.pass_context
-def user_registration(ctx, verbose, username, password, password_file, client_name, dry_run, ansible_target, max_reconnects):
+def user_registration(ctx, verbose, username, password, client_name, dry_run, ansible_target, max_reconnects):
     """Workflow for user creation and shell changes.
 
     Handles UserAccount and UserChangeShell request types.
     """
     configure_logging_from_verbose(verbose)
     ctx.obj['verbose'] = verbose
-    check_password_options(password, password_file)
 
     handler = UserRegistration(
         username=username,
         password=password,
-        password_file=password_file,
         client_name=client_name or 'sdf-bot-UserRegistration',
         dry_run=dry_run,
         ansible_target=ansible_target
@@ -1369,7 +1376,7 @@ class RepoRegistration(Registration):
     help='Path to file containing the Grouper service account password'
 )
 @click.pass_context
-def repo_registration(ctx, verbose, username, password, password_file, client_name, dry_run, ansible_target,
+def repo_registration(ctx, verbose, username, password, client_name, dry_run, ansible_target,
                       max_reconnects, grouper_password_file):
     """Workflow for repository maintenance.
 
@@ -1378,12 +1385,10 @@ def repo_registration(ctx, verbose, username, password, password_file, client_na
     """
     configure_logging_from_verbose(verbose)
     ctx.obj['verbose'] = verbose
-    check_password_options(password, password_file)
 
     handler = RepoRegistration(
         username=username,
         password=password,
-        password_file=password_file,
         client_name=client_name or 'sdf-bot-RepoRegistration',
         dry_run=dry_run,
         grouper_password_file=grouper_password_file,
