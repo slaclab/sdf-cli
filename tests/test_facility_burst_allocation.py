@@ -71,7 +71,7 @@ def registration() -> RepoRegistration:
          patch('modules.coactd.AnsibleRunner.__init__'):
         reg = RepoRegistration(
             username='test-user',
-            password_file='/tmp/test-password',
+            password='test-password',
             client_name='test-client',
         )
         reg.logger = Mock()

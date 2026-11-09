@@ -1,6 +1,0 @@
-#!/bin/sh
-
-while [ 1 ]; do
-    SDF_COACT_URI=coact.slac.stanford.edu:443/graphql-service ./old_venv/bin/python3 ./sdf_click.py coactd userregistration --username sdf-bot --password-file ./etc/.secrets/password -vv
-    sleep 5
-done

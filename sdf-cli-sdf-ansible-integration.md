@@ -7,7 +7,7 @@
 
 ## Overview
 
-`sdf-cli` is the automation driver that listens for request types from `coact-api` and executes system administration tasks. `sdf-ansible` is the execution engine that carries out those tasks against SLAC infrastructure (LDAP, home directories, Slurm, SSSD, etc.). The two are coupled via a daemons (e.g., `coact-userregistration-daemon.sh` and `coact-reporegistration-daemon.sh`) that listen for coact requests sent through mongo streams and call `sdf-cli` commands, which in turn invoke Ansible playbooks in `sdf-ansible`
+`sdf-cli` is the automation driver that listens for request types from `coact-api` and executes system administration tasks. `sdf-ansible` is the execution engine that carries out those tasks against SLAC infrastructure (LDAP, home directories, Slurm, SSSD, etc.). The two are coupled via daemons (`coactd userregistration`, which runs as a Kubernetes Deployment, and `coact-reporegistration-daemon.sh` on bare metal) that listen for coact requests sent through mongo streams and call `sdf-cli` commands, which in turn invoke Ansible playbooks in `sdf-ansible`
 
 
 ---
@@ -65,10 +65,10 @@ Two long-running daemons watch for approved requests from `coact-api` via **Grap
 
 | Daemon script | Click command | Handles |
 |---|---|---|
-| `coact-userregistration-daemon.sh` | `sdf_click.py coactd userregistration` | `UserAccount` requests |
+| Kubernetes Deployment `coact-user-registration` (coact/deploy) | `sdf_click.py coactd userregistration` | `UserAccount`, `UserChangeShell` requests |
 | `coact-reporegistration-daemon.sh` | `sdf_click.py coactd reporegistration` | `RepoAccount`, `RepoMembership`, `RepoComputeAllocation` requests |
 
-The daemons connect to `coact-api` using a service account password fetched from **Vault** (see the `vault kv get ...` target in the `Makefile`, which writes to `etc/.secrets/password`). Each daemon script runs its command in a restart loop so it recovers automatically from failures.
+The daemons connect to `coact-api` using a service account password fetched from **Vault** (see the `vault kv get ...` target in the `Makefile`, which writes to `etc/.secrets/password`). Each daemon script runs its command in a restart loop so it recovers automatically from failures. The containerized user-registration daemon takes the password from `COACT_PASSWORD`, reconnects in-process when the websocket drops (`--max-reconnects`), and runs the playbooks' `localhost` plays on sdfmgr002 over SSH (`COACT_ANSIBLE_TARGET`).
 
 ---
 
@@ -148,7 +148,6 @@ Note that `add_user.yaml` is invoked multiple times with different tags — each
 | `sdf-cli/requirements.txt` | Declares `ansible-runner==2.3.1` as a Python dependency |
 | `sdf-cli/modules/coactd.py` | click-based daemon commands; `AnsibleRunner`, `UserRegistration`, `RepoRegistration` classes |
 | `sdf-cli/modules/utils/graphql.py` | GraphQL HTTP + WebSocket subscription client |
-| `sdf-cli/coact-userregistration-daemon.sh` | Daemon restart loop for user registration |
 | `sdf-cli/coact-reporegistration-daemon.sh` | Daemon restart loop for repo registration |
 | `sdf-ansible/coact/` | Playbooks that form the integration surface with sdf-cli |
 | `sdf-ansible/roles/ansible-role-add-user/` | Role handling full user provisioning |

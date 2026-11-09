@@ -6,7 +6,9 @@ to the Coact GraphQL service.
 """
 
 from os import getenv
+import asyncio
 import logging
+import warnings
 import base64
 from timeit import default_timer as timer
 
@@ -130,15 +132,58 @@ class GraphQlSubscriber(GraphQlClient):
                 logging.getLogger(name).setLevel(logging.WARNING)
         return self.subscription_client
 
-    def subscribe(self, query, var={}):
-        for item in self.subscription_client.subscribe(gql(query), variable_values=var):
-            optype = item.get("operationType", None)
-            if optype not in ['delete']:
-                this = item.get('requests', {})
-                req = this.get('theRequest', {})
-                if req:
-                    req_id = req.get('Id', None)
-                    reqtype = req.get('reqtype', None)
-                    approval = req.get("approvalstatus", None)
-                    yield req_id, optype, reqtype, approval, req
-        return None, None, None, None, {}
+    def subscribe(self, query, var={}, should_stop=lambda: False, poll_interval=1.0):
+        """Yield (id, operationType, reqtype, approvalstatus, request) for each request event.
+
+        Drives gql's async subscription itself instead of the sync
+        Client.subscribe(), so that while idle it wakes every poll_interval
+        seconds and returns once should_stop() is true.  A stop never
+        interrupts an event that has already arrived: it is yielded and handled
+        first.  That lets a SIGTERM handler just set a flag, rather than raise
+        out of the middle of the event loop and drop an event the server had
+        already taken off its queue.
+        """
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="There is no current event loop")
+                loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        agen = self.subscription_client.subscribe_async(gql(query), variable_values=var)
+        task = None
+        try:
+            while True:
+                if should_stop():
+                    return
+                task = asyncio.ensure_future(agen.__anext__(), loop=loop)
+                while True:
+                    done, _ = loop.run_until_complete(asyncio.wait({task}, timeout=poll_interval))
+                    if done or should_stop():
+                        break
+                if not done:
+                    return  # stopping while idle: nothing has been received
+                try:
+                    item = task.result()
+                except StopAsyncIteration:
+                    return
+                optype = item.get("operationType", None)
+                if optype not in ['delete']:
+                    this = item.get('requests', {})
+                    req = this.get('theRequest', {})
+                    if req:
+                        req_id = req.get('Id', None)
+                        reqtype = req.get('reqtype', None)
+                        approval = req.get("approvalstatus", None)
+                        yield req_id, optype, reqtype, approval, req
+        finally:
+            # Close the websocket whether we stopped, failed, or the caller
+            # broke out of the loop.
+            if task is not None and not task.done():
+                task.cancel()
+                loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+            try:
+                loop.run_until_complete(agen.aclose())
+            except Exception as e:
+                logger.debug(f"closing subscription: {e!r}")

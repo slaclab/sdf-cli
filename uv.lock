@@ -894,6 +894,7 @@ name = "sdf-cli"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "ansible-core" },
     { name = "ansible-runner" },
     { name = "click" },
     { name = "gql", extra = ["all"] },
@@ -913,6 +914,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "ansible-core", specifier = ">=2.21,<2.22" },
     { name = "ansible-lint", marker = "extra == 'test'", specifier = ">=26.8.0" },
     { name = "ansible-runner", specifier = "==2.3.1" },
     { name = "click", specifier = ">=8.0.0" },
