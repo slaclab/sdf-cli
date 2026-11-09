@@ -10,7 +10,11 @@ The Coactd commands handle:
 - Request subscription streaming
 """
 
+import asyncio
 import json
+import os
+import signal
+import time
 from loguru import logger
 from enum import Enum
 from typing import Any, Optional, List
@@ -21,6 +25,8 @@ from pathlib import Path
 import click
 import pendulum as pdl
 from gql import gql
+from gql.transport.exceptions import TransportError
+from websockets.exceptions import WebSocketException
 
 import jinja2
 import smtplib
@@ -40,7 +46,32 @@ CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
 COACT_ANSIBLE_RUNNER_PATH = './ansible-runner/'
 
 
+def ansible_runner_settings() -> dict:
+    """Where ansible-runner reads its project and writes its artifacts.
+
+    Read from the environment on every call.  Unset, everything is as on bare
+    metal: the project and the artifacts both live under ./ansible-runner/.
+    The container image is read-only, so its Deployment points
+    COACT_ANSIBLE_ARTIFACT_DIR at an emptyDir and caps how many artifact
+    directories are kept with COACT_ANSIBLE_ROTATE_ARTIFACTS.
+    """
+    return {
+        'private_data_dir': os.environ.get('COACT_ANSIBLE_RUNNER_PATH') or COACT_ANSIBLE_RUNNER_PATH,
+        'artifact_dir': os.environ.get('COACT_ANSIBLE_ARTIFACT_DIR') or None,
+        'rotate_artifacts': int(os.environ.get('COACT_ANSIBLE_ROTATE_ARTIFACTS') or 0),
+    }
+
+
 # Order of class inheritance important
+class StopDaemon(KeyboardInterrupt):
+    """Raised by the SIGTERM handler to leave an idle subscription.
+
+    A KeyboardInterrupt so gql's sync subscribe() still closes the websocket
+    on its way out, and so run_forever does not mistake it for a dropped
+    connection.
+    """
+
+
 class RequestStatus(str, Enum):
     APPROVED = 'Approved'
     NOT_ACTED_ON = 'NotActedOn'
@@ -53,32 +84,43 @@ class AnsibleRunner:
     """Mixin class for running Ansible playbooks."""
     # Using loguru logger
     ident = None
+    # The host the playbooks' "localhost" plays run on (sdf-ansible's
+    # coact_ansible_target).  None keeps them on localhost, as on bare metal.
+    ansible_target: Optional[str] = None
 
     def run_playbook(
         self,
         playbook: str,
-        private_data_dir: str = COACT_ANSIBLE_RUNNER_PATH,
+        private_data_dir: Optional[str] = None,
         tags: str = 'all',
         dry_run: bool = False,
         **kwargs
     ) -> Optional[ansible_runner.runner.Runner]:
         name = Path(playbook).name
+        # The handler's own --dry-run always wins, so a caller that forgets to
+        # pass dry_run cannot run a playbook during a dry run.
+        dry_run = dry_run or getattr(self, 'dry_run', False)
+        if self.ansible_target:
+            kwargs['coact_ansible_target'] = self.ansible_target
+        settings = ansible_runner_settings()
+        if private_data_dir is not None:
+            settings['private_data_dir'] = private_data_dir
         if not dry_run:
             r = ansible_runner.run(
-                private_data_dir=private_data_dir,
                 playbook=playbook,
                 tags=tags,
                 extravars=kwargs,
                 suppress_env_files=True,
                 ident=f'{self.ident}_{name}:{tags}',
-                cancel_callback=lambda: None
+                cancel_callback=lambda: None,
+                **settings
             )
             self.logger.debug(r.stats)
             if not r.rc == 0:
                 raise Exception("AnsibleRunner failed")
             return r
         else:
-            self.logger.warning(f"not running playbook {playbook}")
+            self.logger.warning(f"dry run: not running playbook {playbook} tags={tags} extravars={kwargs}")
             return None
 
     def playbook_events(self, runner: ansible_runner.runner.Runner) -> dict:
@@ -154,53 +196,136 @@ class Registration(GraphQlSubscriber, AnsibleRunner):
         }
     """
 
-    def __init__(self, username: str, password_file: str, client_name: str, dry_run: bool = False, grouper_password_file: str = None):
+    # Errors that mean the subscription itself died, as opposed to a request
+    # failing.  run_forever reconnects on these.
+    CONNECTION_ERRORS = (TransportError, WebSocketException, OSError, asyncio.TimeoutError)
+
+    def __init__(self, username: str, client_name: str, password: str = None, password_file: str = None,
+                 dry_run: bool = False, grouper_password_file: str = None, ansible_target: str = None):
         self.logger = logger
         self.username = username
+        self.password = password
         self.password_file = password_file
         self.client_name = client_name
         self.dry_run = dry_run
         self.grouper_password_file = grouper_password_file
+        self.ansible_target = ansible_target or None
+        self.stopping = False
+        self.busy = False
+
+    def resolve_password(self) -> str:
+        """The GraphQL password: --password / COACT_PASSWORD, else --password-file."""
+        password = self.password if self.password else self.get_password(self.password_file)
+        return self._normalize_password(password)
+
+    def handle_sigterm(self, signum, frame):
+        """Stop taking new requests, but let the one in progress finish.
+
+        A pod deleted in the middle of add_user.yaml would otherwise leave a
+        half-provisioned user whose request is still Approved.  While idle there
+        is nothing to finish, so exit straight away.
+        """
+        self.stopping = True
+        if self.busy:
+            self.logger.warning(f"received signal {signum}: finishing request {self.ident} before exiting")
+            return
+        self.logger.warning(f"received signal {signum} while idle: exiting")
+        raise StopDaemon()
+
+    def run_forever(self, max_reconnects: int = 0, reconnect_delay: float = 5.0, stable_after: float = 60.0) -> None:
+        """run(), reconnecting when the websocket drops.
+
+        The sync gql subscribe() only runs its event loop while waiting for the
+        next event, so a long playbook run cannot answer the server's websocket
+        pings and the connection is usually gone by the time it finishes.  That
+        is expected, so reconnect (as the bare-metal `while sleep 5` loop did)
+        rather than exit and walk the kubelet into CrashLoopBackOff.  Only
+        max_reconnects consecutive failures (connections that die within
+        stable_after seconds) exit the process.  max_reconnects=0 exits on the
+        first drop.
+        """
+        failures = 0
+        while True:
+            started = time.monotonic()
+            try:
+                self.run()
+                reason = "subscription ended"
+            except self.CONNECTION_ERRORS as e:
+                reason = f"{type(e).__name__}: {e}"
+            if self.stopping:
+                self.logger.info("stopped")
+                return
+            if time.monotonic() - started >= stable_after:
+                failures = 0
+            failures += 1
+            if failures > max_reconnects:
+                self.logger.error(f"subscription lost ({reason}); giving up after {failures} consecutive attempt(s)")
+                raise SystemExit(1)
+            self.logger.warning(f"subscription lost ({reason}); reconnecting in {reconnect_delay}s "
+                                f"(attempt {failures} of {max_reconnects})")
+            time.sleep(reconnect_delay)
 
     def run(self):
         """Main entry point - connect and process subscription requests."""
+        password = self.resolve_password()
         # Connect to GraphQL
         self.back_channel = self.connect_graph_ql(
             username=self.username,
-            password_file=self.password_file,
+            password=password,
             timeout=60
         )
         sub = self.connect_subscriber(
             username=self.username,
-            password=self.get_password(self.password_file)
+            password=password
         )
+        if self.dry_run:
+            self.logger.warning("dry run: no playbooks run, no coact records written, and requests are left as they are")
+        if self.ansible_target:
+            self.logger.info(f"ansible plays target {self.ansible_target}")
 
         for req_id, op_type, req_type, approval, req in self.subscribe(
             self.SUBSCRIPTION_STR,
             var={"clientName": self.client_name}
         ):
-            s = timer()
-            self.logger.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
-            self.ident = req_id  # set the request id for ansible runner
-
+            self.busy = True
             try:
-                if req_type in self.request_types:
-                    result = self.do(req_id, op_type, req_type, approval, req, dry_run=self.dry_run)
-                    if result:
+                self.process(req_id, op_type, req_type, approval, req)
+            finally:
+                self.busy = False
+            if self.stopping:
+                self.logger.info("stopping after the current request")
+                break
+
+    def process(self, req_id, op_type, req_type, approval, req):
+        """Do one request and mark it Complete or Incomplete (never in a dry run)."""
+        s = timer()
+        self.logger.info(f"Processing {req_id}: {op_type} {req_type} - {approval}: {req}")
+        self.ident = req_id  # set the request id for ansible runner
+
+        try:
+            if req_type in self.request_types:
+                result = self.do(req_id, op_type, req_type, approval, req, dry_run=self.dry_run)
+                if result:
+                    if self.dry_run:
+                        self.logger.warning(f"dry run: would mark request {req_id} complete")
+                    else:
                         self.logger.info(f"Marking request {req_id} complete")
                         self.markCompleteRequest(req, f'Request {self.ident} completed')
-                        e = timer()
-                        duration = e - s
-                        self.logger.info(f"Done processing {req_id} in {duration:,.02f}s")
-                    else:
-                        self.logger.warning(f"Unknown return for {req_id}, type {op_type}")
+                    e = timer()
+                    duration = e - s
+                    self.logger.info(f"Done processing {req_id} in {duration:,.02f}s")
                 else:
-                    self.logger.info(f"Ignoring {req_id}")
+                    self.logger.warning(f"Unknown return for {req_id}, type {op_type}")
+            else:
+                self.logger.info(f"Ignoring {req_id}")
 
-            except Exception as e:
+        except Exception as e:
+            end_time = timer()
+            duration = end_time - s
+            if self.dry_run:
+                self.logger.exception(f"dry run: would mark request {req_id} incomplete: {e} in {duration:,.02f}s")
+            else:
                 self.markIncompleteRequest(req, f'Request {self.ident} did not complete: {e}')
-                end_time = timer()
-                duration = end_time - s
                 self.logger.exception(f"Error processing {req_id}: {e} in {duration:,.02f}s")
 
     def do(self, req_id: str, op_type: Any, req_type: Any, approval: str, req: dict, dry_run: bool) -> bool:
@@ -267,10 +392,18 @@ def registration_options(f):
         help='Basic auth username for graphql service'
     )(f)
     f = click.option(
+        '--password',
+        envvar='COACT_PASSWORD',
+        default=None,
+        show_envvar=True,
+        help='Basic auth password for graphql service. Prefer the COACT_PASSWORD environment variable. '
+             'Exactly one of this and --password-file is required'
+    )(f)
+    f = click.option(
         '--password-file',
-        required=True,
+        default=None,
         type=click.Path(exists=True),
-        help='Basic auth password for graphql service'
+        help='File holding the basic auth password for graphql service (bare metal)'
     )(f)
     f = click.option(
         '--client-name',
@@ -281,9 +414,40 @@ def registration_options(f):
         '--dry-run',
         is_flag=True,
         default=False,
-        help='Do not run any ansible playbooks'
+        help='Do not run any ansible playbooks or mark any requests Complete/Incomplete (userregistration also writes no coact records)'
+    )(f)
+    f = click.option(
+        '--ansible-target',
+        envvar='COACT_ANSIBLE_TARGET',
+        default=None,
+        show_envvar=True,
+        help="Host the playbooks' localhost plays run on over SSH (default: localhost)"
+    )(f)
+    f = click.option(
+        '--max-reconnects',
+        envvar='COACT_MAX_RECONNECTS',
+        default=0,
+        type=click.IntRange(min=0),
+        show_envvar=True,
+        show_default=True,
+        help='Reconnect this many consecutive times when the subscription drops before exiting'
     )(f)
     return f
+
+
+def check_password_options(password, password_file):
+    """Exactly one of --password (COACT_PASSWORD) and --password-file."""
+    if bool(password) == bool(password_file):
+        raise click.UsageError('give exactly one of --password (or COACT_PASSWORD) and --password-file')
+
+
+def run_registration(handler: Registration, max_reconnects: int) -> None:
+    """Run a registration handler until it is stopped, finishing the current request on SIGTERM."""
+    signal.signal(signal.SIGTERM, handler.handle_sigterm)
+    try:
+        handler.run_forever(max_reconnects=max_reconnects)
+    except StopDaemon:
+        logger.info("stopped")
 
 
 # ============================================================================
@@ -342,6 +506,10 @@ class UserRegistration(Registration):
 
     def do_change_shell(self, user: str, shell: str, playbook: str = "set_user_shell.yaml") -> bool:
         self.logger.info(f"Changing shell for user {user} using {playbook}")
+        if self.dry_run:
+            self.logger.warning(f"dry run: would run {playbook} with user={user} user_login_shell={shell} "
+                                f"on {self.ansible_target or 'localhost'}, then set the shell in coact")
+            return True
         runner = self.run_playbook(playbook, user=user, user_login_shell=shell)
         user_id = self.back_channel.execute(
             self.USER_CHANGE_SHELL_GQL,
@@ -351,6 +519,12 @@ class UserRegistration(Registration):
 
     def do_new_user(self, user: str, eppn: str, facility: str, playbook: str = "coact/add_user.yaml") -> bool:
         self.logger.info(f"Creating user {user} at facility {facility} using {playbook}")
+        if self.dry_run:
+            # The ldap facts the coact records are built from only exist after a real run.
+            self.logger.warning(f"dry run: would run {playbook} with user={user} user_facility={facility} "
+                                f"tags ldap,shell,home,sshkey,facility,sssd on {self.ansible_target or 'localhost'}, "
+                                f"then upsert the user, storage and default repo membership in coact")
+            return True
 
         # enable ldap
         runner = self.run_playbook(playbook, user=user, user_facility=facility, tags='ldap')
@@ -420,21 +594,24 @@ class UserRegistration(Registration):
 @common_options
 @registration_options
 @click.pass_context
-def user_registration(ctx, verbose, username, password_file, client_name, dry_run):
+def user_registration(ctx, verbose, username, password, password_file, client_name, dry_run, ansible_target, max_reconnects):
     """Workflow for user creation and shell changes.
 
     Handles UserAccount and UserChangeShell request types.
     """
     configure_logging_from_verbose(verbose)
     ctx.obj['verbose'] = verbose
+    check_password_options(password, password_file)
 
     handler = UserRegistration(
         username=username,
+        password=password,
         password_file=password_file,
         client_name=client_name or 'sdf-bot-UserRegistration',
-        dry_run=dry_run
+        dry_run=dry_run,
+        ansible_target=ansible_target
     )
-    handler.run()
+    run_registration(handler, max_reconnects)
 
 
 # ============================================================================
@@ -1192,7 +1369,8 @@ class RepoRegistration(Registration):
     help='Path to file containing the Grouper service account password'
 )
 @click.pass_context
-def repo_registration(ctx, verbose, username, password_file, client_name, dry_run, grouper_password_file):
+def repo_registration(ctx, verbose, username, password, password_file, client_name, dry_run, ansible_target,
+                      max_reconnects, grouper_password_file):
     """Workflow for repository maintenance.
 
     Handles NewRepo, RepoMembership, RepoRemoveUser, RepoChangeComputeRequirement,
@@ -1200,15 +1378,18 @@ def repo_registration(ctx, verbose, username, password_file, client_name, dry_ru
     """
     configure_logging_from_verbose(verbose)
     ctx.obj['verbose'] = verbose
+    check_password_options(password, password_file)
 
     handler = RepoRegistration(
         username=username,
+        password=password,
         password_file=password_file,
         client_name=client_name or 'sdf-bot-RepoRegistration',
         dry_run=dry_run,
-        grouper_password_file=grouper_password_file
+        grouper_password_file=grouper_password_file,
+        ansible_target=ansible_target
     )
-    handler.run()
+    run_registration(handler, max_reconnects)
 
 
 # ============================================================================
