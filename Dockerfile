@@ -1,4 +1,4 @@
-# Container image for the Coact batch daemons
+# Container image for the Coact daemons
 
 # ---------------------------------------------------------------------------
 # Slurm client build
@@ -51,7 +51,7 @@ FROM rockylinux:9
 ARG SLURM_VERSION=25.11.8
 
 LABEL org.opencontainers.image.source=https://github.com/slaclab/sdf-cli
-LABEL org.opencontainers.image.description="Coact batch daemons (slurm job import, facility overage)"
+LABEL org.opencontainers.image.description="Coact daemons (slurm job import, facility overage, user registration)"
 LABEL edu.stanford.slac.slurm.version="${SLURM_VERSION}"
 
 COPY --from=ghcr.io/astral-sh/uv:0.12.12@sha256:73d2665b478d8fa2de1cf105c6841f8e9cb6b09e568fc7700440c09f8fcd7ac4 /uv /uvx /bin/
@@ -71,6 +71,7 @@ RUN dnf -y install epel-release \
       readline \
       openldap-clients \
       krb5-workstation \
+      openssh-clients \
       python3.12 \
       python3.12-pip \
       tini \
@@ -145,7 +146,9 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY munge-sidecar.sh     /usr/local/bin/munge-sidecar.sh
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/bin/munge-sidecar.sh /app/import-jobs.sh
 
-# tini forwards signals and reaps children; the entrypoint execs the CronJob
-# command so the container exits with the job's own exit code.
+# tini forwards signals and reaps children; the entrypoint execs the
+# container's command (a CronJob's job, or the long-running registration
+# daemon) so the container exits with that command's own exit code and the
+# command receives SIGTERM directly.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python3", "/app/sdf_click.py", "--help"]
